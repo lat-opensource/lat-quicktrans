@@ -2048,7 +2048,11 @@ static void ft_emit_store_xmm_env(uint32_t **out, int xmm)
     int env_reg = ft_scratch_avoid3(-1, -1, -1);
     int offset_reg = ft_scratch_avoid3(env_reg, -1, -1);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    env_reg = la_s8;
+#else
     ft_emit_cpu_env_ptr(out, env_reg);
+#endif
     if (ft_offset_fits_imm12(offset)) {
         FT_LA_VST_EMIT(out, ft_xmm(xmm), env_reg, offset);
         return;
@@ -2064,7 +2068,11 @@ static void ft_emit_load_xmm_env(uint32_t **out, int xmm)
     int env_reg = ft_scratch_avoid3(-1, -1, -1);
     int offset_reg = ft_scratch_avoid3(env_reg, -1, -1);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    env_reg = la_s8;
+#else
     ft_emit_cpu_env_ptr(out, env_reg);
+#endif
     if (ft_offset_fits_imm12(offset)) {
         FT_LA_VLD_EMIT(out, ft_xmm(xmm), env_reg, offset);
         return;
@@ -2268,6 +2276,14 @@ static void ft_emit_default_helper_epilogue(uint32_t **out,
 static void ft_emit_xmm_env_addr(uint32_t **out, int dst, int xmm)
 {
     int offset = lsenv_offset_of_xmm(lsenv, xmm);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (ft_offset_fits_imm12(offset)) {
+        FT_LA_ADDI_D_EMIT(out, dst, la_s8, offset);
+    } else {
+        ft_emit_li64(out, dst, (uint64_t)(int64_t)offset);
+        FT_LA_ADD_D_EMIT(out, dst, la_s8, dst);
+    }
+#else
 #ifdef CONFIG_SOFTMMU
     /*
      * System-mode helper arguments occupy a0-a4.  Keep their already-built
@@ -2281,6 +2297,7 @@ static void ft_emit_xmm_env_addr(uint32_t **out, int dst, int xmm)
     ft_emit_cpu_env_ptr(out, env_reg);
     ft_emit_li64(out, dst, (uint64_t)(int64_t)offset);
     FT_LA_ADD_D_EMIT(out, dst, env_reg, dst);
+#endif
 }
 
 static int ft_emit_call_xmm_helper3(uint32_t **out, void *func,

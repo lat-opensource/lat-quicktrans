@@ -205,7 +205,12 @@ static void ft_emit_store_env(uint32_t **out, int src, int offset,
     int env_reg = ft_scratch_avoid3(src, -1, -1);
     int offset_reg = ft_scratch_avoid3(src, env_reg, -1);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* The LATU ABI keeps CPUX86State in s8 throughout translated code. */
+    env_reg = la_s8;
+#else
     ft_emit_cpu_env_ptr(out, env_reg);
+#endif
     if (ft_offset_fits_imm12(offset)) {
         ft_emit_raw(out, ft_gpr3_imm12(store_op, src, env_reg, offset));
         return;
@@ -222,7 +227,12 @@ static void ft_emit_load_env(uint32_t **out, int dst, int offset,
     int env_reg = ft_scratch_avoid3(dst, -1, -1);
     int offset_reg = ft_scratch_avoid3(dst, env_reg, -1);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* The LATU ABI keeps CPUX86State in s8 throughout translated code. */
+    env_reg = la_s8;
+#else
     ft_emit_cpu_env_ptr(out, env_reg);
+#endif
     if (ft_offset_fits_imm12(offset)) {
         ft_emit_raw(out, ft_gpr3_imm12(load_op, dst, env_reg, offset));
         return;
