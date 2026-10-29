@@ -4133,6 +4133,8 @@ static bool ft_emit_aeskeygen_inline(uint32_t **out,
 }
 #endif
 
+#include "emit-vpaes-entry.inc.c"
+
 static int ft_emit_aes_round_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -4152,6 +4154,12 @@ static int ft_emit_aes_round_template(const FastTemplateFields *fields, Translat
     if (!ft_aes_round_helper(fields->id, &func)) {
         return 0;
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
+    !defined(CONFIG_LATX_AVX_OPT)
+    if (option_vpaes) {
+        return ft_emit_latu_vpaes(&out, fields, pc, dst) ? out - code : 0;
+    }
+#endif
 #ifndef QUICKTRANS_LATU
     unsigned int mask = fields->id == dt_X86_INS_AESDEC ? 1 :
                         fields->id == dt_X86_INS_AESDECLAST ? 2 :
@@ -4218,6 +4226,12 @@ static int ft_emit_aesimc_template(const FastTemplateFields *fields, Translation
         fields->id != dt_X86_INS_AESIMC || dst >= XMM_NUM) {
         return 0;
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
+    !defined(CONFIG_LATX_AVX_OPT)
+    if (option_vpaes) {
+        return ft_emit_latu_vpaes(&out, fields, pc, dst) ? out - code : 0;
+    }
+#endif
 #ifndef QUICKTRANS_LATU
     if (option_aes_opt & 0x10) {
         return ft_emit_aesimc_inline(&out, fields, pc, dst) ? out - code : 0;
@@ -4242,6 +4256,12 @@ static int ft_emit_aeskeygen_template(const FastTemplateFields *fields, Translat
         fields->imm < 0 || fields->imm > 0xff) {
         return 0;
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
+    !defined(CONFIG_LATX_AVX_OPT)
+    if (option_vpaes) {
+        return ft_emit_latu_vpaes(&out, fields, pc, dst) ? out - code : 0;
+    }
+#endif
 #ifndef QUICKTRANS_LATU
     if (option_aes_opt & 0x20) {
         return ft_emit_aeskeygen_inline(&out, fields, pc, dst) ? out - code : 0;

@@ -3291,6 +3291,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         break;
     case FT_X87_FYL2XP1:
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (!option_soft_fpu) {
+            ft_emit_x87_hard_helper(&out,
+                                     (void *)ft_x87_hard_fyl2xp1_checked);
+            break;
+        }
+#endif
         ft_emit_x87_complex_helper(&out, (void *)ft_x87_helper_fyl2xp1,
                                         (void *)helper_fyl2xp1);
         break;
@@ -3485,6 +3492,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         break;
     }
     case FT_X87_FXTRACT:
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (!option_soft_fpu) {
+            ft_emit_x87_hard_helper(&out,
+                                     (void *)ft_x87_hard_fxtract_checked);
+            break;
+        }
+#endif
         ft_emit_x87_complex_helper(&out, (void *)ft_x87_helper_fxtract,
                                         (void *)helper_fxtract);
         break;

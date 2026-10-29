@@ -2385,10 +2385,75 @@ static int ft_emit_call_xmm_helper_imm(uint32_t **out, void *func,
     return *out - start;
 }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+static int ft_emit_latu_pcmp_helper(uint32_t **out,
+                                    const FastTemplateFields *fields,
+                                    target_ulong pc, void *func,
+                                    bool explicit_length, bool index_result)
+{
+    uint32_t *start = *out;
+    int dst = ft_modrm_reg_index(fields);
+    int src = ft_modrm_rm_index(fields);
+    bool memory = fields->modrm_mod != 3;
+    uint32_t ctrl = (uint32_t)fields->imm;
+    int first_gpr = 0;
+
+    if (dst >= XMM_NUM || fields->imm < 0 || fields->imm > 0xff ||
+        (!memory && src >= XMM_NUM)) {
+        return 0;
+    }
+    if (memory) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+            return 0;
+        }
+        /* Complete the guest read before changing the host stack. */
+        FT_LA_VLD_EMIT(out, ft_vscratch, addr,
+                       ft_mem_access_offset(fields, addr));
+        FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, -16);
+        FT_LA_VST_EMIT(out, ft_vscratch, la_sp, 0);
+    }
+    if (explicit_length && fields->rex >= 0 && (fields->rex & 8)) {
+        ctrl |= 1u << 8;
+    }
+    ft_emit_helper_prologue(out);
+    ft_emit_cpu_env_ptr(out, la_a0);
+    ft_emit_xmm_env_addr(out, la_a1, dst);
+    if (memory) {
+        FT_LA_OR_EMIT(out, la_a2, la_sp, la_zero);
+    } else {
+        ft_emit_xmm_env_addr(out, la_a2, src);
+    }
+    ft_emit_li64(out, la_a3, ctrl);
+    ft_emit_host_call(out, func, 0x7);
+
+    /* Only the index variants write a GPR (ECX).  All other preserved
+     * mappings retain their input values across the C helper call. */
+    while (first_gpr < 8 && ft_gpr(first_gpr) == la_s0 + first_gpr) {
+        ++first_gpr;
+    }
+    ft_emit_helper_epilogue_gprs(out, first_gpr);
+    if (index_result && rcx_index < first_gpr) {
+        ft_emit_load_env(out, ft_gpr(rcx_index),
+                         lsenv_offset_of_gpr(lsenv, rcx_index),
+                         FT_LA_OPCODE_LD_D);
+    }
+    if (memory) {
+        FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
+    }
+    return *out - start;
+}
+#endif
+
 static int ft_emit_call_pcmpistri_helper(uint32_t **out,
                                          const FastTemplateFields *fields,
                                          target_ulong pc)
 {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return ft_emit_latu_pcmp_helper(out, fields, pc,
+                                    (void *)helper_pcmpistri_xmm,
+                                    false, true);
+#else
     uint32_t *start = *out;
     bool static_context;
     int dst = ft_modrm_reg_index(fields);
@@ -2432,12 +2497,18 @@ static int ft_emit_call_pcmpistri_helper(uint32_t **out,
         FT_LA_VOR_V_EMIT(out, ft_xmm(temp_xmm), ft_vscratch, ft_vscratch);
     }
     return *out - start;
+#endif
 }
 
 static int ft_emit_call_pcmpistrm_helper(uint32_t **out,
                                          const FastTemplateFields *fields,
                                          target_ulong pc)
 {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return ft_emit_latu_pcmp_helper(out, fields, pc,
+                                    (void *)helper_pcmpistrm_xmm,
+                                    false, false);
+#else
     uint32_t *start = *out;
     bool static_context;
     int dst = ft_modrm_reg_index(fields);
@@ -2484,12 +2555,18 @@ static int ft_emit_call_pcmpistrm_helper(uint32_t **out,
         FT_LA_VOR_V_EMIT(out, ft_xmm(temp_xmm), ft_vscratch, ft_vscratch);
     }
     return *out - start;
+#endif
 }
 
 static int ft_emit_call_pcmpestrm_helper(uint32_t **out,
                                          const FastTemplateFields *fields,
                                          target_ulong pc)
 {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return ft_emit_latu_pcmp_helper(out, fields, pc,
+                                    (void *)helper_pcmpestrm_xmm,
+                                    true, false);
+#else
     uint32_t *start = *out;
     bool static_context;
     uint32_t ctrl = (uint32_t)fields->imm;
@@ -2540,12 +2617,18 @@ static int ft_emit_call_pcmpestrm_helper(uint32_t **out,
         FT_LA_VOR_V_EMIT(out, ft_xmm(temp_xmm), ft_vscratch, ft_vscratch);
     }
     return *out - start;
+#endif
 }
 
 static int ft_emit_call_pcmpestri_helper(uint32_t **out,
                                          const FastTemplateFields *fields,
                                          target_ulong pc)
 {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return ft_emit_latu_pcmp_helper(out, fields, pc,
+                                    (void *)helper_pcmpestri_xmm,
+                                    true, true);
+#else
     uint32_t *start = *out;
     bool static_context;
     uint32_t ctrl = (uint32_t)fields->imm;
@@ -2593,4 +2676,5 @@ static int ft_emit_call_pcmpestri_helper(uint32_t **out,
         FT_LA_VOR_V_EMIT(out, ft_xmm(temp_xmm), ft_vscratch, ft_vscratch);
     }
     return *out - start;
+#endif
 }

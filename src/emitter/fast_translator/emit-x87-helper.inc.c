@@ -902,3 +902,23 @@ static void ft_x87_hard_fyl2x(CPUX86State *env)
                        log2(ft_x87_hard_get_st(env, 0)));
     ft_x87_hard_pop(env);
 }
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Keep the existing whole-stack representation and checked arithmetic.
+ * Combining the boundary removes generated call/argument sequences only. */
+static void ft_x87_hard_fxtract_checked(CPUX86State *env)
+{
+    ft_convert_fpregs_64_to_x80(env);
+    update_fp_status(env);
+    ft_x87_helper_fxtract(env);
+    ft_convert_fpregs_x80_to_64(env);
+}
+
+static void ft_x87_hard_fyl2xp1_checked(CPUX86State *env)
+{
+    ft_convert_fpregs_64_to_x80(env);
+    update_fp_status(env);
+    ft_x87_helper_fyl2xp1(env);
+    ft_convert_fpregs_x80_to_64(env);
+}
+#endif
