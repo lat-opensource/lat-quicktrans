@@ -1334,6 +1334,7 @@ static const FastTemplateRuntimeInfo ft_template_runtime_table[FT_KIND_COUNT] = 
     [FT_HELPER_RETFQ] = { .terminal_exit = true },
     [FT_LDS] = { .terminal_exit = true },
     [FT_LES] = { .terminal_exit = true },
+    [FT_LSS] = { .terminal_exit = true },
     [FT_HELPER_UD0] = { .terminal_exit = true },
     [FT_HELPER_UD1] = { .terminal_exit = true },
     [FT_HELPER_UD2] = { .terminal_exit = true },
@@ -3149,6 +3150,12 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
     if (max_insns > TCG_MAX_INSNS) {
         max_insns = TCG_MAX_INSNS;
     }
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    /* An SS load inhibits interrupts only through the next instruction. */
+    if (tb->flags & HF_INHIBIT_IRQ_MASK) {
+        max_insns = 1;
+    }
+#endif
     if (!tu_meta) {
         return false;
     }
@@ -3590,6 +3597,12 @@ static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
     if (max_insns > TCG_MAX_INSNS) {
         max_insns = TCG_MAX_INSNS;
     }
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    /* An SS load inhibits interrupts only through the next instruction. */
+    if (tb->flags & HF_INHIBIT_IRQ_MASK) {
+        max_insns = 1;
+    }
+#endif
 
     for (;;) {
         uint8_t inst_cache[15];

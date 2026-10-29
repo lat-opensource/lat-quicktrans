@@ -43,8 +43,7 @@ static bool ft_emit_load_rm64(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
 
         if (!ft_emit_guest_addr(out, la_t1, target)) {
@@ -91,8 +90,7 @@ static bool ft_emit_load_rm16(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
 
         if (!ft_emit_guest_addr(out, la_t1, target)) {
@@ -137,8 +135,7 @@ static bool ft_emit_load_rm32(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
 
         if (!ft_emit_guest_addr(out, la_t1, target)) {
@@ -191,8 +188,7 @@ static bool ft_emit_load_rm8(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
 
         if (!ft_emit_guest_addr(out, la_t0, target)) {
@@ -231,8 +227,7 @@ static bool ft_emit_store_rm64(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
         int addr_reg = src_reg == la_t1 ? la_t3 : la_t1;
         int tmp_reg = ft_store_scratch_reg(src_reg, addr_reg);
@@ -287,8 +282,7 @@ static bool ft_emit_store_rm32(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
         int addr_reg = src_reg == la_t1 ? la_t3 : la_t1;
         int tmp_reg = ft_store_scratch_reg(src_reg, addr_reg);
@@ -341,8 +335,7 @@ static bool ft_emit_store_rm16(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
         int addr_reg = src_reg == la_t1 ? la_t3 : la_t1;
         int tmp_reg = ft_store_scratch_reg(src_reg, addr_reg);
@@ -395,8 +388,7 @@ static bool ft_emit_store_rm8(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
         int addr_reg = src_reg == la_t1 ? la_t3 : la_t1;
 

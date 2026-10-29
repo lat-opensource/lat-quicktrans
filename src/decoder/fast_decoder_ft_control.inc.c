@@ -694,6 +694,8 @@ static inline FastDecoderFTMatch fd_ft_try_control(FDState *s,
     if (!two_byte && opcode0 == 0xc9) {
         fd_ft_init_fields(&decoded->fields, FT_LEAVE, s, address,
                           opcode0, 0, dt_X86_INS_LEAVE);
+        decoded->fields.alu_width = s->prefix[2] == dt_X86_PREFIX_OPSIZE ?
+            16 : s->mode ? 64 : 32;
         return fd_ft_finish_match(decoded, s, FT_LEAVE, false);
     }
 

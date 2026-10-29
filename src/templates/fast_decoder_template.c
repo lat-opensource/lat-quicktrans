@@ -54,6 +54,13 @@ enum {
 };
 
 const FastTemplateDesc fast_templates[FT_KIND_COUNT] = {
+    /* Directly decoded legacy far loads still need their runtime kind. */
+    [FT_LDS] = { .id = dt_X86_INS_LDS, .kind = FT_LDS,
+                 .meta_flags = FT_TM_NO_EXTRA_CONSTRAINTS },
+    [FT_LES] = { .id = dt_X86_INS_LES, .kind = FT_LES,
+                 .meta_flags = FT_TM_NO_EXTRA_CONSTRAINTS },
+    [FT_LSS] = { .id = dt_X86_INS_LSS, .kind = FT_LSS,
+                 .meta_flags = FT_TM_NO_EXTRA_CONSTRAINTS },
     [FT_XOR_RM_GPR_ZERO] =
         { 2, 0, 0, 0x31, 0x00, 2, { 0x31, 0xc0 }, { 0xff, 0xff },
           -1, 0xc0, -1, 0, -1, 0, dt_X86_INS_XOR,

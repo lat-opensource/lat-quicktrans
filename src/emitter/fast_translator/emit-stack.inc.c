@@ -389,6 +389,16 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
         break;
     }
     case FT_LEAVE:
+        if (fields->alu_width == 32) {
+            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(rsp_index),
+                                  ft_gpr(rbp_index), 31, 0);
+            FT_LA_LD_WU_EMIT(&out, ft_gpr(rbp_index), ft_gpr(rsp_index), 0);
+            FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index),
+                              ft_gpr(rsp_index), 4);
+            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(rsp_index),
+                                  ft_gpr(rsp_index), 31, 0);
+            break;
+        }
         if (fields->prefix2 == dt_X86_PREFIX_OPSIZE) {
             FT_LA_OR_EMIT(&out, ft_gpr(rsp_index), ft_gpr(rbp_index),
                           la_zero);

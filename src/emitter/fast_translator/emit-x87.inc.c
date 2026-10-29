@@ -897,7 +897,9 @@ static int ft_emit_xsave_restore_helper(uint32_t **out,
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
     ft_emit_host_stack_end(out);
     ft_emit_helper_epilogue(out);
-    if (fields->kind == FT_HELPER_XRSTOR && option_soft_fpu) {
+    /* Pure soft-FPU mode keeps x87 state in env. Enabling LBT register
+     * mapping here would also remap registers used by native C code. */
+    if (fields->kind == FT_HELPER_XRSTOR && option_soft_fpu == 2) {
         if (option_soft_fpu == 2) {
             for (int i = 0; i < 8; i++) {
                 ft_emit_load_env(out, ft_mmx(i),

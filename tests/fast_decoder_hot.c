@@ -35,6 +35,27 @@ static FastDecodedFT decode32(const uint8_t *code, size_t size, uint64_t pc,
     return decoded;
 }
 
+/* The absence of 0x67 does not imply 64-bit addressing in an ELF32 TB. */
+static void test_default_32bit_address_size(void)
+{
+    static const uint8_t absolute_store[] = {
+        0xc7, 0x05, 0x00, 0x00, 0x08, 0x60, 0x78, 0x56, 0x34, 0x12
+    };
+    FastDecodedFT decoded;
+    int matched;
+
+    decoded = decode32(absolute_store, sizeof(absolute_store),
+                       0x61000005, &matched);
+    CHECK(matched, "ELF32 absolute MOV must decode");
+    CHECK(decoded.fields.addr32, "ELF32 default address size must be 32");
+    CHECK(decoded.fields.disp == 0x60080000,
+          "ELF32 absolute MOV displacement changed");
+    decoded = decode(absolute_store, sizeof(absolute_store),
+                     0x61000005, &matched);
+    CHECK(matched, "ELF64 RIP-relative MOV must decode");
+    CHECK(!decoded.fields.addr32, "ELF64 default address size must be 64");
+}
+
 static void test_hot_gpr(void)
 {
     static const uint8_t mov64[] = { 0x48, 0x89, 0xd8 };
@@ -316,6 +337,8 @@ static void test_legacy_32bit_instructions(void)
     static const uint8_t pop_rm32[] = { 0x8f, 0x00 };
     static const uint8_t lds[] = { 0xc5, 0x00 };
     static const uint8_t les[] = { 0xc4, 0x00 };
+    static const uint8_t leave32[] = { 0xc9 };
+    static const uint8_t lss[] = { 0x0f, 0xb2, 0x00 };
     static const uint8_t bound[] = { 0x62, 0x00 };
     static const uint8_t fsetpm[] = { 0xdb, 0xe4 };
     static const uint8_t jecxz[] = { 0xe3, 0x00 };
@@ -354,6 +377,8 @@ static void test_legacy_32bit_instructions(void)
         { pop_rm32, sizeof(pop_rm32), FT_POP_RM64, dt_X86_INS_POP, 32 },
         { lds, sizeof(lds), FT_LDS, dt_X86_INS_LDS, 32 },
         { les, sizeof(les), FT_LES, dt_X86_INS_LES, 32 },
+        { lss, sizeof(lss), FT_LSS, dt_X86_INS_LSS, 0 },
+        { leave32, sizeof(leave32), FT_LEAVE, dt_X86_INS_LEAVE, 32 },
         { bound, sizeof(bound), FT_NOP_MULTI, dt_X86_INS_BOUND, 0 },
         { fsetpm, sizeof(fsetpm), FT_NOP_MULTI, dt_X86_INS_FSETPM, 0 },
         { jecxz, sizeof(jecxz), FT_JRCXZ_REL8, dt_X86_INS_JECXZ, 0 },
@@ -375,6 +400,11 @@ static void test_legacy_32bit_instructions(void)
                     decoded.fields.id, cases[i].id);
         }
         CHECK(matched, "legacy 32-bit instruction must decode");
+        if (cases[i].kind == FT_LDS || cases[i].kind == FT_LES ||
+            cases[i].kind == FT_LSS) {
+            CHECK(decoded.tmpl->kind == cases[i].kind,
+                  "far pointer descriptor must preserve terminal metadata");
+        }
         CHECK(decoded.fields.kind == cases[i].kind,
               "legacy 32-bit instruction selected wrong template");
         CHECK(decoded.fields.id == cases[i].id,
@@ -3050,6 +3080,7 @@ static void test_rejects(void)
 
 int main(void)
 {
+    test_default_32bit_address_size();
     test_hot_gpr();
     test_mov_imm8_rex_registers();
     test_mov_moffs();

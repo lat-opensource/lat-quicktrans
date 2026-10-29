@@ -716,8 +716,7 @@ static int ft_emit_movsx8_template(const FastTemplateFields *fields, Translation
             }
             FT_LA_SLLI_D_EMIT(&out, la_t0, la_t0, 56);
             FT_LA_SRAI_D_EMIT(&out, la_t0, la_t0, 56);
-        } else if (fields->segment < 0 &&
-                   fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+        } else if (ft_rip_relative_mem(fields)) {
             target_ulong target = pc + fields->size + fields->disp;
 
             if (!ft_emit_guest_addr(&out, la_t0, target)) {
@@ -742,8 +741,7 @@ static int ft_emit_movsx8_template(const FastTemplateFields *fields, Translation
         }
         FT_LA_SLLI_D_EMIT(&out, ft_gpr(dst), src, 56);
         FT_LA_SRAI_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 56);
-    } else if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    } else if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
 
         if (!ft_emit_guest_addr(&out, la_t0, target)) {
@@ -790,8 +788,7 @@ static int ft_emit_movsx16_template(const FastTemplateFields *fields, Translatio
                 return 0;
             }
             FT_LA_BSTRPICK_D_EMIT(&out, la_t0, ft_gpr(src), 15, 0);
-        } else if (fields->segment < 0 &&
-                   fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+        } else if (ft_rip_relative_mem(fields)) {
             target_ulong target = pc + fields->size + fields->disp;
 
             if (!ft_emit_guest_addr(&out, la_t0, target)) {
@@ -816,8 +813,7 @@ static int ft_emit_movsx16_template(const FastTemplateFields *fields, Translatio
         }
         FT_LA_SLLI_D_EMIT(&out, ft_gpr(dst), ft_gpr(src), 48);
         FT_LA_SRAI_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 48);
-    } else if (fields->segment < 0 &&
-        fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+    } else if (ft_rip_relative_mem(fields)) {
         target_ulong target = pc + fields->size + fields->disp;
 
         if (!ft_emit_guest_addr(&out, la_t0, target)) {
@@ -855,8 +851,7 @@ static int ft_emit_movzx16_template(const FastTemplateFields *fields, Translatio
             return 0;
         }
         FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(src), 15, 0);
-    } else if (fields->modrm_mod == 0 &&
-               fields->modrm_rm == 5) {
+    } else if (ft_rip_relative_mem(fields)) {
         target = pc + fields->size + fields->disp;
         if (!ft_emit_guest_addr(&out, la_t0, target)) {
             return 0;
@@ -910,8 +905,7 @@ static int ft_emit_movzx8_template(const FastTemplateFields *fields, Translation
     {
         int addr;
 
-        if (fields->segment < 0 &&
-            fields->modrm_mod == 0 && fields->modrm_rm == 5) {
+        if (ft_rip_relative_mem(fields)) {
             target_ulong target = pc + fields->size + fields->disp;
 
             if (!ft_emit_guest_addr(&out, la_t0, target)) {

@@ -198,6 +198,10 @@ static void ft_emit_lats_static_call(uint32_t **out, ADDR target,
     }
 }
 
+static int ft_emit_tu_indirect_dispatch_exit(TranslationBlock *tb,
+                                             uint32_t **out, int target_reg,
+                                             int scratch_reg);
+
 static void ft_emit_lats_direct_link_exit(TranslationBlock *tb,
                                           uint32_t **out, int succ_id,
                                           target_ulong target,
@@ -208,6 +212,13 @@ static void ft_emit_lats_direct_link_exit(TranslationBlock *tb,
 
     target = ft_exit_target_pc(target);
     tb->next_pc[succ_id] = target;
+#ifdef CONFIG_SOFTMMU
+    if (tb->flags & HF_INHIBIT_IRQ_MASK) {
+        ft_emit_li64(out, la_a5, target);
+        ft_emit_tu_indirect_dispatch_exit(tb, out, la_a5, la_a6);
+        return;
+    }
+#endif
     if (!option_lazypc) {
         /*
          * t0-t7 hold mapped guest GPRs until the system epilogue saves
@@ -618,6 +629,17 @@ static int ft_emit_tu_indirect_dispatch_exit(TranslationBlock *tb,
     ft_prepare_tu_env_dispatch_exit(tb, 0);
     ft_emit_store_env(out, target_reg, lsenv_offset_of_eip(lsenv),
                       FT_LA_OPCODE_ST_D);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (tb->flags & HF_INHIBIT_IRQ_MASK) {
+        /* Clear after successful execution, before returning to IRQ checks. */
+        ft_emit_load_env(out, la_a7, ft_lsenv_offset_of_hflags(lsenv),
+                         FT_LA_OPCODE_LD_WU);
+        FT_LA_BSTRINS_D_EMIT(out, la_a7, la_zero,
+                             HF_INHIBIT_IRQ_SHIFT, HF_INHIBIT_IRQ_SHIFT);
+        ft_emit_store_env(out, la_a7, ft_lsenv_offset_of_hflags(lsenv),
+                          FT_LA_OPCODE_ST_W);
+    }
+#endif
     ft_emit_jump_epilogue(out, ft_context_switch_ret0_target(), scratch_reg);
     return *out - start;
 }
@@ -635,6 +657,11 @@ static int ft_emit_lats_indirect_lookup_exit(TranslationBlock *tb,
     FastBranchFixup interrupt_fixup;
     bool check_interrupt = option_int_opt == 2 &&
                            (!is_ret || !(tb->flags & HF_CPL_MASK));
+
+    if (tb->flags & HF_INHIBIT_IRQ_MASK) {
+        return ft_emit_tu_indirect_dispatch_exit(tb, out, target_reg,
+                                                 scratch_reg);
+    }
 #else
     (void)is_ret;
 #endif

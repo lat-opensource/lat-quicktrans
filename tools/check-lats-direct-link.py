@@ -32,7 +32,7 @@ def main() -> int:
         return 1
 
     direct_start = source.index("static void ft_emit_lats_direct_link_exit")
-    direct_end = source.index("#endif", direct_start)
+    direct_end = source.index("\n}", direct_start)
     direct = source[direct_start:direct_end]
     for snippet in (
         "if (!option_lazypc)",

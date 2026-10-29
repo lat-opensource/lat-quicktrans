@@ -67,7 +67,7 @@ static inline int ft_modrm_reg_index(const FastTemplateFields *fields)
 
 static inline bool ft_rip_relative_mem(const FastTemplateFields *fields)
 {
-    return fields->segment < 0 &&
+    return !fields->addr32 && fields->segment < 0 &&
            fields->modrm_mod == 0 &&
            fields->modrm_rm == 5;
 }

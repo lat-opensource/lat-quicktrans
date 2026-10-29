@@ -1093,7 +1093,6 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
         }
         break;
     }
-    case FT_LAR:
     case FT_HELPER_BCD:
     {
         void *func;
@@ -1127,6 +1126,7 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
         ft_emit_host_call(&out, (void *)helper_into, 1u << 0);
         ft_emit_helper_epilogue(&out);
         break;
+    case FT_LAR:
     case FT_LSL:
     {
 #ifndef QUICKTRANS_LATU
@@ -1375,8 +1375,9 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
             return 0;
         }
         if (fields->kind == FT_HELPER_XRSTOR) {
-            ft_emit_li64(&out, la_t0, pc + fields->size);
-            ft_emit_tu_indirect_dispatch_exit(tb, &out, la_t0, la_t1);
+            /* The helper restored guest r8/r9 in t0/t1 already. */
+            ft_emit_li64(&out, la_a4, pc + fields->size);
+            ft_emit_tu_indirect_dispatch_exit(tb, &out, la_a4, la_a5);
             return out - code;
         }
         break;
