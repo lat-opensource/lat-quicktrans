@@ -190,8 +190,6 @@ static int ft_emit_x87_state_template(const FastTemplateFields *fields, Translat
         }
 #endif
         ft_emit_load_env(&out, la_t0, fpus_offset, FT_LA_OPCODE_LD_HU);
-        FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 7, 0);
-        FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 15, 15);
 #ifdef QUICKTRANS_LATU
         /* Soft x87 exceptions live in env; FCSR flags belong to SIMD here. */
         if (!option_soft_fpu)
@@ -200,6 +198,15 @@ static int ft_emit_x87_state_template(const FastTemplateFields *fields, Translat
 #endif
         {
             ft_emit_raw(&out, FT_LA_OPCODE_MOVFCSR2GR | la_t1);
+        }
+        FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 7, 0);
+        FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 15, 15);
+#ifdef QUICKTRANS_LATU
+        if (!option_soft_fpu)
+#elif defined(CONFIG_SOFTMMU)
+        if (!(option_soft_fpu && option_soft_fpu_fast))
+#endif
+        {
             FT_LA_BSTRINS_D_EMIT(&out, la_t1, la_zero, 20, 16);
             ft_emit_raw(&out, FT_LA_OPCODE_MOVGR2FCSR | (la_t1 << 5));
         }
@@ -338,7 +345,29 @@ static void ft_emit_x87_fcom_status(uint32_t **out, int lhs, int rhs,
 
     ft_bind_branch_label(&done, *out);
     ft_resolve_branch_fixup(&done_fixup);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* Fixed register sequence: reuse the FCSR value tested for zero flags.
+     * Reserve the whole sequence before writing, including checked emitters. */
+    uint32_t *status_code = *out;
+#ifdef FT_LA_CHECK_SPACE
+    FT_LA_CHECK_SPACE(status_code, 10 * sizeof(*status_code));
+#endif
+    status_code[0] = FT_LA_MOVFCSR2GR(la_t2, 0);
+    status_code[1] = FT_LA_BSTRPICK_D(la_t3, la_t2, FCSR_OFF_FLAGS_V,
+                                     FCSR_OFF_FLAGS_I);
+    status_code[2] = FT_LA_BEQ(la_t3, la_zero, 8);
+    status_code[3] = FT_LA_BITREV_W(la_t3, la_t2);
+    status_code[4] = FT_LA_BSTRPICK_D(la_t3, la_t3, 15, 11);
+    status_code[5] = FT_LA_BSTRINS_D(la_t3, la_t3, 5, 1);
+    status_code[6] = FT_LA_ANDI(la_t3, la_t3, 0x3d);
+    status_code[7] = FT_LA_OR(la_t0, la_t0, la_t3);
+    status_code[8] = FT_LA_BSTRINS_W(la_t2, la_zero, FCSR_OFF_FLAGS_V,
+                                    FCSR_OFF_FLAGS_I);
+    status_code[9] = FT_LA_MOVGR2FCSR(0, la_t2);
+    *out = status_code + 10;
+#else
     ft_emit_x87_update_sw_by_fcsr(out, la_t0, la_t2, la_t3);
+#endif
     ft_emit_store_env(out, la_t0, fpus_offset, FT_LA_OPCODE_ST_H);
 }
 
@@ -413,6 +442,43 @@ static void ft_emit_x87_update_sw_by_fcsr(uint32_t **out, int sw, int fcsr,
                          FCSR_OFF_FLAGS_I);
     FT_LA_MOVGR2FCSR_EMIT(out, 0, fcsr);
 }
+
+#ifdef QUICKTRANS_LATU
+static void ft_emit_x87_read_sw_with_top(uint32_t **out, int sw, int fcsr,
+                                          int tmp)
+{
+    FT_LA_MOVFCSR2GR_EMIT(out, fcsr, 0);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* Reverse V/Z/O/U/I once, then leave the x87 denormal bit (bit 1)
+     * untouched while ORing the other five sticky exception flags. */
+    FT_LA_BITREV_W_EMIT(out, tmp, fcsr);
+    FT_LA_BSTRPICK_D_EMIT(out, tmp, tmp, 15, 11);
+    FT_LA_BSTRINS_D_EMIT(out, tmp, tmp, 5, 1);
+    FT_LA_ANDI_EMIT(out, tmp, tmp, 0x3d);
+    FT_LA_OR_EMIT(out, sw, sw, tmp);
+#else
+    FT_LA_BITREV_W_EMIT(out, tmp, fcsr);
+    FT_LA_SRLI_D_EMIT(out, tmp, tmp, 11);
+    FT_LA_BSTRPICK_D_EMIT(out, tmp, tmp, 0, 0);
+    FT_LA_OR_EMIT(out, sw, sw, tmp);
+
+    FT_LA_BITREV_W_EMIT(out, tmp, fcsr);
+    FT_LA_SRLI_D_EMIT(out, tmp, tmp, 11);
+    FT_LA_BSTRPICK_D_EMIT(out, tmp, tmp, 4, 1);
+    FT_LA_SLLI_D_EMIT(out, tmp, tmp, 2);
+    FT_LA_OR_EMIT(out, sw, sw, tmp);
+
+#endif
+
+    /* Match legacy ordering: read TOP before clearing native flags. */
+    FT_LA_X86MFTOP_EMIT(out, tmp);
+    FT_LA_BSTRINS_D_EMIT(out, sw, tmp, 13, 11);
+    FT_LA_BSTRINS_W_EMIT(out, fcsr, la_zero, FCSR_OFF_FLAGS_V,
+                         FCSR_OFF_FLAGS_I);
+    FT_LA_MOVGR2FCSR_EMIT(out, 0, fcsr);
+}
+
+#endif
 
 static bool ft_emit_x87_sync_status_from_fcsr(uint32_t **out)
 {
@@ -810,23 +876,18 @@ static void ft_emit_x87_call_fsincos(uint32_t **out)
     ft_emit_store_env(out, la_t0, lsenv_offset_of_status_word(lsenv),
                       FT_LA_OPCODE_ST_H);
     FT_LA_FMOV_D_EMIT(out, ft_vscratch, ft_mmx(0));
-    ft_emit_save_gprs_to_env(out);
-    ft_emit_save_fprs_to_env(out);
-    ft_emit_save_xmms_to_env(out);
+    /* Publish the complete guest snapshot while native sincos executes. */
+    ft_emit_helper_prologue(out);
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, -16);
     FT_LA_FMOV_D_EMIT(out, 0, ft_vscratch);
     FT_LA_OR_EMIT(out, la_a0, la_sp, la_zero);
     FT_LA_ADDI_D_EMIT(out, la_a1, la_sp, 8);
     ft_emit_host_call(out, (void *)sincos, 0x3);
-    ft_emit_load_xmms_from_env(out);
-    ft_emit_load_fprs_from_env(out);
+    /* Keep every GPR reload: this change only fixes signal restoration. */
+    ft_emit_helper_epilogue_gprs(out, 0);
     FT_LA_FLD_D_EMIT(out, ft_mmx(0), la_sp, 0);
     FT_LA_FLD_D_EMIT(out, ft_mmx(7), la_sp, 8);
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
-    for (int i = 0; i < GPR_NUM; i++) {
-        ft_emit_load_env(out, ft_gpr(i), lsenv_offset_of_gpr(lsenv, i),
-                         FT_LA_OPCODE_LD_D);
-    }
 #else
     ft_emit_host_stack_begin(out);
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, -16);
@@ -1674,6 +1735,25 @@ static void ft_emit_x87_hard_helper(uint32_t **out, void *func)
     ft_emit_cpu_env_ptr(out, la_a0);
     ft_emit_host_call(out, func, 1u << 0);
     ft_emit_x87_helper_epilogue(out);
+}
+
+/* These math helpers change x87 state only. Keep the complete pre-call
+ * signal snapshot, but retain host-ABI-preserved guest GPR mappings on
+ * normal return. Signal delivery leaves the helper through cpu_loop_exit
+ * and restores guest state through the ordinary signal-return entry. */
+static void ft_emit_x87_hard_math_helper(uint32_t **out, void *func)
+{
+    int first_gpr = 0;
+
+    ft_emit_helper_prologue(out);
+    ft_emit_cpu_env_ptr(out, la_a0);
+    ft_emit_host_call(out, func, 1u << 0);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    while (first_gpr < 8 && ft_gpr(first_gpr) == la_s0 + first_gpr) {
+        ++first_gpr;
+    }
+#endif
+    ft_emit_helper_epilogue_gprs(out, first_gpr);
 }
 
 static bool ft_x87_const_bits(unsigned int id, uint64_t *bits)
@@ -2773,6 +2853,7 @@ static bool ft_emit_x87_integer_fallback(uint32_t **out,
 static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
+    bool top_unchanged = false;
 
     (void)tb;
 
@@ -3001,6 +3082,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     case FT_X87_FSTP_REG:
     {
         int st_index = fields->modrm & 7;
+        top_unchanged = fields->kind == FT_X87_FST_REG && st_index != 0;
 
         if ((fields->kind == FT_X87_FST_REG &&
              (fields->modrm < 0xd0 || fields->modrm > 0xd7)) ||
@@ -3035,6 +3117,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         break;
     }
     case FT_X87_UNARY:
+        top_unchanged = true;
         if (option_soft_fpu &&
             (fields->id == dt_X86_INS_FABS ||
              fields->id == dt_X86_INS_FCHS)) {
@@ -3069,6 +3152,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         break;
     case FT_X87_FTST:
     {
+        top_unchanged = true;
         int fpus_offset = lsenv_offset_of_status_word(lsenv);
 
         if (option_soft_fpu) {
@@ -3081,13 +3165,58 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         if (!ft_offset_fits_imm12(fpus_offset)) {
             return 0;
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* FTST needs no integer copies of FCC. Keep the legacy branch order,
+         * but retain Quicktrans C1 clearing and signaling-NaN/status policy. */
+        uint32_t *test_code = out;
+#ifdef FT_LA_CHECK_SPACE
+        FT_LA_CHECK_SPACE(test_code, 29 * sizeof(*test_code));
+#endif
+        test_code[0] = FT_LA_LD_HU(la_t0, la_s8, fpus_offset);
+        test_code[1] = FT_LA_BSTRINS_D(la_t0, la_zero, 14, 14);
+        test_code[2] = FT_LA_BSTRINS_D(la_t0, la_zero, 10, 8);
+        test_code[3] = FT_LA_MOVGR2FR_D(ft_vscratch + 1, la_zero);
+        test_code[4] = ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0,
+                                   ft_mmx(0), ft_vscratch + 1, 0x09);
+        test_code[5] = FT_LA_BCNEZ(0, 10);
+        test_code[6] = ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0,
+                                   ft_mmx(0), ft_vscratch + 1, 0x04);
+        test_code[7] = FT_LA_BCNEZ(0, 5);
+        test_code[8] = ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0,
+                                   ft_mmx(0), ft_vscratch + 1, 0x02);
+        test_code[9] = FT_LA_BCEQZ(0, 9);
+        test_code[10] = FT_LA_ORI(la_t0, la_t0, 0x100);
+        test_code[11] = FT_LA_B(7);
+        test_code[12] = FT_LA_LU12I_W(la_t1, 4);
+        test_code[13] = FT_LA_OR(la_t0, la_t0, la_t1);
+        test_code[14] = FT_LA_B(4);
+        test_code[15] = FT_LA_LU12I_W(la_t1, 4);
+        test_code[16] = FT_LA_ORI(la_t1, la_t1, 0x500);
+        test_code[17] = FT_LA_OR(la_t0, la_t0, la_t1);
+        test_code[18] = FT_LA_MOVFCSR2GR(la_t2, 0);
+        test_code[19] = FT_LA_BSTRPICK_D(la_t3, la_t2, FCSR_OFF_FLAGS_V,
+                                        FCSR_OFF_FLAGS_I);
+        test_code[20] = FT_LA_BEQ(la_t3, la_zero, 8);
+        test_code[21] = FT_LA_BITREV_W(la_t3, la_t2);
+        test_code[22] = FT_LA_BSTRPICK_D(la_t3, la_t3, 15, 11);
+        test_code[23] = FT_LA_BSTRINS_D(la_t3, la_t3, 5, 1);
+        test_code[24] = FT_LA_ANDI(la_t3, la_t3, 0x3d);
+        test_code[25] = FT_LA_OR(la_t0, la_t0, la_t3);
+        test_code[26] = FT_LA_BSTRINS_W(la_t2, la_zero, FCSR_OFF_FLAGS_V,
+                                       FCSR_OFF_FLAGS_I);
+        test_code[27] = FT_LA_MOVGR2FCSR(0, la_t2);
+        test_code[28] = FT_LA_ST_H(la_t0, la_s8, fpus_offset);
+        out = test_code + 29;
+#else
         FT_LA_MOVGR2FR_W_EMIT(&out, ft_vscratch + 1, la_zero);
         FT_LA_FFINT_D_W_EMIT(&out, ft_vscratch + 1, ft_vscratch + 1);
         ft_emit_x87_fcom_status(&out, ft_vscratch + 1, ft_mmx(0), true);
+#endif
         break;
     }
     case FT_X87_FXCH:
     {
+        top_unchanged = true;
         int st_index = fields->modrm & 7;
 
         if (fields->modrm < 0xc8 || fields->modrm > 0xcf) {
@@ -3113,6 +3242,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     case FT_X87_FCOM_REG:
     case FT_X87_FCOMP_REG:
     {
+        top_unchanged = fields->kind == FT_X87_FCOM_REG;
         int st_index = fields->modrm & 7;
         int src = ft_mmx(st_index);
         int fpus_offset = lsenv_offset_of_status_word(lsenv);
@@ -3194,6 +3324,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FCMOVCC:
     {
+        top_unchanged = true;
         int cond;
         int flag_mask;
         bool skip_when_set;
@@ -3378,6 +3509,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         break;
     }
     case FT_X87_FRNDINT:
+        top_unchanged = true;
         if (option_soft_fpu) {
             ft_emit_x87_soft_unary(&out, false);
             break;
@@ -3385,6 +3517,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         FT_LA_FRINT_D_EMIT(&out, ft_mmx(0), ft_mmx(0));
         break;
     case FT_X87_FSCALE:
+        top_unchanged = true;
         if (option_soft_fpu) {
 #ifdef QUICKTRANS_LATU
             ft_emit_x87_soft_binary_reg(&out, 1, FT_X87_REG_SCALE, 0);
@@ -3469,7 +3602,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             ft_emit_x87_complex_helper(&out, (void *)ft_x87_helper_fpatan,
                                         (void *)helper_fpatan);
         } else {
-            ft_emit_x87_hard_helper(&out, (void *)ft_x87_hard_fpatan);
+            ft_emit_x87_hard_math_helper(&out, (void *)ft_x87_hard_fpatan);
         }
         break;
     case FT_X87_FPREM:
@@ -3493,13 +3626,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             ft_emit_x87_complex_helper(&out, (void *)ft_x87_helper_fyl2x,
                                         (void *)helper_fyl2x);
         } else {
-            ft_emit_x87_hard_helper(&out, (void *)ft_x87_hard_fyl2x);
+            ft_emit_x87_hard_math_helper(&out, (void *)ft_x87_hard_fyl2x);
         }
         break;
     case FT_X87_FYL2XP1:
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
         if (!option_soft_fpu) {
-            ft_emit_x87_hard_helper(&out,
+            ft_emit_x87_hard_math_helper(&out,
                                      (void *)ft_x87_hard_fyl2xp1_checked);
             break;
         }
@@ -3783,6 +3916,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
                                         (void *)helper_fxtract);
         break;
     case FT_X87_FSQRT:
+        top_unchanged = true;
         if (option_soft_fpu) {
             ft_emit_x87_soft_unary(&out, true);
             break;
@@ -3804,6 +3938,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         break;
     case FT_X87_FIST_M16:
     {
+        top_unchanged = true;
         int addr;
         int offset;
         int value_reg;
@@ -3842,6 +3977,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FIST_M32:
     {
+        top_unchanged = true;
         int addr;
         int offset;
         int value_reg;
@@ -3882,6 +4018,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     case FT_X87_FI_BIN_M16:
     case FT_X87_FI_BIN_M32:
     {
+        top_unchanged = fields->modrm_reg != 3;
         int addr;
         int op_ext = (fields->modrm >> 3) & 7;
         int width = fields->kind == FT_X87_FI_BIN_M16 ? 16 : 32;
@@ -4081,6 +4218,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     case FT_X87_FSTP_M32:
     case FT_X87_FSTP_M64:
     {
+        top_unchanged = fields->kind == FT_X87_FST_M32 || fields->kind == FT_X87_FST_M64;
         int addr;
         int offset;
         bool is_m32 = fields->kind == FT_X87_FSTP_M32 ||
@@ -4202,6 +4340,59 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         offset = ft_mem_access_offset(fields, addr);
         FT_LA_ADDI_D_EMIT(&out, la_a1, addr, offset);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (!option_soft_fpu && ft_x87_latu_legacy_no_tag()) {
+            /* The previous 64-to-80 helper quieted SNaN in CPU state before
+             * a guest write could fault. Preserve that ST0 signal image. */
+            FastBranchLabel quiet = {0};
+            FastBranchFixup finite_fixup, infinity_fixup;
+            FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(0));
+            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t0, 62, 51);
+            FT_LA_XORI_EMIT(&out, la_t1, la_t1, 0xffe);
+            ft_emit_branch_placeholder(&out, &finite_fixup, FT_BRANCH_BNE,
+                                       la_t1, la_zero, &quiet);
+            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t0, 50, 0);
+            ft_emit_branch_placeholder(&out, &infinity_fixup, FT_BRANCH_BEQ,
+                                       la_t1, la_zero, &quiet);
+            FT_LA_ORI_EMIT(&out, la_t1, la_zero, 1);
+            FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_t1, 51, 51);
+            FT_LA_MOVGR2FR_D_EMIT(&out, ft_mmx(0), la_t0);
+            ft_bind_branch_label(&quiet, out);
+            ft_resolve_branch_fixup(&finite_fixup);
+            ft_resolve_branch_fixup(&infinity_fixup);
+            /* Match store_64_bit_freg_to_ir1_80_bit_mem: convert only ST0.
+             * Keep TOP and ST0 intact until both guest stores succeed, so
+             * a write fault can return to and retry this x86 instruction. */
+            FastBranchLabel masked = {0}, restored = {0};
+            FastBranchFixup mask_fixup, restore_fixup;
+            FT_LA_MOVFCSR2GR_EMIT(&out, la_t0, 0);
+            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t0, 4, 4);
+            ft_emit_branch_placeholder(&out, &mask_fixup, FT_BRANCH_BEQ,
+                                       la_t1, la_zero, &masked);
+            FT_LA_XORI_EMIT(&out, la_t0, la_t0, 0x10);
+            FT_LA_MOVGR2FCSR_EMIT(&out, 0, la_t0);
+            ft_bind_branch_label(&masked, out);
+            ft_resolve_branch_fixup(&mask_fixup);
+            FT_LA_FCVT_LD_D_EMIT(&out, ft_vscratch, ft_mmx(0));
+            FT_LA_FCVT_UD_D_EMIT(&out, ft_vscratch + 1, ft_mmx(0));
+            FT_LA_MOVFCSR2GR_EMIT(&out, la_t0, 0);
+            ft_emit_branch_placeholder(&out, &restore_fixup, FT_BRANCH_BEQ,
+                                       la_t1, la_zero, &restored);
+            FT_LA_XORI_EMIT(&out, la_t0, la_t0, 0x10);
+            FT_LA_MOVGR2FCSR_EMIT(&out, 0, la_t0);
+            ft_bind_branch_label(&restored, out);
+            ft_resolve_branch_fixup(&restore_fixup);
+            FT_LA_MOVFR2GR_S_EMIT(&out, la_t1, ft_vscratch + 1);
+            FT_LA_ST_H_EMIT(&out, la_t1, la_a1, 8);
+            FT_LA_MOVFR2GR_D_EMIT(&out, la_t1, ft_vscratch);
+            /* Preserve the current helper's quiet-NaN conversion.  The
+             * hard-mode load can leave an SNaN encoding in ST0. */
+            FT_LA_ST_D_EMIT(&out, la_t1, la_a1, 0);
+            ft_emit_x87_pop(&out);
+            break;
+        }
+#endif
+
 #ifdef QUICKTRANS_LATU
         FastBranchLabel slow = {0}, done = {0};
         FastBranchFixup empty, finish;
@@ -4292,6 +4483,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_BIN_REG:
     {
+        top_unchanged = true;
         int st_index = fields->modrm & 7;
 
         if (fields->modrm_mod != 3) {
@@ -4369,6 +4561,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     case FT_X87_BIN_M32:
     case FT_X87_BIN_M64:
     {
+        top_unchanged = true;
         int addr;
         int op_ext = (fields->modrm >> 3) & 7;
         bool is_m32 = fields->kind == FT_X87_BIN_M32;
@@ -4426,6 +4619,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FCOM_M64:
     {
+        top_unchanged = fields->modrm_reg == 2;
         int addr;
         int fpus_offset = lsenv_offset_of_status_word(lsenv);
 
@@ -4476,6 +4670,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FCOM_M32:
     {
+        top_unchanged = fields->modrm_reg == 2;
         int addr;
         int fpus_offset = lsenv_offset_of_status_word(lsenv);
 
@@ -4625,6 +4820,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FSTSW_AX:
     {
+        top_unchanged = true;
         int fpus_offset = lsenv_offset_of_status_word(lsenv);
 
 #ifdef QUICKTRANS_LATU
@@ -4672,15 +4868,20 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             return 0;
         }
         ft_emit_load_env(&out, la_t0, fpus_offset, FT_LA_OPCODE_LD_HU);
+#ifdef QUICKTRANS_LATU
+        ft_emit_x87_read_sw_with_top(&out, la_t0, la_t1, la_t2);
+#else
         ft_emit_x87_update_sw_by_fcsr(&out, la_t0, la_t1, la_t2);
         FT_LA_X86MFTOP_EMIT(&out, la_t1);
         FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_t1, 13, 11);
+#endif
         ft_emit_store_env(&out, la_t0, fpus_offset, FT_LA_OPCODE_ST_H);
         FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(rax_index), la_t0, 15, 0);
         break;
     }
     case FT_X87_FNSTSW_M16:
     {
+        top_unchanged = true;
         int addr;
         int value;
         int fpus_offset = lsenv_offset_of_status_word(lsenv);
@@ -4761,9 +4962,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         value = addr == la_t0 ? la_t1 : la_t0;
         ft_emit_load_env(&out, value, fpus_offset, FT_LA_OPCODE_LD_HU);
+#ifdef QUICKTRANS_LATU
+        ft_emit_x87_read_sw_with_top(&out, value, la_t2, la_t3);
+#else
         ft_emit_x87_update_sw_by_fcsr(&out, value, la_t2, la_t3);
         FT_LA_X86MFTOP_EMIT(&out, la_t2);
         FT_LA_BSTRINS_D_EMIT(&out, value, la_t2, 13, 11);
+#endif
         ft_emit_store_env(&out, value, fpus_offset, FT_LA_OPCODE_ST_H);
         FT_LA_ST_H_EMIT(&out, value, addr,
                         ft_mem_access_offset(fields, addr));
@@ -4771,6 +4976,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FLDCW_M16:
     {
+        top_unchanged = true;
         int addr;
         int fpuc_offset = lsenv_offset_of_control_word(lsenv);
 
@@ -4798,6 +5004,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FNSTCW_M16:
     {
+        top_unchanged = true;
         int addr;
         int value;
         int fpuc_offset = lsenv_offset_of_control_word(lsenv);
@@ -4828,7 +5035,14 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         ft_resolve_branch_fixup(&extra.done_fix);
     }
 
-    if (!option_soft_fpu && !ft_emit_x87_top_store(&out)) {
+    /* These instructions leave hardware TOP equal to its already saved
+     * value. Changing-TOP instructions still publish it before the next one. */
+    (void)top_unchanged;
+    if (!option_soft_fpu &&
+#ifdef QUICKTRANS_LATU
+        !top_unchanged &&
+#endif
+        !ft_emit_x87_top_store(&out)) {
         return 0;
     }
 

@@ -1208,11 +1208,124 @@ static void ft_x87_hard_fxtract_checked(CPUX86State *env)
     ft_convert_fpregs_x80_to_64(env);
 }
 
+#include <fenv.h>
+
+/* Preserve the generic conversion for exceptional encodings. Normal doubles
+ * and signed zero have an exact x80 representation, without rounding. */
+static __attribute__((noinline)) void ft_x87_fyl2xp1_prepare_slots(CPUX86State *env)
+{
+    float_status status = env->fp_status;
+    for (int i = 0; i < 8; ++i) {
+        uint64_t bits = env->fpregs[i].d.low;
+        unsigned int exponent = (unsigned int)((bits >> 52) & 0x7ff);
+        if (exponent > 0 && exponent < 0x7ff) {
+            env->fpregs[i].d = make_floatx80(
+                ((bits >> 48) & 0x8000) | (exponent + 0x3c00),
+                ((bits & UINT64_C(0x000fffffffffffff)) |
+                 UINT64_C(0x0010000000000000)) << 11);
+        } else if ((bits << 1) == 0) {
+            env->fpregs[i].d = make_floatx80((bits >> 48) & 0x8000, 0);
+        } else {
+            env->fpregs[i].d = float64_to_floatx80((float64)bits, &status);
+        }
+    }
+#ifdef LATX_QUICKTRANS_X87_SIGNAL_ABI
+    env->qt_x87_env_format = QT_X87_ENV_X80;
+#endif
+}
+
+/* Bypass rounding only when the x80 value is exactly a normal double or
+ * signed zero. All subnormals, special values and inexact results stay generic. */
+static __attribute__((noinline)) void ft_x87_fyl2xp1_finish_slots(CPUX86State *env)
+{
+    float_status status = env->fp_status;
+    for (int i = 0; i < 8; ++i) {
+        floatx80 value = env->fpregs[i].d;
+        unsigned int exponent = value.high & 0x7fff;
+        uint64_t bits;
+        if (exponent >= 0x3c01 && exponent <= 0x43fe &&
+            (value.low & UINT64_C(0x80000000000007ff)) ==
+                UINT64_C(0x8000000000000000)) {
+            bits = ((uint64_t)(value.high & 0x8000) << 48) |
+                   ((uint64_t)(exponent - 0x3c00) << 52) |
+                   ((value.low >> 11) & UINT64_C(0x000fffffffffffff));
+        } else if (exponent == 0 && value.low == 0) {
+            bits = (uint64_t)(value.high & 0x8000) << 48;
+        } else {
+            bits = (uint64_t)floatx80_to_float64(value, &status);
+        }
+        env->fpregs[i].d.low = bits;
+        env->fpregs[i].d.high = 0;
+    }
+#ifdef LATX_QUICKTRANS_X87_SIGNAL_ABI
+    env->qt_x87_env_format = QT_X87_ENV_HARD64;
+#endif
+}
+
 static void ft_x87_hard_fyl2xp1_checked(CPUX86State *env)
 {
-    ft_convert_fpregs_64_to_x80(env);
-    update_fp_status(env);
-    ft_x87_helper_fyl2xp1(env);
-    ft_convert_fpregs_x80_to_64(env);
+    double x = ft_x87_hard_get_st(env, 0);
+    double y = ft_x87_hard_get_st(env, 1);
+    bool fast = (env->fpuc & 0xf3f) == 0x33f &&
+        fabs(x) >= 0x1p-500 && fabs(x) <= 0.25 &&
+        fabs(y) >= 0x1p-500 && fabs(y) <= 0x1p500 &&
+        (ft_x87_latu_legacy_no_tag() ||
+         (!env->fptags[env->fpstt] && !env->fptags[(env->fpstt + 1) & 7]));
+    if (fast) {
+        /* Keep the signal snapshot in hard64 format; only the result slot
+         * is committed after the local extended-precision calculation. */
+        /* The guard fixes RC=nearest and PC=extended. Keep the host
+         * rounding update required by option_set_rounding_opt. */
+        set_float_rounding_mode(float_round_nearest_even, &env->fp_status);
+        if (option_set_rounding_opt) {
+            fesetround(FE_TONEAREST);
+        }
+        set_floatx80_rounding_precision(floatx80_precision_x, &env->fp_status);
+        double logarithm = log1p(x);
+        uint64_t bits;
+        memcpy(&bits, &logarithm, sizeof(bits));
+        unsigned int dst = (env->fpstt + 1) & 7;
+        uint64_t ybits;
+        memcpy(&ybits, &y, sizeof(ybits));
+        /* The guarded nonzero x makes log1p(x) finite and normal.
+         * This conversion is exact and does not change exception flags. */
+        floatx80 logarithm_x80 = make_floatx80(
+            ((bits >> 48) & 0x8000) |
+            (((bits >> 52) & 0x7ff) + (0x3fff - 0x3ff)),
+            ((bits & UINT64_C(0x000fffffffffffff)) |
+             UINT64_C(0x0010000000000000)) << 11);
+        floatx80 result = floatx80_mul(
+            logarithm_x80,
+            make_floatx80(0x3fff, UINT64_C(0xb8aa3b295c17f0bc)),
+            &env->fp_status);
+        if ((ybits & UINT64_C(0x000fffffffffffff)) == 0) {
+            /* The fast bounds guarantee normal operands and result. Scaling
+             * by a signed power of two is exact, with no extra rounding. */
+            int scale = (int)((ybits >> 52) & 0x7ff) - 1023;
+            result.high = ((result.high & 0x7fff) + scale) |
+                          ((result.high ^ (ybits >> 48)) & 0x8000);
+        } else {
+            /* The fast guard guarantees a finite normal double. Its exact
+             * x80 representation needs neither rounding nor exception work. */
+            floatx80 multiplier = make_floatx80(
+                ((ybits >> 48) & 0x8000) |
+                (((ybits >> 52) & 0x7ff) + (0x3fff - 0x3ff)),
+                ((ybits & UINT64_C(0x000fffffffffffff)) |
+                 UINT64_C(0x0010000000000000)) << 11);
+            result = floatx80_mul(multiplier, result, &env->fp_status);
+        }
+        /* All exceptions are masked and bounded normal inputs can only add
+         * inexact. Preserve existing internal and guest exception flags. */
+        float_raise(float_flag_inexact, &env->fp_status);
+        env->fpus |= 1 << 5;
+        env->fpregs[dst].d.low = floatx80_to_float64(result, &env->fp_status);
+        env->fpregs[dst].d.high = 0;
+        helper_fpop(env);
+    } else {
+        ft_x87_fyl2xp1_prepare_slots(env);
+        update_fp_status(env);
+        ft_x87_helper_fyl2xp1(env);
+        ft_x87_fyl2xp1_finish_slots(env);
+    }
 }
 #endif
