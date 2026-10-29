@@ -375,6 +375,59 @@ static void ft_emit_fcsr_from_mxcsr(uint32_t **out, int mxcsr)
     FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t2);
 }
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+/* Match update_mxcsr_status without a host call. Always rewrite the exception
+ * flags: identical MXCSR loads may follow an SSE helper that raised flags. */
+static void ft_emit_lats_mxcsr_status(uint32_t **out, int mxcsr)
+{
+    const int status = offsetof(CPUX86State, sse_status);
+    const uint64_t rounding = (uint64_t)float_round_nearest_even |
+        ((uint64_t)float_round_down << 8) |
+        ((uint64_t)float_round_up << 16) |
+        ((uint64_t)float_round_to_zero << 24);
+
+    QEMU_BUILD_BUG_ON(sizeof(((float_status *)0)->float_rounding_mode) != 1);
+    QEMU_BUILD_BUG_ON(sizeof(((float_status *)0)->float_exception_flags) != 2);
+    QEMU_BUILD_BUG_ON(float_flag_invalid != 1 || float_flag_divbyzero != 2 ||
+                      float_flag_overflow != 4 || float_flag_underflow != 8 ||
+                      float_flag_inexact != 16);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, mxcsr, 14, 13);
+    FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 3);
+    ft_emit_li64(out, la_t2, rounding);
+    FT_LA_SRL_D_EMIT(out, la_t0, la_t2, la_t0);
+    ft_emit_store_env(out, la_t0,
+                     status + offsetof(float_status, float_rounding_mode),
+                     FT_LA_OPCODE_ST_B);
+
+    FT_LA_SRLI_D_EMIT(out, la_t0, mxcsr, 1);
+    FT_LA_ANDI_EMIT(out, la_t0, la_t0, 0x1e);
+    FT_LA_ANDI_EMIT(out, la_t2, mxcsr, 1);
+    FT_LA_OR_EMIT(out, la_t0, la_t0, la_t2);
+    ft_emit_store_env(out, la_t0,
+                     status + offsetof(float_status, float_exception_flags),
+                     FT_LA_OPCODE_ST_H);
+
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, mxcsr, 6, 6);
+    ft_emit_store_env(out, la_t0,
+                     status + offsetof(float_status, flush_inputs_to_zero),
+                     FT_LA_OPCODE_ST_B);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, mxcsr, 15, 15);
+    ft_emit_store_env(out, la_t0,
+                     status + offsetof(float_status, flush_to_zero),
+                     FT_LA_OPCODE_ST_B);
+
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, mxcsr, 12, 7);
+    FT_LA_XORI_EMIT(out, la_t0, la_t0, 0x3f);
+    FT_LA_ANDI_EMIT(out, la_t0, la_t0, 0x3d);
+    FT_LA_SLTU_EMIT(out, la_t0, la_zero, la_t0);
+    ft_emit_load_env(out, la_t2, offsetof(CPUX86State, hflags),
+                    FT_LA_OPCODE_LD_WU);
+    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t0, HF_SIGFPE_ON, HF_SIGFPE_ON);
+    ft_emit_store_env(out, la_t2, offsetof(CPUX86State, hflags),
+                     FT_LA_OPCODE_ST_W);
+}
+#endif
+
 static void ft_emit_mxcsr_flags_from_fcsr(uint32_t **out, int mxcsr)
 {
     FT_LA_MOVFCSR2GR_EMIT(out, la_t2, 0);
@@ -1235,6 +1288,12 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
     {
         int addr;
         int mxcsr_offset = lsenv_offset_of_mxcsr(lsenv);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        FastBranchLabel updated = { 0 };
+        FastBranchFixup updated_fixup;
+        FastBranchLabel update = { 0 };
+        FastBranchFixup update_fixup;
+#endif
 
         if (fields->modrm_mod == 3 ||
             fields->modrm_reg != 2) {
@@ -1244,11 +1303,44 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
             return 0;
         }
         FT_LA_LD_WU_EMIT(&out, la_t1, addr, ft_mem_access_offset(fields, addr));
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (option_lazy_mxcsr) {
+            ft_emit_load_env(&out, la_t2, mxcsr_offset, FT_LA_OPCODE_LD_WU);
+        }
+#endif
         ft_emit_store_env(&out, la_t1, mxcsr_offset, FT_LA_OPCODE_ST_W);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (option_lazy_mxcsr) {
+            /* Match the host's opt-in lazy policy, including retained flags
+             * when an identical load follows a floating-point operation. */
+            ft_emit_load_env(&out, la_t0, offsetof(CPUX86State, old_mxcsr),
+                             FT_LA_OPCODE_LD_WU);
+            ft_emit_store_env(&out, la_t1, offsetof(CPUX86State, old_mxcsr),
+                              FT_LA_OPCODE_ST_W);
+            /* Restore helpers can change MXCSR without updating old_mxcsr. */
+            ft_emit_branch_placeholder(&out, &update_fixup, FT_BRANCH_BNE,
+                                       la_t2, la_t1, &update);
+            ft_emit_branch_placeholder(&out, &updated_fixup, FT_BRANCH_BEQ,
+                                       la_t0, la_t1, &updated);
+            ft_bind_branch_label(&update, out);
+            ft_resolve_branch_fixup(&update_fixup);
+        }
+#endif
         ft_emit_fcsr_from_mxcsr(&out, la_t1);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (option_lazy_mxcsr) {
+            ft_bind_branch_label(&updated, out);
+            ft_resolve_branch_fixup(&updated_fixup);
+        }
+#endif
 
 #ifndef QUICKTRANS_LATU
+#ifdef CONFIG_SOFTMMU
+        /* Old-path LDMXCSR does not maintain sse_status in soft-FPU mode. */
+        ft_emit_lats_mxcsr_status(&out, la_t1);
+#else
         ft_emit_lats_nofp_helper(&out, (void *)update_mxcsr_status);
+#endif
 #else
         ft_emit_helper_prologue(&out);
         ft_emit_cpu_env_ptr(&out, la_a0);
