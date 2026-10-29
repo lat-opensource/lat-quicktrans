@@ -297,8 +297,22 @@ static void ft_emit_x87_fcom_status(uint32_t **out, int lhs, int rhs,
 }
 
 static bool ft_emit_x87_fcomi_flags(uint32_t **out, int src, int st0,
-                                    bool signal_all_nans)
+                                    bool signal_all_nans, bool skip_flags)
 {
+#ifdef QUICKTRANS_LATU
+    if (skip_flags) {
+        /* Dead integer flags do not make x87 exceptions or status dead. */
+        ft_emit_raw(out, ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0, src, st0,
+                                     signal_all_nans ? 0x09 : 0x08));
+        ft_emit_raw(out, ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0, st0, src,
+                                     0x02));
+        ft_emit_raw(out, ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0, st0, src,
+                                     0x04));
+        return ft_emit_x87_sync_status_from_fcsr(out);
+    }
+#else
+    (void)skip_flags;
+#endif
     ft_emit_raw(out, ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0, src, st0,
                                   signal_all_nans ? 0x09 : 0x08));
     FT_LA_MOVCF2GR_EMIT(out, la_t0, 0);
@@ -2116,7 +2130,8 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         if (!ft_emit_x87_fcomi_flags(&out, src, ft_mmx(0),
                                      fields->id == dt_X86_INS_FCOMI ||
-                                     fields->id == dt_X86_INS_FCOMIP)) {
+                                     fields->id == dt_X86_INS_FCOMIP,
+                                     fields->skip_flags)) {
             return 0;
         }
         if (fields->kind == FT_X87_FCOMIP_REG) {

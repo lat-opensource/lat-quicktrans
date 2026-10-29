@@ -128,9 +128,18 @@ static void ft_emit_string_load_bytes(uint32_t **out, int dst, int addr,
     }
 }
 
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-static bool ft_string_lats_wide_access(int id)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+static bool ft_string_wide_access(int id)
 {
+#ifdef QUICKTRANS_LATU
+    /* Legacy LATU uses native-width string accesses for all word widths. */
+    if (id == dt_X86_INS_STOSW || id == dt_X86_INS_STOSD ||
+        id == dt_X86_INS_LODSW || id == dt_X86_INS_LODSD ||
+        id == dt_X86_INS_CMPSW || id == dt_X86_INS_CMPSD ||
+        id == dt_X86_INS_SCASW || id == dt_X86_INS_SCASD) {
+        return true;
+    }
+#endif
     return id == dt_X86_INS_MOVSW ||
            id == dt_X86_INS_MOVSD ||
            id == dt_X86_INS_LODSQ ||
@@ -139,7 +148,7 @@ static bool ft_string_lats_wide_access(int id)
            id == dt_X86_INS_SCASQ;
 }
 
-/* HAMT uses native-width accesses in the legacy string translator too.
+/* The corresponding legacy translators use native-width accesses too.
  * Read the complete source before storing, including overlapping operands. */
 static void ft_emit_string_load_wide(uint32_t **out, int dst, int addr,
                                      int bytes)
@@ -254,10 +263,10 @@ static bool ft_emit_string_body(uint32_t **out,
     int id = fields->id;
 
     (void)tb;
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-    /* Match the legacy HAMT MOVSQ access width.  Load the complete source
-     * before storing so overlapping operands retain MOVSQ semantics.
-     * Keep the user-mode mixed-page store handling on its existing path. */
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+    /* Match legacy MOVSQ access width, loading the complete source before
+     * storing so overlapping operands retain MOVSQ semantics.  Non-LATU
+     * user-mode mixed-page handling remains on its existing path. */
     if (id == dt_X86_INS_MOVSQ) {
         bool long_mode = tb && (tb->flags & HF_CS64_MASK);
         bool flat64 = long_mode && !fields->addr32;
@@ -267,15 +276,18 @@ static bool ft_emit_string_body(uint32_t **out,
         /* Long mode ignores DS/ES/SS/CS bases.  FS/GS still contribute
          * their base after the address-size truncation. */
         if (long_mode && fields->addr32) {
-            FT_LA_BSTRPICK_D_EMIT(out, src, ft_gpr(rsi_index), 31, 0);
             if (fields->segment == fs_index || fields->segment == gs_index) {
                 int offset = offsetof(CPUX86State,
                                       segs[fields->segment].base);
                 if (!ft_fits_simm12(offset)) {
                     return false;
                 }
+                /* The env load may use src as scratch in the LATU ABI. */
                 ft_emit_load_env(out, dst, offset, FT_LA_OPCODE_LD_D);
+                FT_LA_BSTRPICK_D_EMIT(out, src, ft_gpr(rsi_index), 31, 0);
                 FT_LA_ADD_D_EMIT(out, src, src, dst);
+            } else {
+                FT_LA_BSTRPICK_D_EMIT(out, src, ft_gpr(rsi_index), 31, 0);
             }
             FT_LA_LD_D_EMIT(out, la_t0, src, 0);
             FT_LA_BSTRPICK_D_EMIT(out, dst, ft_gpr(rdi_index), 31, 0);
@@ -303,8 +315,8 @@ static bool ft_emit_string_body(uint32_t **out,
 
     int src_addr = la_t3;
     int dst_addr = la_t4;
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-    bool direct_addr = ft_string_lats_wide_access(id) && tb &&
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+    bool direct_addr = ft_string_wide_access(id) && tb &&
                        (tb->flags & HF_CS64_MASK) && !fields->addr32;
 
     /* In long mode only FS/GS retain a source segment base.  Keep all
@@ -324,8 +336,8 @@ static bool ft_emit_string_body(uint32_t **out,
                                  fields->segment, fields->addr32)) {
             return false;
         }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-        if (ft_string_lats_wide_access(id)) {
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+        if (ft_string_wide_access(id)) {
             ft_emit_string_load_wide(out,
                 id == dt_X86_INS_LODSQ ? ft_gpr(rax_index) : la_t0,
                 src_addr, bytes);
@@ -344,8 +356,8 @@ static bool ft_emit_string_body(uint32_t **out,
     }
 
     if (ft_string_is_movs(id)) {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-        if (ft_string_lats_wide_access(id)) {
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+        if (ft_string_wide_access(id)) {
             ft_emit_string_store_wide(out, la_t0, dst_addr, bytes);
             return true;
         }
@@ -354,8 +366,8 @@ static bool ft_emit_string_body(uint32_t **out,
                                         la_t0, bytes);
     }
     if (ft_string_is_stos(id)) {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-        if (ft_string_lats_wide_access(id)) {
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+        if (ft_string_wide_access(id)) {
             ft_emit_string_store_wide(out, ft_gpr(rax_index), dst_addr, bytes);
             return true;
         }
@@ -364,7 +376,7 @@ static bool ft_emit_string_body(uint32_t **out,
                                         ft_gpr(rax_index), bytes);
     }
     if (ft_string_is_lods(id)) {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if (id == dt_X86_INS_LODSQ) {
             return true;
         }
@@ -373,8 +385,8 @@ static bool ft_emit_string_body(uint32_t **out,
         return true;
     }
     if (ft_string_is_cmps(id)) {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-        if (ft_string_lats_wide_access(id)) {
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+        if (ft_string_wide_access(id)) {
             ft_emit_string_load_wide(out, la_t1, dst_addr, bytes);
         } else
 #endif
@@ -387,8 +399,8 @@ static bool ft_emit_string_body(uint32_t **out,
         return true;
     }
     if (ft_string_is_scas(id)) {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-        if (ft_string_lats_wide_access(id)) {
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+        if (ft_string_wide_access(id)) {
             ft_emit_string_load_wide(out, la_t1, dst_addr, bytes);
         } else
 #endif
@@ -397,7 +409,7 @@ static bool ft_emit_string_body(uint32_t **out,
             ft_emit_raw(out, ft_gpr2(ft_string_x86sub_op(bytes),
                                     ft_gpr(rax_index), la_t1));
         }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if (id == dt_X86_INS_SCASQ) {
             FT_LA_XOR_EMIT(out, la_t0, ft_gpr(rax_index), la_t1);
             return true;
@@ -419,6 +431,7 @@ static int ft_emit_string_template(const FastTemplateFields *fields, Translation
     bool cmp_loop;
     bool adjust_rsi;
     bool adjust_rdi;
+    bool hoist_step = false;
     FastBranchLabel loop = { 0 };
     FastBranchLabel zero_count = { 0 };
     FastBranchFixup zero_count_fixup;
@@ -456,9 +469,17 @@ static int ft_emit_string_template(const FastTemplateFields *fields, Translation
                                    ft_gpr(rcx_index), la_zero, &zero_count);
     }
 
+#ifdef QUICKTRANS_LATU
+    /* Native-width accesses leave t2 intact in 64-bit address mode.
+     * addr32 segment address formation still uses t2 inside the loop. */
+    hoist_step = rep && tb && (tb->flags & HF_CS64_MASK) && !fields->addr32;
+    if (hoist_step && !ft_emit_string_step(&out, bytes)) {
+        return 0;
+    }
+#endif
     ft_bind_branch_label(&loop, out);
     if (!ft_emit_string_body(&out, fields, bytes, tb) ||
-        !ft_emit_string_step(&out, bytes)) {
+        (!hoist_step && !ft_emit_string_step(&out, bytes))) {
         return 0;
     }
     ft_emit_string_adjust(&out, fields, adjust_rsi, adjust_rdi);

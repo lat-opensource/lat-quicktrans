@@ -1110,7 +1110,10 @@ static int ft_emit_pmovx_template(const FastTemplateFields *fields, TranslationB
         return 0;
     }
 
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if (defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)) || \
+    (defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT))
+    /* LATU without guest AVX keeps only the architectural low 128 bits.
+     * option_enable_lasx is gated by the host startup capability check. */
     if (option_enable_lasx) {
         switch (fields->id) {
         case dt_X86_INS_PMOVSXBD:
