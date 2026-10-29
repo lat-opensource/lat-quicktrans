@@ -4554,6 +4554,65 @@ static bool ft_emit_aeskeygen_inline(uint32_t **out,
 }
 #endif
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+#include "crypto/aes.h"
+
+/* Match LATU's interleaved AES tables.  Snapshot the state before writing any
+ * destination lane; the key may be the destination itself.  All guest memory
+ * reads precede destination updates, so a fault leaves the old XMM intact. */
+static bool ft_emit_latu_aes_encrypt(uint32_t **out,
+                                     const FastTemplateFields *fields,
+                                     target_ulong pc, int dst, bool table_loaded)
+{
+    const bool last = fields->id == dt_X86_INS_AESENCLAST;
+    const int table = la_t0, index = la_t1, result = la_t2;
+    const int state[2] = { la_t3, la_t4 };
+    const int dest = ft_xmm(dst);
+    int key;
+
+    if (!ft_emit_xmmm_src(out, fields, pc, &key)) {
+        return false;
+    }
+    if (key == dest) {
+        FT_LA_VOR_V_EMIT(out, ft_vscratch, key, key);
+        key = ft_vscratch;
+    }
+    FT_LA_VPICKVE2GR_DU_EMIT(out, state[0], dest, 0);
+    FT_LA_VPICKVE2GR_DU_EMIT(out, state[1], dest, 1);
+    if (!table_loaded) {
+        ft_emit_li64(out, table,
+                     (uintptr_t)(last ? AES_sbox_latx : AES_Te_latx));
+    } else {
+        /* Bounded scheduling experiment: preserve the three-instruction slot. */
+        FT_LA_OR_EMIT(out, table, table, 0);
+        FT_LA_ANDI_EMIT(out, 0, 0, 0);
+        FT_LA_ANDI_EMIT(out, 0, 0, 0);
+    }
+    for (int word = 0; word < 4; ++word) {
+        for (int column = 0; column < 4; ++column) {
+            int src_word = (word + column) & 3;
+            int shift = (src_word & 1) * 32 + column * 8;
+            FT_LA_BSTRPICK_D_EMIT(out, index, state[src_word >> 1],
+                                shift + 7, shift);
+            /* ALSL immediate is shift - 1: 3 selects a 16-byte row. */
+            FT_LA_ALSL_D_EMIT(out, index, index, table, 3);
+            FT_LA_LD_WU_EMIT(out, column ? index : result, index,
+                            column * sizeof(uint32_t));
+            if (column) {
+                if (last) {
+                    FT_LA_OR_EMIT(out, result, result, index);
+                } else {
+                    FT_LA_XOR_EMIT(out, result, result, index);
+                }
+            }
+        }
+        FT_LA_VINSGR2VR_W_EMIT(out, dest, result, word);
+    }
+    FT_LA_VXOR_V_EMIT(out, dest, dest, key);
+    return true;
+}
+#endif
+
 #include "emit-vpaes-entry.inc.c"
 
 static int ft_emit_aes_round_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
@@ -4579,6 +4638,12 @@ static int ft_emit_aes_round_template(const FastTemplateFields *fields, Translat
     !defined(CONFIG_LATX_AVX_OPT)
     if (option_vpaes) {
         return ft_emit_latu_vpaes(&out, fields, pc, dst) ? out - code : 0;
+    }
+#endif
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (fields->id == dt_X86_INS_AESENC ||
+        fields->id == dt_X86_INS_AESENCLAST) {
+        return ft_emit_latu_aes_encrypt(&out, fields, pc, dst, false) ? out - code : 0;
     }
 #endif
 #ifndef QUICKTRANS_LATU

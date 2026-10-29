@@ -412,6 +412,28 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
 
             insn_emitted = ft_emit_x87_shared_context(fields, insn_code,
                                                      first, last);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        } else if (fields->kind == FT_AES_ROUND_XMM_XMMM &&
+                   fields->modrm_mod == 3 && !debug_live && !option_vpaes &&
+                   (fields->id == dt_X86_INS_AESENC ||
+                    fields->id == dt_X86_INS_AESENCLAST) &&
+                   fields->prefix2 == dt_X86_PREFIX_OPSIZE && i > 0 &&
+                   fields_buf[i - 1].kind == FT_AES_ROUND_XMM_XMMM &&
+                   fields_buf[i - 1].modrm_mod == 3 &&
+                   fields_buf[i - 1].id == fields->id) {
+            /* The preceding register round leaves its table in t0.  No
+             * helper, memory addressing or per-instruction observer can
+             * intervene here.  RSP merging appends only ADDI_D to guest RSP
+             * after an AES round, and cannot clobber t0.  New TBs, different
+             * tables and every non-register-AES instruction take the normal
+             * entry; no persistent cache or generic immediate reuse exists. */
+            uint32_t *out = insn_code;
+            int dst = ft_modrm_reg_index(fields);
+
+            insn_emitted = dst < XMM_NUM &&
+                ft_emit_latu_aes_encrypt(&out, fields, fields->address,
+                                         dst, true) ? out - insn_code : 0;
+#endif
         } else {
             insn_emitted = emit_template_fields(fields, tb, fields->address,
                                                 insn_code);
