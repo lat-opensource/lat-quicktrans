@@ -44,7 +44,7 @@ static int lsenv;
 #define FT_LA_OPCODE_ST_W 0
 #define la_zero 0
 #define ft_mmx(r) (8+(r))
-enum { la_t0, la_t1, ft_vscratch=24, GPR_NUM=16, XMM_NUM=16 };
+enum { la_t0, la_t1, la_t2, ft_vscratch=24, GPR_NUM=16, XMM_NUM=16 };
 static int n, fpe_checks, seen[128];
 static void record(uint32_t **out,int op) { (*out)++; n++; seen[op]++; }
 #define ft_modrm_reg_index(f) ((f)->reg)
@@ -57,7 +57,16 @@ static bool ft_emit_rip_or_mem_addr(uint32_t **out,const FastTemplateFields *f,t
 static void ft_emit_lats_simd_fpe_check(uint32_t **out,TranslationBlock *tb,target_ulong pc) { fpe_checks++; }
 static void ft_emit_li64(uint32_t **out,int dst,uint64_t value) { (*out)++; n++; }
 static void ft_emit_store_env(uint32_t **out,int src,int off,int op) { (*out)++; n++; }
-static bool ft_emit_xmmm_src_bytes(uint32_t **out,const FastTemplateFields *f,target_ulong pc,int bytes,int *src) { *src=1;return true; }
+static bool ft_emit_xmmm_low_src(uint32_t **out,const FastTemplateFields *f,target_ulong pc,int bytes,int *src) { *src=1;return true; }
+typedef struct {uint32_t *pc;} FastBranchLabel;
+typedef struct {int unused;} FastBranchFixup;
+enum {FT_BRANCH_BEQ, FT_BRANCH_BNE};
+#define lsenv_offset_of_mxcsr(e) 0
+#define FT_LA_OPCODE_LD_WU 0
+static void ft_emit_load_env(uint32_t **out,int reg,int off,int op) {(*out)++;n++;}
+static void ft_emit_branch_placeholder(uint32_t **out,FastBranchFixup *fix,int op,int a,int b,FastBranchLabel *label) {(*out)++;n++;}
+static void ft_bind_branch_label(FastBranchLabel *label,uint32_t *pc) {label->pc=pc;}
+static void ft_resolve_branch_fixup(FastBranchFixup *fix) {}
 static void reset(void) { n=fpe_checks=0;for(int i=0;i<128;i++)seen[i]=0; }
 '''
 header += 'enum {' + ','.join(ids) + '};\n'

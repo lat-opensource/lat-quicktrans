@@ -33,7 +33,7 @@ def main() -> int:
         print("primary flag liveness must run before instruction emission",
               file=sys.stderr)
         return 1
-    if "fields[i].skip_flags = live_def == 0 && masks.use == 0;" not in source:
+    if not re.search(r"fields\[i\]\.skip_flags = live_def == 0 && \(masks\.use == 0", source):
         print("flag liveness must control per-instruction flag emission",
               file=sys.stderr)
         return 1

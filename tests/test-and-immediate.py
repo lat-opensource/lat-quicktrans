@@ -15,7 +15,7 @@ header = r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-enum {FT_ALU_AND,FT_ALU_ADD,FT_ALU_FORM_ACC_IMM,FT_ALU_FORM_RM_IMM,FT_ALU_FORM_RM_R,dt_X86_PREFIX_LOCK=0xf0,GPR_NUM=16,rax_index=0,la_zero=31};
+enum {FT_ALU_AND,FT_ALU_ADD,FT_ALU_FORM_ACC_IMM,FT_ALU_FORM_RM_IMM,FT_ALU_FORM_RM_R,dt_X86_PREFIX_LOCK=0xf0,GPR_NUM=16,rax_index=0,la_t2=24,la_zero=31};
 typedef struct {int alu_op,alu_width,alu_form,modrm_mod,rm,prefix0;bool skip_flags;int64_t imm;} FastTemplateFields;
 static uint64_t r[32];static int n;
 #define ft_modrm_rm_index(f) ((f)->rm)
@@ -48,7 +48,21 @@ int main(void) {
  }
  FastTemplateFields rejected={.alu_op=FT_ALU_ADD,.alu_width=32,.alu_form=FT_ALU_FORM_ACC_IMM,.skip_flags=true,.imm=3};
  uint32_t *out=code;assert(!ft_emit_and_imm_reg(&out,&rejected));
- rejected.alu_op=FT_ALU_AND;rejected.alu_width=16;assert(!ft_emit_and_imm_reg(&out,&rejected));
+ rejected.alu_op=FT_ALU_AND;rejected.alu_width=16;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+ for(int mi=0;mi<nm;mi++) {
+  uint64_t value=UINT64_C(0xdeadbeef89abcdef);
+  rejected.imm=masks[mi];r[0]=value;r[31]=0;out=code;n=0;
+  bool ok=ft_emit_and_imm_reg(&out,&rejected);
+  uint16_t mask=(uint16_t)rejected.imm;
+  bool eligible=mask!=65535 && (((mask & (mask+1))==0)||mask<=4095);
+  assert(ok==eligible);
+  assert(r[0]==(ok?((value & ~UINT64_C(65535)) | ((uint16_t)value & mask)):value));
+  assert(ok?(n>=1&&n<=2):(n==0));
+ }
+#else
+ assert(!ft_emit_and_imm_reg(&out,&rejected));
+#endif
  rejected.alu_width=8;assert(!ft_emit_and_imm_reg(&out,&rejected));
  printf("AND immediate semantic cases=%u hits=%u local-sequence=%d PASS\n",cases,hits,EXPECT_LOCAL);
 }
@@ -57,5 +71,6 @@ with tempfile.TemporaryDirectory() as d:
     c=Path(d)/'test.c';c.write_text(header+helper+main)
     for label,flags in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LOCAL=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('latu-native',['-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('user',['-DEXPECT_LOCAL=0'])]:
         exe=Path(d)/label
-        subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-fsanitize=undefined',*flags,str(c),'-o',str(exe)],check=True)
+        # Keep UB checks without requiring the shared libubsan runtime.
+        subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-fsanitize=undefined','-fsanitize-undefined-trap-on-error',*flags,str(c),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)

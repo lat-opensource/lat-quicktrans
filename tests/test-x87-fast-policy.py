@@ -61,6 +61,7 @@ static void *last_helper;
 static unsigned last_pointer_mask, helper_calls;
 static int operands[4096][5];
 static unsigned option_soft_fpu_fast;
+static unsigned option_softfpu_fast;
 static int option_soft_fpu = 1;
 static int lsenv, ft_vscratch = 40;
 static bool use_static_context = true;
@@ -104,6 +105,7 @@ static void dummy(uint32_t **out){*(*out)++=999;}
 #define helper_fisttll_ST0 0
 #define ft_emit_helper_prologue(out) dummy(out)
 #define ft_emit_helper_epilogue(out) dummy(out)
+#define ft_emit_x87_helper_epilogue(out) dummy(out)
 #define ft_emit_cpu_env_ptr(out, reg) dummy(out)
 #define ft_emit_host_call(out, func, mask) dummy(out)
 #define ft_emit_x87_helper(out, func) do {last_helper=(func); dummy(out);} while(0)

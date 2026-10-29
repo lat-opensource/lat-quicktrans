@@ -7,7 +7,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 src = (root / 'src/emitter/fast_translator/emit-string.inc.c').read_text()
-addr = src[src.index('static bool ft_emit_string_addr('):src.index('static void ft_emit_string_load_bytes(')]
+addr = src[src.index('static bool ft_emit_string_addr_scratch('):src.index('static void ft_emit_string_load_bytes(')]
 a = src.index('static bool ft_emit_string_body(')
 b = src.index('    int src_addr =', a)
 body = src[a:b] + '    return false;\n}\n'
@@ -19,7 +19,7 @@ header = r"""
 #include <stdio.h>
 #include <string.h>
 enum {es_index,cs_index,ss_index,ds_index,fs_index,gs_index};
-enum {rsi_index=6,rdi_index=7,la_t0=12,la_t3=15,la_t4=16,la_zero=31};
+enum {rsi_index=6,rdi_index=7,la_t0=12,la_t1=13,la_t2=14,la_t3=15,la_t4=16,la_zero=31};
 enum {dt_X86_INS_MOVSQ=1, HF_CS64_MASK=128, FT_LA_OPCODE_LD_D=1};
 typedef struct {struct {uint64_t base;} segs[6];} CPUX86State;
 typedef struct {int id,segment;bool addr32;} FastTemplateFields;
@@ -56,7 +56,7 @@ int main(void) {
   unsigned dest=2048+(longmode?0:env.segs[es_index].base);
   uint64_t value;memcpy(&value,expected+source,8);memcpy(expected+dest,&value,8);
   bool ok=ft_emit_string_body(&out,&f,8,nulltb?NULL:&tb);
-#if EXPECT_LATS
+#if EXPECT_DIRECT
   assert(ok);assert(memcmp(mem,expected,sizeof(mem))==0);
   if(flat&&seg!=fs_index&&seg!=gs_index)assert(out-code==2);
 #else
@@ -64,16 +64,17 @@ int main(void) {
 #endif
   assert(r[rsi_index]==(hi|128)&&r[rdi_index]==(hi|2048));n++;
  }
- printf("MOVSQ mode/segment cases=%u LATS=%d PASS\n",n,EXPECT_LATS);
+ printf("MOVSQ mode/segment cases=%u direct=%d PASS\n",n,EXPECT_DIRECT);
 }
 """
 with tempfile.TemporaryDirectory() as d:
     c = Path(d) / 'test.c'
     c.write_text(header + addr + body + main)
-    for label, flags in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),
-                         ('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),
-                         ('user',['-DEXPECT_LATS=0'])]:
+    for label, flags in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_DIRECT=1']),
+                         ('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_DIRECT=1']),
+                         ('user',['-DEXPECT_DIRECT=0'])]:
         binary = Path(d) / label
+        # Keep UB checks without requiring the shared libubsan runtime.
         subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror',
-                        '-fsanitize=undefined',*flags,str(c),'-o',str(binary)],check=True)
+                        '-fsanitize=undefined','-fsanitize-undefined-trap-on-error',*flags,str(c),'-o',str(binary)],check=True)
         subprocess.run([str(binary)],check=True)
