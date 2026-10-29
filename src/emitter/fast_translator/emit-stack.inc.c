@@ -74,10 +74,9 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
                 int regs[8] = { rax_index, rcx_index, rdx_index, rbx_index,
                                 rsp_index, rbp_index, rsi_index, rdi_index };
 
-                FT_LA_OR_EMIT(&out, la_t0, ft_gpr(rsp_index), la_zero);
+                /* RSP is updated only after all stores, including saved RSP. */
                 for (int i = 0; i < 8; i++) {
-                    int value = regs[i] == rsp_index ? la_t0 :
-                                                        ft_gpr(regs[i]);
+                    int value = ft_gpr(regs[i]);
                     if (width == 16) {
                         FT_LA_ST_H_EMIT(&out, value, ft_gpr(rsp_index),
                                         -(i + 1) * step);
@@ -136,8 +135,13 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
             return 0;
         }
         if (fields->reg == rsp_index) {
-            FT_LA_LD_D_EMIT(&out, la_t0, ft_gpr(rsp_index), 0);
-            FT_LA_OR_EMIT(&out, ft_gpr(rsp_index), la_t0, la_zero);
+            if (fields->alu_width == 32) {
+                FT_LA_LD_WU_EMIT(&out, ft_gpr(rsp_index),
+                                 ft_gpr(rsp_index), 0);
+            } else {
+                FT_LA_LD_D_EMIT(&out, ft_gpr(rsp_index),
+                                ft_gpr(rsp_index), 0);
+            }
             break;
         }
         if (fields->alu_width == 32) {
@@ -162,14 +166,11 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
         if (fields->reg < 0 || fields->reg >= GPR_NUM) {
             return 0;
         }
-        if (fields->reg == rsp_index) {
-            FT_LA_OR_EMIT(&out, la_t0, ft_gpr(rsp_index), la_zero);
-        }
         if (fields->alu_width == 32) {
-            FT_LA_ST_W_EMIT(&out, fields->reg == rsp_index ? la_t0 : ft_gpr(fields->reg), ft_gpr(rsp_index), -4);
+            FT_LA_ST_W_EMIT(&out, ft_gpr(fields->reg), ft_gpr(rsp_index), -4);
             FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index), ft_gpr(rsp_index), -4);
         } else {
-            FT_LA_ST_D_EMIT(&out, fields->reg == rsp_index ? la_t0 : ft_gpr(fields->reg), ft_gpr(rsp_index), -8);
+            FT_LA_ST_D_EMIT(&out, ft_gpr(fields->reg), ft_gpr(rsp_index), -8);
             FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index), ft_gpr(rsp_index), -8);
         }
         break;
@@ -177,11 +178,7 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
         if (fields->reg < 0 || fields->reg >= GPR_NUM) {
             return 0;
         }
-        if (fields->reg == rsp_index) {
-            FT_LA_OR_EMIT(&out, la_t0, ft_gpr(rsp_index), la_zero);
-        }
-        FT_LA_ST_H_EMIT(&out, fields->reg == rsp_index ? la_t0 :
-                        ft_gpr(fields->reg), ft_gpr(rsp_index), -2);
+        FT_LA_ST_H_EMIT(&out, ft_gpr(fields->reg), ft_gpr(rsp_index), -2);
         FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index),
                           ft_gpr(rsp_index), -2);
         break;
@@ -224,8 +221,7 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
             if (width == 32) {
                 FT_LA_LD_WU_EMIT(&out, ft_gpr(dst), ft_gpr(rsp_index), 0);
             } else {
-                FT_LA_LD_D_EMIT(&out, la_t0, ft_gpr(rsp_index), 0);
-                FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t0, la_zero);
+                FT_LA_LD_D_EMIT(&out, ft_gpr(dst), ft_gpr(rsp_index), 0);
             }
             FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index),
                               ft_gpr(rsp_index), bytes);

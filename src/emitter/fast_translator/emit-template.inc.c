@@ -2841,6 +2841,9 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         }
         break;
     case FT_JRCXZ_REL8:
+    {
+        int count_reg;
+        bool taken_if_equal;
 #ifdef QUICKTRANS_LATU
         tb->lazypc[0] = ft_exit_target_pc(pc + fields->size) - tb->pc;
         tb->lazypc[1] = ft_exit_target_pc(fields->imm64) - tb->pc;
@@ -2852,25 +2855,35 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         } else if (fields->alu_width == 32) {
             FT_LA_BSTRPICK_D_EMIT(&out, la_t1, ft_gpr(rcx_index), 31, 0);
         }
+#ifdef QUICKTRANS_LATU
+        /* LATU exits compare before using scratch registers. */
+        count_reg = fields->alu_width < 64 ? la_t1 : ft_gpr(rcx_index);
+        taken_if_equal = true;
+#else
+        /* LATS uses lhs as an exit scratch register; keep guest RCX intact. */
         FT_LA_SLTU_EMIT(&out, la_t0, la_zero,
                          fields->alu_width < 64 ? la_t1 : ft_gpr(rcx_index));
         FT_LA_XORI_EMIT(&out, la_t0, la_t0, 1);
+        count_reg = la_t0;
+        taken_if_equal = false;
+#endif
         {
             int tu_emitted = ft_emit_tu_jcc_compare(tb, code, &out, pc,
-                                                    fields, la_t0, la_zero,
-                                                    false);
+                                                    fields, count_reg, la_zero,
+                                                    taken_if_equal);
 
             if (tu_emitted) {
                 return tu_emitted;
             }
             tu_emitted = ft_emit_tu_jcc_partial_compare(
-                tb, code, &out, pc, fields, la_t0, la_zero, false);
+                tb, code, &out, pc, fields, count_reg, la_zero, taken_if_equal);
             if (tu_emitted) {
                 return tu_emitted;
             }
         }
         return ft_emit_jcc_exit_or_self_loop(tb, code, &out, pc, fields,
-                                             la_t0, la_zero, false);
+                                             count_reg, la_zero, taken_if_equal);
+    }
     case FT_LOOP_REL8:
     case FT_LOOPE_REL8:
     case FT_LOOPNE_REL8:
@@ -2880,9 +2893,20 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         tb->canlink[0] = 1;
         tb->canlink[1] = 1;
 #endif
-        FT_LA_ADDI_D_EMIT(&out, ft_gpr(rcx_index),
-                               ft_gpr(rcx_index), -1);
-        FT_LA_SLTU_EMIT(&out, la_t0, la_zero, ft_gpr(rcx_index));
+        if (fields->alu_width == 16) {
+            FT_LA_ADDI_D_EMIT(&out, la_t1, ft_gpr(rcx_index), -1);
+            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(rcx_index), la_t1, 15, 0);
+            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t1, 15, 0);
+            FT_LA_SLTU_EMIT(&out, la_t0, la_zero, la_t1);
+        } else {
+            FT_LA_ADDI_D_EMIT(&out, ft_gpr(rcx_index),
+                                   ft_gpr(rcx_index), -1);
+            if (fields->alu_width == 32) {
+                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(rcx_index),
+                                      ft_gpr(rcx_index), 31, 0);
+            }
+            FT_LA_SLTU_EMIT(&out, la_t0, la_zero, ft_gpr(rcx_index));
+        }
         if (fields->kind != FT_LOOP_REL8) {
             ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | la_t2 |
                      ((fields->kind == FT_LOOPE_REL8 ? COND_E : COND_NE)
