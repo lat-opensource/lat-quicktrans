@@ -7,7 +7,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 src = (root/'src/emitter/fast_translator/emit-alu.inc.c').read_text()
 a = src.index('static bool ft_emit_and_imm_reg(')
-b = src.index('static bool ft_emit_alu_template(', a)
+b = src.index('/* Keep the existing flag computation', a)
 helper = src[a:b]
 assert src[b:].count('if (op == FT_ALU_AND && ft_emit_and_imm_reg(out, fields))') == 2
 header = r'''

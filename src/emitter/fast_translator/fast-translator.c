@@ -2058,7 +2058,19 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
 
         masks = ft_template_eflag_masks(&fields[i], meta[i]);
         live_def = masks.def & pending;
-        fields[i].skip_flags = live_def == 0 && masks.use == 0;
+        fields[i].skip_flags = live_def == 0 && (masks.use == 0
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+            /* Keep the input carry live even when all outputs are dead. */
+            || (masks.use == CF_USEDEF_BIT &&
+                (fields[i].alu_op == FT_ALU_ADC ||
+                 fields[i].alu_op == FT_ALU_SBB) &&
+                fields[i].modrm_mod == 3 &&
+                fields[i].prefix0 != dt_X86_PREFIX_LOCK &&
+                (fields[i].alu_width == 32 || fields[i].alu_width == 64) &&
+                (fields[i].alu_form == FT_ALU_FORM_RM_R ||
+                 fields[i].alu_form == FT_ALU_FORM_R_RM))
+#endif
+        );
         if (trace_opt) {
             fprintf(stderr,
                     "[FT-OPT] pc=0x%lx id=%d kind=%d alu=%u form=%u "

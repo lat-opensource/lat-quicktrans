@@ -124,6 +124,12 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
     int width = ft_count_bits_width(fields->kind);
     int dst = ft_modrm_reg_index(fields);
     int src;
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    int result = la_t2;
+    bool direct_result = false;
+#else
+#define result la_t2
+#endif
     bool is_lzcnt;
     bool is_tzcnt;
     bool is_popcnt;
@@ -134,6 +140,13 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
         !ft_count_bits_load_src(&out, fields, pc, width, &src)) {
         return 0;
     }
+
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (fields->skip_flags && width != 16) {
+        result = ft_gpr(dst);
+        direct_result = true;
+    }
+#endif
 
     is_lzcnt = fields->kind == FT_LZCNT_R64_RM64 ||
                fields->kind == FT_LZCNT_R32_RM32 ||
@@ -146,18 +159,18 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
                 fields->kind == FT_POPCNT_R16_RM16;
 
     if (is_lzcnt) {
-        FT_LA_CLZ_D_EMIT(&out, la_t2, src);
+        FT_LA_CLZ_D_EMIT(&out, result, src);
         if (width != 64) {
-            FT_LA_ADDI_D_EMIT(&out, la_t2, la_t2, -(64 - width));
+            FT_LA_ADDI_D_EMIT(&out, result, result, -(64 - width));
         }
     } else if (is_tzcnt) {
-        FT_LA_CTZ_D_EMIT(&out, la_t2, src);
+        FT_LA_CTZ_D_EMIT(&out, result, src);
         if (width != 64) {
             FT_LA_BNE_EMIT(&out, src, la_zero, 2);
-            FT_LA_ORI_EMIT(&out, la_t2, la_zero, width);
+            FT_LA_ORI_EMIT(&out, result, la_zero, width);
         }
     } else if (is_popcnt) {
-        ft_emit_popcnt_value(&out, la_t2, src, width);
+        ft_emit_popcnt_value(&out, result, src, width);
     } else {
         return 0;
     }
@@ -173,11 +186,18 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
             FT_LA_X86MTFLAG_EMIT(&out, la_zero,
                                  CF_USEDEF_BIT | ZF_USEDEF_BIT);
             ft_count_bits_set_cf_from_zero(&out, src);
-            ft_count_bits_set_zf_from_zero(&out, la_t2);
+            ft_count_bits_set_zf_from_zero(&out, result);
         }
     }
 
-    ft_count_bits_store_dst(&out, fields, dst, la_t2, width);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (!direct_result) {
+        ft_count_bits_store_dst(&out, fields, dst, result, width);
+    }
+#else
+    ft_count_bits_store_dst(&out, fields, dst, result, width);
+#undef result
+#endif
     return (out - code);
 }
 
@@ -286,20 +306,40 @@ static int ft_emit_bls_template(const FastTemplateFields *fields, TranslationBlo
             !ft_emit_load_rm64(&out, fields, pc, &src)) {
             return 0;
         }
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (!fields->skip_flags && src == ft_gpr(dst)) {
+#else
         if (src == ft_gpr(dst)) {
+#endif
             FT_LA_OR_EMIT(&out, la_t3, src, la_zero);
             src = la_t3;
         }
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (ext != 3) {
+            FT_LA_ADDI_D_EMIT(&out, la_t2, src, -1);
+        }
+#else
         FT_LA_ADDI_D_EMIT(&out, la_t2, src, -1);
+#endif
     } else {
         if (ft_rex_w(fields) ||
             !ft_emit_load_rm32(&out, fields, pc, &src)) {
             return 0;
         }
         /* BLS flags are defined from the 32-bit source, not stale high bits. */
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (!fields->skip_flags) {
+            FT_LA_BSTRPICK_D_EMIT(&out, la_t3, src, 31, 0);
+            src = la_t3;
+        }
+        if (ext != 3) {
+            FT_LA_ADDI_W_EMIT(&out, la_t2, src, -1);
+        }
+#else
         FT_LA_BSTRPICK_D_EMIT(&out, la_t3, src, 31, 0);
         src = la_t3;
         FT_LA_ADDI_W_EMIT(&out, la_t2, src, -1);
+#endif
     }
 
     if (ext == 1) {
