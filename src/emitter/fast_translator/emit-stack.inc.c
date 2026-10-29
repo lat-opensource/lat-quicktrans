@@ -526,14 +526,26 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
         if (nesting_level) {
             FT_LA_OR_EMIT(&out, la_t1, ft_gpr(rsp_index), la_zero);
             for (i = 1; i < nesting_level; i++) {
-                FT_LA_ADDI_D_EMIT(&out, la_t2, ft_gpr(rbp_index),
-                                  -(int)(step * i));
+                int frame_addr = la_t2;
+                int frame_offset = 0;
+
+#ifdef QUICKTRANS_LATU
+                if (!is_16) {
+                    /* Nesting is masked to five bits: -8*i fits simm12. */
+                    frame_addr = ft_gpr(rbp_index);
+                    frame_offset = -(int)(step * i);
+                } else
+#endif
+                {
+                    FT_LA_ADDI_D_EMIT(&out, la_t2, ft_gpr(rbp_index),
+                                      -(int)(step * i));
+                }
                 if (is_16) {
-                    FT_LA_LD_HU_EMIT(&out, la_t3, la_t2, 0);
+                    FT_LA_LD_HU_EMIT(&out, la_t3, frame_addr, frame_offset);
                     FT_LA_ST_H_EMIT(&out, la_t3, ft_gpr(rsp_index),
                                     -step);
                 } else {
-                    FT_LA_LD_D_EMIT(&out, la_t3, la_t2, 0);
+                    FT_LA_LD_D_EMIT(&out, la_t3, frame_addr, frame_offset);
                     FT_LA_ST_D_EMIT(&out, la_t3, ft_gpr(rsp_index),
                                     -step);
                 }

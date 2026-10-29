@@ -4,13 +4,47 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* Zero words are success only for legacy LATS no-code instructions.
- * Keep this check on the zero-result branch of callers: ordinary emitters
- * still return zero on failure. LATU keeps its existing one-word NOPs.
+/* Zero words are success only for explicitly recognized no-code forms.
+ * Ordinary emitters still return zero on failure. Never omit memory access.
  */
 static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
 {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#ifdef QUICKTRANS_LATU
+    switch (fields->kind) {
+    case FT_ENDBR32:
+    case FT_ENDBR64:
+    case FT_PAUSE:
+        return true;
+    case FT_NOP_MULTI:
+        return fields->id == dt_X86_INS_FNOP && !option_soft_fpu;
+    case FT_MOV128_XMM_XMMM:
+    case FT_MOV128_XMMM_XMM:
+    case FT_MOVSD_XMM_M64:
+    case FT_MOVSD_M64_XMM:
+        return fields->modrm_mod == 3 &&
+               ft_modrm_reg_index(fields) < XMM_NUM &&
+               ft_modrm_reg_index(fields) == ft_modrm_rm_index(fields);
+    case FT_BLEND_XMM_XMMM_IMM8:
+        if (fields->modrm_mod != 3 ||
+            fields->prefix2 != dt_X86_PREFIX_OPSIZE ||
+            ft_modrm_reg_index(fields) >= XMM_NUM ||
+            ft_modrm_rm_index(fields) >= XMM_NUM) {
+            return false;
+        }
+        switch (fields->id) {
+        case dt_X86_INS_BLENDPS:
+            return !(fields->imm & 15);
+        case dt_X86_INS_BLENDPD:
+            return !(fields->imm & 3);
+        case dt_X86_INS_PBLENDW:
+            return !(fields->imm & 255);
+        default:
+            return false;
+        }
+    default:
+        return false;
+    }
+#elif defined(CONFIG_SOFTMMU)
     switch (fields->kind) {
     case FT_ENDBR32:
     case FT_ENDBR64:

@@ -121,6 +121,11 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
 {
     uint32_t *out = code;
 
+#ifdef QUICKTRANS_LATU
+    if (ft_emit_zero_code_allowed(fields)) {
+        return 0;
+    }
+#endif
     if (fields->instptn_skip) {
         FT_LA_NOP_EMIT(&out);
         return out - code;

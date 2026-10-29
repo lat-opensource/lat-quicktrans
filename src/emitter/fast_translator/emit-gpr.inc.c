@@ -278,6 +278,21 @@ static int ft_emit_mov_segment_template(const FastTemplateFields *fields, Transl
     selector_offset = offsetof(CPUX86State, segs[seg].selector);
 
     if (fields->kind == FT_MOV_RM_SEG) {
+#ifdef QUICKTRANS_LATU
+        if (fields->modrm_mod == 3 &&
+            (ft_rex_w(fields) ||
+             fields->prefix2 != dt_X86_PREFIX_OPSIZE)) {
+            int dst = ft_modrm_rm_index(fields);
+
+            if (dst < 0 || dst >= GPR_NUM) {
+                return 0;
+            }
+            /* LD_WU already zero-extends the selector for 32/64-bit writes. */
+            ft_emit_load_env(&out, ft_gpr(dst), selector_offset,
+                             FT_LA_OPCODE_LD_WU);
+            return out - code;
+        }
+#endif
         ft_emit_load_env(&out, la_t0, selector_offset, FT_LA_OPCODE_LD_WU);
 
         if (fields->modrm_mod == 3) {

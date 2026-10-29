@@ -2147,7 +2147,7 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
         masks = ft_template_eflag_masks(&fields[i], meta[i]);
         live_def = masks.def & pending;
         fields[i].skip_flags = live_def == 0 && (masks.use == 0
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
             /* Keep the input carry live even when all outputs are dead. */
             || (masks.use == CF_USEDEF_BIT &&
                 (fields[i].alu_op == FT_ALU_ADC ||

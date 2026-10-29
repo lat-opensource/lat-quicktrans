@@ -175,17 +175,17 @@ static int parse_prefixes(FDState *s)
     while (s->pos < s->code_size) {
         b = s->code[s->pos];
         switch (b) {
-        case 0xf0: s->prefix[0] = dt_X86_PREFIX_LOCK;  s->pos++; continue;
-        case 0xf3: s->prefix[0] = dt_X86_PREFIX_REP;   s->pos++; continue;
-        case 0xf2: s->prefix[0] = dt_X86_PREFIX_REPNE; s->pos++; continue;
-        case 0x2e: s->prefix[1] = dt_X86_PREFIX_CS;    s->pos++; continue;
-        case 0x36: s->prefix[1] = dt_X86_PREFIX_SS;    s->pos++; continue;
-        case 0x3e: s->prefix[1] = dt_X86_PREFIX_DS;    s->pos++; continue;
-        case 0x26: s->prefix[1] = dt_X86_PREFIX_ES;    s->pos++; continue;
-        case 0x64: s->prefix[1] = dt_X86_PREFIX_FS;    s->pos++; continue;
-        case 0x65: s->prefix[1] = dt_X86_PREFIX_GS;    s->pos++; continue;
-        case 0x66: s->prefix[2] = dt_X86_PREFIX_OPSIZE;   s->pos++; continue;
-        case 0x67: s->prefix[3] = dt_X86_PREFIX_ADDRSIZE; s->pos++; continue;
+        case 0xf0: s->prefix[0] = dt_X86_PREFIX_LOCK;  s->pos++; break;
+        case 0xf3: s->prefix[0] = dt_X86_PREFIX_REP;   s->pos++; break;
+        case 0xf2: s->prefix[0] = dt_X86_PREFIX_REPNE; s->pos++; break;
+        case 0x2e: s->prefix[1] = dt_X86_PREFIX_CS;    s->pos++; break;
+        case 0x36: s->prefix[1] = dt_X86_PREFIX_SS;    s->pos++; break;
+        case 0x3e: s->prefix[1] = dt_X86_PREFIX_DS;    s->pos++; break;
+        case 0x26: s->prefix[1] = dt_X86_PREFIX_ES;    s->pos++; break;
+        case 0x64: s->prefix[1] = dt_X86_PREFIX_FS;    s->pos++; break;
+        case 0x65: s->prefix[1] = dt_X86_PREFIX_GS;    s->pos++; break;
+        case 0x66: s->prefix[2] = dt_X86_PREFIX_OPSIZE;   s->pos++; break;
+        case 0x67: s->prefix[3] = dt_X86_PREFIX_ADDRSIZE; s->pos++; break;
         default:
             if (s->mode && b >= 0x40 && b <= 0x4f) {
                 s->rex = b;
@@ -199,6 +199,13 @@ static int parse_prefixes(FDState *s)
             }
             s->pos++;
             return b;
+        }
+        /* A legacy prefix after REX makes that REX ineffective.  A later
+         * REX can still replace it on the next iteration. */
+        if (s->has_rex) {
+            s->rex = 0;
+            s->has_rex = 0;
+            s->rex_w = s->rex_r = s->rex_x = s->rex_b = 0;
         }
     }
     return -1;
