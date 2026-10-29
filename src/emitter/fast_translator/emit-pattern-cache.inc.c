@@ -144,6 +144,9 @@ static int emit_template_fields(const FastTemplateFields *fields,
         ft_inst_pattern_stats.hits++;
 #endif
         words = ft_inst_pattern_table.words[index];
+#ifdef FT_LA_CHECK_SPACE
+        FT_LA_CHECK_SPACE(code, (size_t)words * sizeof(*code));
+#endif
         ft_inst_pattern_copy(code, ft_inst_pattern_table.code[index], words);
         return words;
     }

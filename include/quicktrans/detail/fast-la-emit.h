@@ -27,6 +27,9 @@ static inline bool ft_la_fits_simm(int value, int bits)
 
 static inline void ft_la_emit_u32(uint32_t **code, uint32_t insn)
 {
+#ifdef FT_LA_CHECK_SPACE
+    FT_LA_CHECK_SPACE(*code, sizeof(**code));
+#endif
     **code = insn;
     *code += 1;
 }

@@ -54,7 +54,18 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    legacy = bodies[-1]
+    implementations = function_bodies(
+        source, "latx_fast_decode_translate_tb_primary_ex_impl")
+    if len(implementations) != 1:
+        print("expected one primary implementation", file=sys.stderr)
+        return 1
+    wrapper = bodies[-1]
+    if "*code_size = ft_code_space_error(error);" not in wrapper or \
+       "ft_code_space_clear();" not in wrapper:
+        print("primary wrapper must preserve resource errors and clear guard",
+              file=sys.stderr)
+        return 1
+    legacy = implementations[0]
     # LATS can ask the caller to retry translation to avoid a code-page
     # deadlock. This is not a decode failure and must not become one.
     retry = re.compile(
@@ -63,6 +74,11 @@ def main() -> int:
         r"return false;\s*}\s*#endif"
     )
     legacy = retry.sub("", legacy, count=1)
+    # Auxiliary search allocation has its own allocator retry, not a miss.
+    legacy = re.sub(
+        r"if \(!search_block\) \{\s*"
+        r"\*code_size = __GENCODE_ERR_AUX_DATA_OVERFLOW;\s*"
+        r"return false;\s*}", "", legacy)
     if "return false;" in legacy:
         print("legacy primary contains an unclassified return false",
               file=sys.stderr)

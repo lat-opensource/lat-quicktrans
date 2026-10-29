@@ -11,7 +11,7 @@ import sys
 
 def main() -> int:
     source = pathlib.Path(sys.argv[1]).read_text()
-    signature = "bool latx_fast_decode_translate_tb_primary_ex("
+    signature = "static bool latx_fast_decode_translate_tb_primary_ex_impl("
     start = source.rindex(signature)
     end = source.index(
         "bool latx_fast_decode_translate_tb_primary(", start,

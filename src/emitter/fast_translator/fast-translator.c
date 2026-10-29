@@ -105,6 +105,10 @@ bool latx_fast_translate_sample_for_bench(CPUArchState *env,
 
 #include "common.h"
 #include "quicktrans/detail/fast_decoder.h"
+#ifndef QUICKTRANS_LATU
+#include "quicktrans/detail/code-space.h"
+#define FT_LA_CHECK_SPACE(out, bytes) ft_code_space_check(out, bytes)
+#endif
 #include "quicktrans/detail/fast-la-emit.h"
 #include "ir1.h"
 #include "latx-options.h"
@@ -129,6 +133,7 @@ bool latx_fast_translate_sample_for_bench(CPUArchState *env,
 #include "tcg/tcg.h"
 #ifndef QUICKTRANS_LATU
 #include "tcg/tcg-split-tb.h"
+#include "accel/tcg/internal.h"
 #endif
 #include "tcg/insn-start-words.h"
 
@@ -465,10 +470,26 @@ static int ft_encode_search(TranslationBlock *tb,
                             uint8_t *block,
                             bool check_highwater)
 {
+#ifdef QUICKTRANS_LATU
     uint8_t *highwater = tcg_ctx->code_gen_highwater;
+#else
+    uint8_t *highwater = tcg_splitwx_to_rx(tcg_ctx->code_gen_highwater);
+#endif
     uint16_t *insn_end_off = tcg_ctx->gen_insn_end_off;
     uint8_t *p = block;
 
+#ifndef QUICKTRANS_LATU
+    /* PC deltas fit one byte, code deltas <=65532 fit three SLEB bytes.
+     * Only the initial PC-relative address can need ten bytes. Check once,
+     * before writing, rather than testing capacity for every record. */
+    size_t search_bound = (size_t)tb->icount *
+                         (TARGET_INSN_START_WORDS + 3) + 9;
+    if (check_highwater &&
+        ((uintptr_t)p > (uintptr_t)highwater ||
+         search_bound > (uintptr_t)highwater - (uintptr_t)p)) {
+        longjmp(ft_code_space_active->unwind, FT_CODE_REGION_FULL);
+    }
+#endif
     for (int i = 0, n = tb->icount; i < n; ++i) {
         if (i == 0) {
 #ifdef QUICKTRANS_LATU
@@ -497,9 +518,11 @@ static int ft_encode_search(TranslationBlock *tb,
                 p = ft_encode_sleb128(p, end_delta);
             }
         }
+#ifdef QUICKTRANS_LATU
         if (check_highwater && unlikely(p > highwater)) {
             return -1;
         }
+#endif
     }
 
     return p - block;
@@ -1409,14 +1432,18 @@ static const FastTemplateRuntimeInfo ft_template_runtime_table[FT_KIND_COUNT] = 
     [FT_X87_FNSTSW_M16] = { .uses_x87_top = true },
 };
 
-bool latx_fast_translate_sample_for_bench(CPUArchState *env,
+static bool latx_fast_translate_sample_for_bench_impl(CPUArchState *env,
                                           TranslationBlock *tb,
                                           const uint8_t *bytes,
                                           int len,
                                           target_ulong pc,
                                           int *code_size,
                                           LatxFastTranslatorBenchStats *stats,
-                                          bool detail_stats)
+                                          bool detail_stats
+#ifndef QUICKTRANS_LATU
+                                          , FtCodeSpace *space
+#endif
+                                          )
 {
     uint32_t *code = (uint32_t *)tb->tc.ptr;
     const uint8_t *inst_cache = bytes;
@@ -1481,6 +1508,9 @@ bool latx_fast_translate_sample_for_bench(CPUArchState *env,
     }
 
     stage_start = detail_stats ? ft_bench_now_ns() : 0;
+#ifndef QUICKTRANS_LATU
+    ft_code_space_activate(space);
+#endif
     if (ft_template_uses_mmx(fields)) {
         uint32_t *out = code + emitted;
 
@@ -3512,12 +3542,16 @@ bool latx_fast_patch_tu_tb_branches(TranslationBlock *tb)
     return true;
 }
 
-bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
+static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
                                               TranslationBlock *tb,
                                               int max_insns,
                                               int *code_size,
                                               int *search_size,
-                                              QuickTransFailure *failure)
+                                              QuickTransFailure *failure
+#ifndef QUICKTRANS_LATU
+                                              , FtCodeSpace *space
+#endif
+                                              )
 {
     uint32_t *code = (uint32_t *)tb->tc.ptr;
     target_ulong start_pc = tb->pc;
@@ -3548,9 +3582,11 @@ bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
     host_start = lsenv->tr_data->host_addr[0];
 #endif
 
+#ifdef QUICKTRANS_LATU
     if (max_insns == 1) {
         max_insns = TCG_MAX_INSNS;
     }
+#endif
     if (max_insns > TCG_MAX_INSNS) {
         max_insns = TCG_MAX_INSNS;
     }
@@ -3725,6 +3761,9 @@ bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
         }
         stage_emit_start = ft_bench_now_ns();
     }
+#ifndef QUICKTRANS_LATU
+    ft_code_space_activate(space);
+#endif
     for (int i = 0; i < icount; ++i) {
         FastTemplateFields *fields = &fields_buf[i];
         const FastTemplateRuntimeInfo *meta = meta_buf[i];
@@ -3833,13 +3872,13 @@ bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
                                             (uint8_t *)(code + emitted), true);
 #else
             if (option_split_search) {
-                void *search_block = region_alloc_search(tb, curr_mtcc(env));
+                void *search_block = region_alloc_search_size(
+                    tb, curr_mtcc(env),
+                    (size_t)tb->icount * (TARGET_INSN_START_WORDS + 3) + 9);
 
                 if (!search_block) {
-                    return ft_primary_fail_decoded(
-                        env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                        QUICKTRANS_FAILURE_REASON_SEARCH_ALLOC,
-                        fields->address, fields, i);
+                    *code_size = __GENCODE_ERR_AUX_DATA_OVERFLOW;
+                    return false;
                 }
                 *search_size = 0;
                 if (ft_encode_search(tb, fields_buf, search_block, false) < 0) {
@@ -3928,16 +3967,13 @@ bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
                                     (uint8_t *)(code + emitted), true);
 #else
     if (option_split_search) {
-        void *search_block = region_alloc_search(tb, curr_mtcc(env));
+        void *search_block = region_alloc_search_size(
+            tb, curr_mtcc(env),
+            (size_t)tb->icount * (TARGET_INSN_START_WORDS + 3) + 9);
 
         if (!search_block) {
-            int last = icount - 1;
-            FastTemplateFields *last_fields = &fields_buf[last];
-
-            return ft_primary_fail_decoded(
-                env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                QUICKTRANS_FAILURE_REASON_SEARCH_ALLOC,
-                last_fields->address, last_fields, last);
+            *code_size = __GENCODE_ERR_AUX_DATA_OVERFLOW;
+            return false;
         }
         *search_size = 0;
         if (ft_encode_search(tb, fields_buf, search_block, false) < 0) {
@@ -3975,6 +4011,89 @@ bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
     }
     ft_primary_tb_trace(tb, fields_buf, icount, emitted);
     return true;
+}
+
+#ifndef QUICKTRANS_LATU
+static void ft_tb_code_space_init(FtCodeSpace *space, TranslationBlock *tb)
+{
+    uintptr_t start = (uintptr_t)tcg_splitwx_to_rw(tb->tc.ptr);
+    uintptr_t end = (uintptr_t)tcg_ctx->code_gen_highwater;
+
+    ft_code_space_init(space, (uintptr_t)tb->tc.ptr,
+                       end > start ? end - start : 0);
+}
+
+static int ft_code_space_error(int error)
+{
+    return error == FT_CODE_TB_TOO_LARGE ? __GENCODE_ERR_TB_TOO_LARGE
+                                       : __GENCODE_ERR_BUFFER_OVERFLOW;
+}
+#endif
+
+bool latx_fast_translate_sample_for_bench(CPUArchState *env,
+                                          TranslationBlock *tb,
+                                          const uint8_t *bytes, int len,
+                                          target_ulong pc, int *code_size,
+                                          LatxFastTranslatorBenchStats *stats,
+                                          bool detail_stats)
+{
+#ifndef QUICKTRANS_LATU
+    FtCodeSpace space;
+    int error;
+    bool ok;
+
+    if (!tb || !code_size) {
+        return false;
+    }
+    *code_size = 0;
+    ft_tb_code_space_init(&space, tb);
+    error = setjmp(space.unwind);
+    if (unlikely(error)) {
+        ft_code_space_clear();
+        *code_size = ft_code_space_error(error);
+        return false;
+    }
+    ok = latx_fast_translate_sample_for_bench_impl(
+        env, tb, bytes, len, pc, code_size, stats, detail_stats, &space);
+    ft_code_space_clear();
+    return ok;
+#else
+    return latx_fast_translate_sample_for_bench_impl(
+        env, tb, bytes, len, pc, code_size, stats, detail_stats);
+#endif
+}
+
+bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
+                                              TranslationBlock *tb,
+                                              int max_insns,
+                                              int *code_size,
+                                              int *search_size,
+                                              QuickTransFailure *failure)
+{
+#ifndef QUICKTRANS_LATU
+    FtCodeSpace space;
+    int error;
+    bool ok;
+
+    if (!tb || !code_size) {
+        return false;
+    }
+    *code_size = 0;
+    ft_tb_code_space_init(&space, tb);
+    error = setjmp(space.unwind);
+    if (unlikely(error)) {
+        ft_code_space_clear();
+        *code_size = ft_code_space_error(error);
+        return false;
+    }
+    ok = latx_fast_decode_translate_tb_primary_ex_impl(
+        env, tb, max_insns, code_size, search_size, failure, &space);
+    ft_code_space_clear();
+    return ok;
+#else
+    return latx_fast_decode_translate_tb_primary_ex_impl(
+        env, tb, max_insns, code_size, search_size, failure);
+#endif
 }
 
 bool latx_fast_decode_translate_tb_primary(CPUArchState *env,

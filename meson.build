@@ -250,3 +250,18 @@ test(
     files('src/emitter/fast_translator/emit-template.inc.c'),
   ],
 )
+
+code_space_test = executable(
+  'test-code-space',
+  'tests/test-code-space.c',
+  include_directories: quicktrans_include_directories,
+)
+test('quicktrans_code_space', code_space_test)
+
+code_space_threads_test = executable(
+  'test-code-space-threads',
+  'tests/test-code-space-threads.c',
+  include_directories: quicktrans_include_directories,
+  dependencies: dependency('threads'),
+)
+test('quicktrans_code_space_threads', code_space_threads_test)

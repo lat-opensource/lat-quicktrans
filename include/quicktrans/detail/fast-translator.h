@@ -52,6 +52,9 @@ bool latx_fast_decode_translate_tb_primary(CPUArchState *env,
                                            int max_insns,
                                            int *code_size,
                                            int *search_size);
+/* In LATS builds, false with *code_size < 0 is a retryable code-buffer
+ * or TB-size error from accel/tcg/internal.h, not a decode/emit miss.
+ * The sample-bench entry uses the same convention. */
 bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
                                               TranslationBlock *tb,
                                               int max_insns,
