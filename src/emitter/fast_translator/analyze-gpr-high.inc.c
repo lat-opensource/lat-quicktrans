@@ -27,16 +27,7 @@ static bool ft_gpr_high_32_info(const FastTemplateFields *f,
 
     *write32 = 0;
     *can_omit = false;
-    if (!meta || meta->terminal_exit || f->segment >= 0 || ft_rex_w(f) ||
-        f->prefix0 == dt_X86_PREFIX_LOCK ||
-        f->prefix2 == dt_X86_PREFIX_OPSIZE || f->instptn_skip ||
-        f->instptn_div_kind || f->direct_cmp_width ||
-        f->direct_cmp_lhs_gpr >= 0 || f->direct_cmp_rhs_gpr >= 0 ||
-        f->direct_bit_index_gpr >= 0 || f->direct_bit_index_imm >= 0 ||
-        f->direct_branch_kind != FT_DIRECT_BRANCH_NONE ||
-        f->direct_float_result || f->direct_float_xx) {
-        return false;
-    }
+
 
     if (f->alu_op != FT_ALU_NONE) {
         if (f->alu_width != 32) {
@@ -78,7 +69,7 @@ static bool ft_gpr_high_32_info(const FastTemplateFields *f,
             return false;
         }
         if (f->alu_op == FT_ALU_CMP || f->alu_op == FT_ALU_TEST) {
-            return true; /* Pure low-half read, no destination kill. */
+            goto validate; /* Pure low-half read, no destination kill. */
         }
         *can_omit = true;
     } else {
@@ -170,6 +161,22 @@ static bool ft_gpr_high_32_info(const FastTemplateFields *f,
         default:
             return false;
         }
+    }
+validate:
+    /* Reject unrecognized kinds/forms before checking combination metadata.
+     * Every successful path still passes the original safety checks. */
+    if (!meta || meta->terminal_exit || f->segment >= 0 || ft_rex_w(f) ||
+        f->prefix0 == dt_X86_PREFIX_LOCK ||
+        f->prefix2 == dt_X86_PREFIX_OPSIZE || f->instptn_skip ||
+        f->instptn_div_kind || f->direct_cmp_width ||
+        f->direct_cmp_lhs_gpr >= 0 || f->direct_cmp_rhs_gpr >= 0 ||
+        f->direct_bit_index_gpr >= 0 || f->direct_bit_index_imm >= 0 ||
+        f->direct_branch_kind != FT_DIRECT_BRANCH_NONE ||
+        f->direct_float_result || f->direct_float_xx) {
+        return false;
+    }
+    if (f->alu_op == FT_ALU_CMP || f->alu_op == FT_ALU_TEST) {
+        return true;
     }
     if (dst < 0 || dst >= GPR_NUM) {
         return false;

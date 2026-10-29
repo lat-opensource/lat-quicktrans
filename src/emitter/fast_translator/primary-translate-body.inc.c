@@ -31,6 +31,19 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
     bool rsp_next_overwrite = false;
     bool rsp_merge_enabled;
 #endif
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    uint8_t fetch_cache[15];
+    target_ulong fetch_cache_pc = 0;
+    int fetch_cache_len = 0;
+    /* Reuse only read-only, private, non-shadow code on the entry page.
+     * Writable/shared aliases and later pages need the original fetch path. */
+    int fetch_page_flags = page_get_flags(start_pc);
+    bool fetch_cache_allowed =
+        (fetch_page_flags & (PAGE_VALID | PAGE_READ | PAGE_EXEC)) ==
+            (PAGE_VALID | PAGE_READ | PAGE_EXEC) &&
+        !(fetch_page_flags & (PAGE_WRITE | PAGE_WRITE_ORG | PAGE_MEMSHARE)) &&
+        !page_is_shadow_not_shmm(start_pc);
+#endif
     unsigned int analysis_candidates = 0;
     bool x87_top_active = false;
     bool mmx_active = false;
@@ -106,9 +119,36 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
                 QUICKTRANS_FAILURE_REASON_INSN_LIMIT, pc, NULL, 0, 0,
                 FT_UNSUPPORTED, icount);
         }
-        if (!ft_decode_x86_primary_window(env, host_start, start_pc, pc,
-                                          inst_cache, decode_mode, &decoded,
-                                          &max_insn_len, &page_boundary)) {
+        bool decode_ok = false;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fetch_cache_allowed && pc >= fetch_cache_pc && pc - fetch_cache_pc < fetch_cache_len &&
+            (pc & TARGET_PAGE_MASK) == (start_pc & TARGET_PAGE_MASK)) {
+            int offset = pc - fetch_cache_pc;
+            int available = fetch_cache_len - offset;
+            decode_ok = fast_decoder_get_ft(fetch_cache + offset, available,
+                                             pc, &decoded, decode_mode);
+            if (decode_ok) {
+                memcpy(inst_cache, fetch_cache + offset, available);
+                max_insn_len = available;
+                page_boundary = false;
+            }
+        }
+#endif
+        if (!decode_ok) {
+            decode_ok = ft_decode_x86_primary_window(env, host_start, start_pc,
+                          pc, inst_cache, decode_mode, &decoded,
+                          &max_insn_len, &page_boundary);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            if (decode_ok && fetch_cache_allowed &&
+                (pc & TARGET_PAGE_MASK) == (start_pc & TARGET_PAGE_MASK) &&
+                max_insn_len <= TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1))) {
+                memcpy(fetch_cache, inst_cache, max_insn_len);
+                fetch_cache_pc = pc;
+                fetch_cache_len = max_insn_len;
+            }
+#endif
+        }
+        if (!decode_ok) {
             if (page_boundary && icount) {
                 ft_primary_update_last_info(tb, &fields_buf[icount - 1]);
                 break;
@@ -223,7 +263,19 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
         }
 
         analysis_candidates |= FT_CANDIDATES_NAME(fields);
+#ifdef QUICKTRANS_LATU
+        _Static_assert(sizeof(*fields) % sizeof(uint64_t) == 0,
+                       "Field copy requires complete 64-bit chunks");
+#pragma GCC unroll 16
+        for (unsigned offset = 0; offset < sizeof(*fields);
+             offset += sizeof(uint64_t)) {
+            /* memcpy permits object-representation copies without aliasing. */
+            __builtin_memcpy((char *)&fields_buf[icount] + offset,
+                             (const char *)fields + offset, sizeof(uint64_t));
+        }
+#else
         fields_buf[icount] = *fields;
+#endif
         meta_buf[icount] = meta;
         if (stage_stats) {
             ft_primary_stage_stats.insns++;
@@ -348,7 +400,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
         insn_emitted = ft_rsp_merge_emit_register(fields, insn_code,
                                                    rsp_pending, rsp_step);
         rsp_direct = insn_emitted != 0;
-        if (!rsp_direct)
+        if (!rsp_direct) {
 #endif
         if (!debug_live && ft_x87_can_share_context(fields)) {
             bool first = i == 0 ||
@@ -364,6 +416,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
         }
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
     defined(LATX_QUICKTRANS_RSP_SEARCH_ABI) && FT_WITH_RSP_MERGE
+        }
         if (rsp_merge_enabled && (rsp_step || rsp_pending) &&
             (insn_emitted > 0 || ft_emit_zero_code_allowed(fields))) {
             if (rsp_pending && rsp_next_overwrite) {

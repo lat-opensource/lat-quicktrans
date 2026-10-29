@@ -1141,7 +1141,6 @@ static FastTemplateEflagMasks ft_template_eflag_masks(
     const FastTemplateFields *fields,
     const FastTemplateRuntimeInfo *meta);
 static bool ft_primary_trace_opt_enabled(void);
-static bool ft_template_uses_mmx(const FastTemplateFields *fields);
 static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo **meta,
                                    int count, unsigned int candidates,
@@ -2056,7 +2055,8 @@ enum {
     FT_ANALYZE_FLOAT = 4,
     FT_ANALYZE_SBB = 8,
     FT_ANALYZE_RSP = 16,
-    FT_ANALYZE_ALL = 31,
+    FT_ANALYZE_XMM_HIGH = 32,
+    FT_ANALYZE_ALL = 63,
 };
 
 #define FT_WITH_RSP_MERGE 1
@@ -2091,6 +2091,7 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
     !defined(CONFIG_LATX_AVX_OPT)
     uint64_t need_xmm_lanes = FT_XMM_LANES_ALL;
+    analyze_xmm_high &= (candidates & FT_ANALYZE_XMM_HIGH) != 0;
 #else
     (void)analyze_xmm_high;
 #endif
@@ -2154,8 +2155,12 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
     !defined(CONFIG_LATX_AVX_OPT)
         /* Share O7's ordinary64/TF/debug/POPF policy, not its GPR state. */
-        ft_analyze_xmm_high_step(&fields[i], meta[i], &need_xmm_lanes,
-                                 analyze_xmm_high);
+        if (analyze_xmm_high) {
+            ft_analyze_xmm_high_step(&fields[i], meta[i], &need_xmm_lanes,
+                                     true);
+        } else {
+            fields[i].scalar_direct_dst = false;
+        }
 #else
         fields[i].scalar_direct_dst = false;
 #endif

@@ -1983,7 +1983,7 @@ static bool ft_emit_x87_latu_soft_load(uint32_t **out,
                                      target_ulong pc)
 {
 #ifdef QUICKTRANS_LATU
-    int width, addr;
+    int width = 0, addr;
     bool integer = f->kind != FT_X87_FLD_M32 && f->kind != FT_X87_FLD_M64;
     int top = lsenv_offset_of_top(lsenv);
     int tag = lsenv_offset_of_tag_word(lsenv);

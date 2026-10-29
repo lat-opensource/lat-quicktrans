@@ -8,13 +8,20 @@
 
 quicktrans_root = join_paths(meson.current_source_dir(), '..', '..')
 
-quicktrans_latx_include_directories = [
-  include_directories(
+# Older embedding trees can keep the original physical submodule layout.
+if not is_variable('quicktrans_latx_host_includes')
+  quicktrans_latx_host_includes = include_directories(
     '../../../../../../linux-user',
     '../../../../../../linux-user/x86_64',
     '../../../../../../linux-user/host/loongarch',
     '../../../..',
     '../../../include',
+  )
+endif
+
+quicktrans_latx_include_directories = [
+  quicktrans_latx_host_includes,
+  include_directories(
     '../../include',
     '../../include/quicktrans/detail',
     '../../src/decoder',

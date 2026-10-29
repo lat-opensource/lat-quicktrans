@@ -22,6 +22,13 @@ static unsigned int FT_SPECIALIZED_NAME(const FastTemplateFields *fields)
     case FT_IDIV_RM64:
         mask |= FT_ANALYZE_DIV;
         break;
+#if !defined(CONFIG_SOFTMMU) && !defined(CONFIG_LATX_AVX_OPT)
+    /* Only this kind can acquire scalar_direct_dst. Keep all instructions
+     * in the backward analysis if any candidate exists in the TB. */
+    case FT_SIMD_SCALAR_BIN_XMM_XMMM:
+        mask |= FT_ANALYZE_XMM_HIGH;
+        break;
+#endif
     case FT_SIMD_SCALAR_CMP_XMM_XMMM:
         mask |= FT_ANALYZE_FLOAT;
         break;
