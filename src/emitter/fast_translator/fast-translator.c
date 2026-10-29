@@ -784,7 +784,9 @@ typedef struct FtEmitProfileStats {
     uint64_t kind_hits[FT_KIND_COUNT];
 } FtEmitProfileStats;
 
+#ifdef CONFIG_LATX_DEBUG
 static FtEmitProfileStats ft_emit_profile_stats;
+#endif
 
 static FtEmitCacheKey ft_emit_cache_key(const FastTemplateFields *fields)
 {
@@ -3421,8 +3423,10 @@ static bool ft_primary_trace_opt_enabled(void)
 #endif
 }
 
+#ifdef CONFIG_LATX_DEBUG
 static int ft_primary_debug_live_initialized;
 static target_ulong ft_primary_debug_live_target;
+#endif
 
 static bool ft_primary_debug_live_enabled(void)
 {
@@ -3452,11 +3456,13 @@ static target_ulong ft_primary_debug_live_pc(void)
 #endif
 }
 
+#ifdef CONFIG_LATX_DEBUG
 static bool ft_primary_debug_code_initialized;
 static target_ulong ft_primary_debug_code_pc;
 static target_ulong ft_primary_debug_code_low12;
 static bool ft_primary_debug_code_has_low12;
 static unsigned int ft_primary_debug_code_remaining;
+#endif
 
 static void ft_primary_debug_code_init(void)
 {
