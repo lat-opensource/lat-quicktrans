@@ -19,6 +19,33 @@ static int ft_emit_emms_template(const FastTemplateFields *fields, TranslationBl
     return (out - code);
 }
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+/* Mirror update_fp_status without a host call. cw must be la_t0. */
+static void ft_emit_x87_soft_control(uint32_t **out)
+{
+    int status = lsenv_offset_of_fp_status(lsenv);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t2, la_t0, 11, 10);
+    ft_emit_store_env(out, la_t2,
+        status + offsetof(float_status, float_rounding_mode), FT_LA_OPCODE_ST_B);
+    FT_LA_MOVFCSR2GR_EMIT(out, la_t1, 0);
+    FT_LA_ANDI_EMIT(out, la_t3, la_t2, 1);
+    FT_LA_BEQ_EMIT(out, la_t3, la_zero, 2);
+    FT_LA_XORI_EMIT(out, la_t2, la_t2, 2);
+    FT_LA_BSTRINS_W_EMIT(out, la_t1, la_t2, FCSR_OFF_RM + 1, FCSR_OFF_RM);
+    FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t1);
+    /* PC=01 is reserved; use the helper's extended-precision default. */
+    FT_LA_BSTRPICK_W_EMIT(out, la_t2, la_t0, 9, 8);
+    ft_emit_li64(out, la_t3, floatx80_precision_s |
+                   (floatx80_precision_x << 8) |
+                   (floatx80_precision_d << 16) |
+                   (floatx80_precision_x << 24));
+    FT_LA_SLLI_W_EMIT(out, la_t2, la_t2, 3);
+    FT_LA_SRL_D_EMIT(out, la_t3, la_t3, la_t2);
+    ft_emit_store_env(out, la_t3,
+        status + offsetof(float_status, floatx80_rounding_precision), FT_LA_OPCODE_ST_B);
+}
+#endif
+
 static int ft_emit_x87_state_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -39,6 +66,16 @@ static int ft_emit_x87_state_template(const FastTemplateFields *fields, Translat
         ft_emit_li64(&out, la_t0, 0x0101010101010101ULL);
         ft_emit_store_env(&out, la_t0, lsenv_offset_of_tag_word(lsenv),
                           FT_LA_OPCODE_ST_D);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (option_soft_fpu && option_soft_fpu_fast) {
+            FT_LA_ORI_EMIT(&out, la_t0, la_zero, 0x37f);
+            ft_emit_x87_soft_control(&out);
+            ft_emit_store_env(&out, la_zero, offsetof(CPUX86State, fpcs), FT_LA_OPCODE_ST_H);
+            ft_emit_store_env(&out, la_zero, offsetof(CPUX86State, fpds), FT_LA_OPCODE_ST_H);
+            ft_emit_store_env(&out, la_zero, offsetof(CPUX86State, fpip), FT_LA_OPCODE_ST_D);
+            ft_emit_store_env(&out, la_zero, offsetof(CPUX86State, fpdp), FT_LA_OPCODE_ST_D);
+        } else
+#endif
         if (option_soft_fpu) {
             ft_emit_helper_prologue(&out);
             ft_emit_cpu_env_ptr(&out, la_a0);
@@ -63,11 +100,16 @@ static int ft_emit_x87_state_template(const FastTemplateFields *fields, Translat
             return 0;
         }
         ft_emit_load_env(&out, la_t0, fpus_offset, FT_LA_OPCODE_LD_HU);
-        ft_emit_raw(&out, FT_LA_OPCODE_MOVFCSR2GR | la_t1);
         FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 7, 0);
         FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 15, 15);
-        FT_LA_BSTRINS_D_EMIT(&out, la_t1, la_zero, 20, 16);
-        ft_emit_raw(&out, FT_LA_OPCODE_MOVGR2FCSR | (la_t1 << 5));
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (!(option_soft_fpu && option_soft_fpu_fast))
+#endif
+        {
+            ft_emit_raw(&out, FT_LA_OPCODE_MOVFCSR2GR | la_t1);
+            FT_LA_BSTRINS_D_EMIT(&out, la_t1, la_zero, 20, 16);
+            ft_emit_raw(&out, FT_LA_OPCODE_MOVGR2FCSR | (la_t1 << 5));
+        }
         ft_emit_store_env(&out, la_t0, fpus_offset, FT_LA_OPCODE_ST_H);
         break;
     }
@@ -612,6 +654,12 @@ static void ft_emit_x87_call_fsincos(uint32_t **out)
 
 static void ft_emit_x87_helper(uint32_t **out, void *func)
 {
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (option_soft_fpu && option_soft_fpu_fast) {
+        ft_emit_lats_nofp_helper(out, func);
+        return;
+    }
+#endif
     ft_emit_helper_prologue(out);
     if (!option_soft_fpu) {
         ft_emit_cpu_env_ptr(out, la_a0);
@@ -628,6 +676,8 @@ static void ft_emit_x87_helper(uint32_t **out, void *func)
     ft_emit_helper_epilogue(out);
 }
 
+#include "emit-x87-soft-env.inc.c"
+
 static int ft_emit_fxsave_restore_helper(uint32_t **out,
                                          const FastTemplateFields *fields,
                                          target_ulong pc, bool restore)
@@ -642,6 +692,9 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
     }
 
     /* Save the guest GPRs before address formation uses ABI scratch regs. */
+    FtSoftEnv fast = {0};
+    ft_emit_soft_environment(out, fields, pc, restore, 2, &fast);
+
     ft_emit_save_gprs_to_env(out);
     if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
         return 0;
@@ -665,24 +718,6 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
     ft_emit_save_fprs_to_env(out);
     ft_emit_save_xmms_to_env(out);
     ft_emit_save_condition_flags(out);
-
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-    if (restore && option_soft_fpu) {
-        /* The system-mode restore helper writes env->mxcsr but does not
-         * synchronize hardware rounding. Restore SSE rounding without
-         * changing exception enables/flags. x87 checks its own mode. */
-        ft_emit_load_env(out, la_t0, lsenv_offset_of_mxcsr(lsenv),
-                         FT_LA_OPCODE_LD_WU);
-        FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t0, 14, 13);
-        FT_LA_ANDI_EMIT(out, la_t2, la_t0, 1);
-        FT_LA_SLLI_W_EMIT(out, la_t2, la_t2, 1);
-        FT_LA_XOR_EMIT(out, la_t0, la_t0, la_t2);
-        FT_LA_MOVFCSR2GR_EMIT(out, la_t1, 0);
-        FT_LA_BSTRINS_W_EMIT(out, la_t1, la_t0, FCSR_OFF_RM + 1,
-                             FCSR_OFF_RM);
-        FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t1);
-    }
-#endif
 
     if (!option_soft_fpu) {
         ft_emit_cpu_env_ptr(out, la_a0);
@@ -718,6 +753,24 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
                                    : (void *)helper_fxsave,
                       1u << 0);
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (restore && option_soft_fpu) {
+        /* The system-mode restore helper writes env->mxcsr but does not
+         * synchronize hardware rounding. Restore SSE rounding without
+         * changing exception enables/flags. x87 checks its own mode. */
+        ft_emit_load_env(out, la_t0, lsenv_offset_of_mxcsr(lsenv),
+                         FT_LA_OPCODE_LD_WU);
+        FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t0, 14, 13);
+        FT_LA_ANDI_EMIT(out, la_t2, la_t0, 1);
+        FT_LA_SLLI_W_EMIT(out, la_t2, la_t2, 1);
+        FT_LA_XOR_EMIT(out, la_t0, la_t0, la_t2);
+        FT_LA_MOVFCSR2GR_EMIT(out, la_t1, 0);
+        FT_LA_BSTRINS_W_EMIT(out, la_t1, la_t0, FCSR_OFF_RM + 1,
+                             FCSR_OFF_RM);
+        FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t1);
+    }
+#endif
+
     if (!option_soft_fpu) {
         ft_emit_cpu_env_ptr(out, la_a0);
         ft_emit_host_call(out, (void *)ft_convert_fpregs_x80_to_64,
@@ -732,6 +785,7 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
     ft_emit_host_stack_end(out);
     ft_emit_helper_epilogue(out);
+    ft_soft_environment_end(out, &fast);
     return *out - start;
 }
 
@@ -873,6 +927,9 @@ static int ft_emit_fsave_restore_helper(uint32_t **out,
         return 0;
     }
 
+    FtSoftEnv fast = {0};
+    ft_emit_soft_environment(out, fields, pc, restore, 1, &fast);
+
     ft_emit_save_gprs_to_env(out);
     if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
         return 0;
@@ -923,6 +980,7 @@ static int ft_emit_fsave_restore_helper(uint32_t **out,
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
     ft_emit_host_stack_end(out);
     ft_emit_helper_epilogue(out);
+    ft_soft_environment_end(out, &fast);
     return *out - start;
 }
 
@@ -939,6 +997,9 @@ static int ft_emit_fenv_helper(uint32_t **out,
         fields->modrm_reg != (restore ? 4 : 6)) {
         return 0;
     }
+
+    FtSoftEnv fast = {0};
+    ft_emit_soft_environment(out, fields, pc, restore, 0, &fast);
 
     ft_emit_save_gprs_to_env(out);
     if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
@@ -1009,6 +1070,7 @@ static int ft_emit_fenv_helper(uint32_t **out,
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
     ft_emit_host_stack_end(out);
     ft_emit_helper_epilogue(out);
+    ft_soft_environment_end(out, &fast);
     return *out - start;
 }
 
@@ -1046,12 +1108,554 @@ static bool ft_x87_const_bits(unsigned int id, uint64_t *bits)
     }
 }
 
+static void ft_emit_x87_soft_sign(uint32_t **out, bool negate)
+{
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    FastBranchLabel slow = { 0 }, done = { 0 };
+    FastBranchFixup nofp_fixup, empty_fixup, done_fixup;
+    bool inline_sign = option_soft_fpu_fast &&
+        ft_offset_fits_imm12(lsenv_offset_of_top(lsenv)) &&
+        ft_offset_fits_imm12(lsenv_offset_of_tag_word(lsenv)) &&
+        ft_offset_fits_imm12(lsenv_offset_of_fpr(lsenv, 0) + 8);
+#ifdef CONFIG_LATX_OPT_NOFP
+    inline_sign = inline_sign &&
+        ft_offset_fits_imm12(lsenv_offset_of_nofp(lsenv));
+#endif
+
+    if (inline_sign) {
+        /* Like the old soft-fpu path, change only the floatx80 sign bit.
+         * Keep the checked helper for empty slots or live MMX state. */
+#ifdef CONFIG_LATX_OPT_NOFP
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, lsenv_offset_of_nofp(lsenv));
+        ft_emit_branch_placeholder(out, &nofp_fixup, FT_BRANCH_BNE,
+                                   la_t0, la_zero, &slow);
+#endif
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, lsenv_offset_of_top(lsenv));
+        FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t0);
+        FT_LA_LD_BU_EMIT(out, la_t2, la_t1,
+                         lsenv_offset_of_tag_word(lsenv));
+        ft_emit_branch_placeholder(out, &empty_fixup, FT_BRANCH_BNE,
+                                   la_t2, la_zero, &slow);
+        FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 4);
+        FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t0);
+        FT_LA_LD_HU_EMIT(out, la_t2, la_t1,
+                         lsenv_offset_of_fpr(lsenv, 0) + 8);
+        if (negate) {
+            FT_LA_LU12I_W_EMIT(out, la_t0, 8);
+            FT_LA_XOR_EMIT(out, la_t2, la_t2, la_t0);
+        } else {
+            FT_LA_BSTRPICK_D_EMIT(out, la_t2, la_t2, 14, 0);
+        }
+        FT_LA_ST_H_EMIT(out, la_t2, la_t1,
+                        lsenv_offset_of_fpr(lsenv, 0) + 8);
+        ft_emit_branch_placeholder(out, &done_fixup, FT_BRANCH_BEQ,
+                                   la_zero, la_zero, &done);
+        ft_bind_branch_label(&slow, *out);
+#ifdef CONFIG_LATX_OPT_NOFP
+        ft_resolve_branch_fixup(&nofp_fixup);
+#endif
+        ft_resolve_branch_fixup(&empty_fixup);
+    }
+#endif
+    ft_emit_helper_prologue(out);
+    ft_emit_cpu_env_ptr(out, la_a0);
+    FT_LA_ADDI_D_EMIT(out, la_a1, la_zero, negate);
+    ft_emit_host_call(out, (void *)ft_x87_helper_unary, 1u << 0);
+    ft_emit_helper_epilogue(out);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (inline_sign) {
+        ft_bind_branch_label(&done, *out);
+        ft_resolve_branch_fixup(&done_fixup);
+    }
+#endif
+}
+
+static void ft_emit_x87_soft_unary(uint32_t **out, bool square_root)
+{
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    const int fp = lsenv_offset_of_fpr(lsenv, 0);
+    const int top = lsenv_offset_of_top(lsenv);
+    const int tag = lsenv_offset_of_tag_word(lsenv);
+    FastBranchLabel slow = { 0 }, done = { 0 };
+    FastBranchFixup nofp_fix, empty_fix, zero_fix, special_fix, sign_fix;
+    FastBranchFixup done_fix;
+    bool fast = (option_soft_fpu_fast & (square_root ? 0x10000 : 0x4000)) &&
+        ft_offset_fits_imm12(fp + 8) && ft_offset_fits_imm12(top) &&
+        ft_offset_fits_imm12(tag);
+#ifdef CONFIG_LATX_OPT_NOFP
+    fast = fast && ft_offset_fits_imm12(lsenv_offset_of_nofp(lsenv));
+#endif
+    if (fast) {
+        const int x = ft_vscratch, tmp = ft_vscratch + 1;
+#ifdef CONFIG_LATX_OPT_NOFP
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, lsenv_offset_of_nofp(lsenv));
+        ft_emit_branch_placeholder(out, &nofp_fix, FT_BRANCH_BNE,
+                                   la_t0, la_zero, &slow);
+#endif
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, top);
+        FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t0);
+        FT_LA_LD_BU_EMIT(out, la_t1, la_t1, tag);
+        ft_emit_branch_placeholder(out, &empty_fix, FT_BRANCH_BNE,
+                                   la_t1, la_zero, &slow);
+        FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 4);
+        FT_LA_ADD_D_EMIT(out, la_t0, la_s0, la_t0);
+        FT_LA_LD_HU_EMIT(out, la_t1, la_t0, fp + 8);
+        if (square_root) {
+            FT_LA_SRLI_W_EMIT(out, la_t2, la_t1, 15);
+            ft_emit_branch_placeholder(out, &sign_fix, FT_BRANCH_BNE,
+                                       la_t2, la_zero, &slow);
+        }
+        FT_LA_BSTRPICK_W_EMIT(out, la_t1, la_t1, 14, 0);
+        ft_emit_branch_placeholder(out, &zero_fix, FT_BRANCH_BEQ,
+                                   la_t1, la_zero, &slow);
+        ft_emit_li64(out, la_t2, 0x7fff);
+        ft_emit_branch_placeholder(out, &special_fix, FT_BRANCH_BEQ,
+                                   la_t1, la_t2, &slow);
+        /* Same floatx80 -> double -> floatx80 tradeoff as la_calcute_float64.
+         * The fast option deliberately does not check rounding per operation. */
+        FT_LA_VLD_EMIT(out, x, la_t0, fp);
+        FT_LA_VEXTRINS_H_EMIT(out, tmp, x, 0x4);
+        FT_LA_FCVT_D_LD_EMIT(out, x, x, tmp);
+        if (square_root) {
+            FT_LA_FSQRT_D_EMIT(out, x, x);
+        } else {
+            FT_LA_FRINT_D_EMIT(out, x, x);
+        }
+        FT_LA_FCVT_UD_D_EMIT(out, tmp, x);
+        FT_LA_FCVT_LD_D_EMIT(out, x, x);
+        FT_LA_VEXTRINS_H_EMIT(out, x, tmp, 0x40);
+        FT_LA_VST_EMIT(out, x, la_t0, fp);
+        ft_emit_branch_placeholder(out, &done_fix, FT_BRANCH_BEQ,
+                                   la_zero, la_zero, &done);
+        ft_bind_branch_label(&slow, *out);
+#ifdef CONFIG_LATX_OPT_NOFP
+        ft_resolve_branch_fixup(&nofp_fix);
+#endif
+        ft_resolve_branch_fixup(&empty_fix);
+        ft_resolve_branch_fixup(&zero_fix);
+        ft_resolve_branch_fixup(&special_fix);
+        if (square_root) {
+            ft_resolve_branch_fixup(&sign_fix);
+        }
+    }
+#endif
+    ft_emit_x87_helper(out, square_root ? (void *)ft_x87_helper_fsqrt :
+                                          (void *)ft_x87_helper_frndint);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (fast) {
+        ft_bind_branch_label(&done, *out);
+        ft_resolve_branch_fixup(&done_fix);
+    }
+#endif
+}
+
+/* Like the legacy softfpu_fast option, direct arithmetic assumes host
+ * rounding is suitable. Independent x87/SSE rounding after restore is a
+ * known limitation when enabled; disabled mode retains software helpers. */
+static void ft_emit_x87_soft_binary_reg(uint32_t **out, int index,
+                                       int op, int mode)
+{
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    static const unsigned masks[2][6] = {
+        { 0x2, 0x1000, 0x20000, 0x80000, 0x4, 0x10 },
+        { 0x1, 0x2000, 0x40000, 0x100000, 0x8, 0x20 },
+    };
+    const int fp = lsenv_offset_of_fpr(lsenv, 0);
+    const int top = lsenv_offset_of_top(lsenv);
+    const int tag = lsenv_offset_of_tag_word(lsenv);
+    FastBranchLabel slow = { 0 }, done = { 0 };
+    FastBranchFixup nofp_fix, empty0_fix, emptyn_fix, done_fix;
+    bool fast = (option_soft_fpu_fast & masks[mode == 2][op]) &&
+        ft_offset_fits_imm12(fp + 8) && ft_offset_fits_imm12(top) &&
+        ft_offset_fits_imm12(tag);
+#ifdef CONFIG_LATX_OPT_NOFP
+    fast = fast && ft_offset_fits_imm12(lsenv_offset_of_nofp(lsenv));
+#endif
+    if (fast) {
+        const int x = ft_vscratch, y = ft_vscratch + 1;
+        const int tmp = ft_vscratch + 2;
+#ifdef CONFIG_LATX_OPT_NOFP
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, lsenv_offset_of_nofp(lsenv));
+        ft_emit_branch_placeholder(out, &nofp_fix, FT_BRANCH_BNE,
+                                   la_t0, la_zero, &slow);
+#endif
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, top);
+        FT_LA_ADDI_D_EMIT(out, la_t1, la_t0, index);
+        FT_LA_ANDI_EMIT(out, la_t1, la_t1, 7);
+        FT_LA_ADD_D_EMIT(out, la_t2, la_s0, la_t0);
+        FT_LA_ADD_D_EMIT(out, la_t3, la_s0, la_t1);
+        FT_LA_LD_BU_EMIT(out, la_t4, la_t2, tag);
+        ft_emit_branch_placeholder(out, &empty0_fix, FT_BRANCH_BNE,
+                                   la_t4, la_zero, &slow);
+        FT_LA_LD_BU_EMIT(out, la_t4, la_t3, tag);
+        ft_emit_branch_placeholder(out, &emptyn_fix, FT_BRANCH_BNE,
+                                   la_t4, la_zero, &slow);
+        FT_LA_SLLI_D_EMIT(out, la_t4, la_t0, 4);
+        FT_LA_ADD_D_EMIT(out, la_t4, la_s0, la_t4);
+        FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 4);
+        FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t1);
+        int dst = mode ? la_t1 : la_t4;
+        int src = mode ? la_t4 : la_t1;
+        FT_LA_VLD_EMIT(out, x, dst, fp);
+        FT_LA_VLD_EMIT(out, y, src, fp);
+        FT_LA_VEXTRINS_H_EMIT(out, tmp, x, 0x4);
+        FT_LA_FCVT_D_LD_EMIT(out, x, x, tmp);
+        FT_LA_VEXTRINS_H_EMIT(out, tmp, y, 0x4);
+        FT_LA_FCVT_D_LD_EMIT(out, y, y, tmp);
+        switch (op) {
+        case FT_X87_REG_ADD: FT_LA_FADD_D_EMIT(out, x, x, y); break;
+        case FT_X87_REG_MUL: FT_LA_FMUL_D_EMIT(out, x, x, y); break;
+        case FT_X87_REG_SUB: FT_LA_FSUB_D_EMIT(out, x, x, y); break;
+        case FT_X87_REG_SUBR: FT_LA_FSUB_D_EMIT(out, x, y, x); break;
+        case FT_X87_REG_DIV: FT_LA_FDIV_D_EMIT(out, x, x, y); break;
+        case FT_X87_REG_DIVR: FT_LA_FDIV_D_EMIT(out, x, y, x); break;
+        }
+        FT_LA_FCVT_UD_D_EMIT(out, tmp, x);
+        FT_LA_FCVT_LD_D_EMIT(out, x, x);
+        FT_LA_VEXTRINS_H_EMIT(out, x, tmp, 0x40);
+        FT_LA_VST_EMIT(out, x, dst, fp);
+        if (mode == 2) {
+            FT_LA_ORI_EMIT(out, la_t1, la_zero, 1);
+            FT_LA_ST_B_EMIT(out, la_t1, la_t2, tag);
+            FT_LA_ADDI_D_EMIT(out, la_t0, la_t0, 1);
+            FT_LA_ANDI_EMIT(out, la_t0, la_t0, 7);
+            FT_LA_ST_W_EMIT(out, la_t0, la_s0, top);
+        }
+        ft_emit_branch_placeholder(out, &done_fix, FT_BRANCH_BEQ,
+                                   la_zero, la_zero, &done);
+        ft_bind_branch_label(&slow, *out);
+#ifdef CONFIG_LATX_OPT_NOFP
+        ft_resolve_branch_fixup(&nofp_fix);
+#endif
+        ft_resolve_branch_fixup(&empty0_fix);
+        ft_resolve_branch_fixup(&emptyn_fix);
+    }
+#endif
+    ft_emit_helper_prologue(out);
+    ft_emit_cpu_env_ptr(out, la_a0);
+    FT_LA_ADDI_D_EMIT(out, la_a1, la_zero, index);
+    ft_emit_host_call(out, (void *)ft_x87_binary_helpers[mode][op], 1u << 0);
+    ft_emit_helper_epilogue(out);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (fast) {
+        ft_bind_branch_label(&done, *out);
+        ft_resolve_branch_fixup(&done_fix);
+    }
+#endif
+}
+
+/* Match gen_float64_ST0_MEM in the LATS soft-fpu translator. */
+static bool ft_emit_x87_soft_binary_mem(uint32_t **out,
+                                      const FastTemplateFields *fields,
+                                      target_ulong pc, int width,
+                                      bool integer, int op)
+{
+    static void *const helpers[8] = {
+        (void *)ft_x87_memory_fadd, (void *)ft_x87_memory_fmul,
+        NULL, NULL, (void *)ft_x87_memory_fsub,
+        (void *)ft_x87_memory_fsubr, (void *)ft_x87_memory_fdiv,
+        (void *)ft_x87_memory_fdivr,
+    };
+    int addr;
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    static const unsigned masks[2][8] = {
+        { 0x2, 0x1000, 0, 0, 0x20000, 0x80000, 0x4, 0x10 },
+        { 0x40, 0x200, 0, 0, 0x400, 0x800, 0x80, 0x100 },
+    };
+    const int fp = lsenv_offset_of_fpr(lsenv, 0);
+    const int top = lsenv_offset_of_top(lsenv);
+    const int tag = lsenv_offset_of_tag_word(lsenv);
+    FastBranchLabel slow = { 0 }, done = { 0 };
+    FastBranchFixup nofp_fix, empty_fix, special_st_fix, special_mem_fix;
+    FastBranchFixup zero_st_fix, zero_mem_fix, done_fix;
+    bool fast = (option_soft_fpu_fast & masks[integer][op]) &&
+        ft_offset_fits_imm12(fp + 8) && ft_offset_fits_imm12(top) &&
+        ft_offset_fits_imm12(tag);
+#ifdef CONFIG_LATX_OPT_NOFP
+    fast = fast && ft_offset_fits_imm12(lsenv_offset_of_nofp(lsenv));
+#endif
+    if (fast) {
+        const int x = ft_vscratch, y = ft_vscratch + 1;
+        const int tmp = ft_vscratch + 2;
+        /* Read once, including the special-value path. The helper prologue
+         * only saves guest registers and does not overwrite scratch FPR y. */
+        if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+            return false;
+        }
+        int offset = ft_mem_access_offset(fields, addr);
+        if (width == 16) {
+            FT_LA_LD_H_EMIT(out, la_t4, addr, offset);
+        } else if (width == 32) {
+            FT_LA_LD_W_EMIT(out, la_t4, addr, offset);
+        } else {
+            FT_LA_LD_D_EMIT(out, la_t4, addr, offset);
+        }
+        FT_LA_MOVGR2FR_D_EMIT(out, y, la_t4);
+#ifdef CONFIG_LATX_OPT_NOFP
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, lsenv_offset_of_nofp(lsenv));
+        ft_emit_branch_placeholder(out, &nofp_fix, FT_BRANCH_BNE,
+                                   la_t0, la_zero, &slow);
+#endif
+        FT_LA_LD_W_EMIT(out, la_t0, la_s0, top);
+        FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t0);
+        FT_LA_LD_BU_EMIT(out, la_t1, la_t1, tag);
+        ft_emit_branch_placeholder(out, &empty_fix, FT_BRANCH_BNE,
+                                   la_t1, la_zero, &slow);
+        if (!integer) {
+            FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t4,
+                                 width == 32 ? 30 : 62,
+                                 width == 32 ? 23 : 52);
+            ft_emit_branch_placeholder(out, &zero_mem_fix, FT_BRANCH_BEQ,
+                                       la_t1, la_zero, &slow);
+            FT_LA_ADDI_D_EMIT(out, la_t1, la_t1,
+                              width == 32 ? -255 : -2047);
+            ft_emit_branch_placeholder(out, &special_mem_fix, FT_BRANCH_BEQ,
+                                       la_t1, la_zero, &slow);
+        } else if (op == 6) {
+            ft_emit_branch_placeholder(out, &zero_mem_fix, FT_BRANCH_BEQ,
+                                       la_t4, la_zero, &slow);
+        }
+        FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 4);
+        FT_LA_ADD_D_EMIT(out, la_t0, la_s0, la_t0);
+        FT_LA_LD_HU_EMIT(out, la_t1, la_t0, fp + 8);
+        FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t1, 14, 0);
+        ft_emit_branch_placeholder(out, &zero_st_fix, FT_BRANCH_BEQ,
+                                   la_t1, la_zero, &slow);
+        ft_emit_li64(out, la_t2, 0x7fff);
+        ft_emit_branch_placeholder(out, &special_st_fix, FT_BRANCH_BEQ,
+                                   la_t1, la_t2, &slow);
+        /* Keep software exception flags for zero, denormal and NaN operands.
+         * In particular, converting a signaling NaN first loses its identity. */
+        if (integer) {
+            FT_LA_FFINT_D_W_EMIT(out, y, y);
+        } else if (width == 32) {
+            FT_LA_FCVT_D_S_EMIT(out, y, y);
+        }
+        FT_LA_VLD_EMIT(out, x, la_t0, fp);
+        FT_LA_VEXTRINS_H_EMIT(out, tmp, x, 0x4);
+        FT_LA_FCVT_D_LD_EMIT(out, x, x, tmp);
+        switch (op) {
+        case 0: FT_LA_FADD_D_EMIT(out, x, x, y); break;
+        case 1: FT_LA_FMUL_D_EMIT(out, x, x, y); break;
+        case 4: FT_LA_FSUB_D_EMIT(out, x, x, y); break;
+        case 5: FT_LA_FSUB_D_EMIT(out, x, y, x); break;
+        case 6: FT_LA_FDIV_D_EMIT(out, x, x, y); break;
+        case 7: FT_LA_FDIV_D_EMIT(out, x, y, x); break;
+        }
+        FT_LA_FCVT_UD_D_EMIT(out, tmp, x);
+        FT_LA_FCVT_LD_D_EMIT(out, x, x);
+        FT_LA_VEXTRINS_H_EMIT(out, x, tmp, 0x40);
+        FT_LA_VST_EMIT(out, x, la_t0, fp);
+        ft_emit_branch_placeholder(out, &done_fix, FT_BRANCH_BEQ,
+                                   la_zero, la_zero, &done);
+        ft_bind_branch_label(&slow, *out);
+#ifdef CONFIG_LATX_OPT_NOFP
+        ft_resolve_branch_fixup(&nofp_fix);
+#endif
+        ft_resolve_branch_fixup(&empty_fix);
+        ft_resolve_branch_fixup(&special_st_fix);
+        ft_resolve_branch_fixup(&zero_st_fix);
+        if (!integer) {
+            ft_resolve_branch_fixup(&special_mem_fix);
+        }
+        if (!integer || op == 6) {
+            ft_resolve_branch_fixup(&zero_mem_fix);
+        }
+    }
+#endif
+    ft_emit_helper_prologue(out);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (fast) {
+        FT_LA_MOVFR2GR_D_EMIT(out, la_a1, ft_vscratch + 1);
+    } else
+#endif
+    {
+        if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+            return false;
+        }
+        int offset = ft_mem_access_offset(fields, addr);
+        if (width == 16) {
+            FT_LA_LD_H_EMIT(out, la_a1, addr, offset);
+        } else if (integer) {
+            FT_LA_LD_W_EMIT(out, la_a1, addr, offset);
+        } else if (width == 32) {
+            FT_LA_LD_WU_EMIT(out, la_a1, addr, offset);
+        } else {
+            FT_LA_LD_D_EMIT(out, la_a1, addr, offset);
+        }
+    }
+    ft_emit_cpu_env_ptr(out, la_a0);
+    ft_emit_host_call(out, integer ? (void *)helper_fildl_FT0 :
+                      width == 32 ? (void *)ft_x87_memory_flds :
+                      (void *)ft_x87_memory_fldl, 1u << 0);
+    ft_emit_cpu_env_ptr(out, la_a0);
+    ft_emit_host_call(out, helpers[op], 1u << 0);
+    ft_emit_helper_epilogue(out);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (fast) {
+        ft_bind_branch_label(&done, *out);
+        ft_resolve_branch_fixup(&done_fix);
+    }
+#endif
+    return true;
+}
+
+/* Integer addressing and vector copies only: no float64 precision conversion. */
+static bool ft_emit_x87_soft_stack(uint32_t **out,
+                                    const FastTemplateFields *fields)
+{
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    int kind = fields->kind, index = fields->modrm & 7;
+    bool load = kind == FT_X87_FLD_REG;
+    bool store = kind == FT_X87_FST_REG || kind == FT_X87_FSTP_REG;
+    bool exchange = kind == FT_X87_FXCH;
+    bool release = kind == FT_X87_FFREE;
+    bool adjust = kind == FT_X87_TOP_ADJ;
+    int top = lsenv_offset_of_top(lsenv);
+    int tag = lsenv_offset_of_tag_word(lsenv);
+    int fp = lsenv_offset_of_fpr(lsenv, 0);
+    int status = lsenv_offset_of_status_word(lsenv);
+    /* This path precedes the template switch; keep its operand validation. */
+    if ((load && (fields->modrm < 0xc0 || fields->modrm > 0xc7)) ||
+        (kind == FT_X87_FST_REG &&
+         (fields->modrm < 0xd0 || fields->modrm > 0xd7)) ||
+        (kind == FT_X87_FSTP_REG &&
+         (fields->modrm < 0xd8 || fields->modrm > 0xdf)) ||
+        (exchange && (fields->modrm < 0xc8 || fields->modrm > 0xcf)) ||
+        (adjust && fields->id != dt_X86_INS_FINCSTP &&
+         fields->id != dt_X86_INS_FDECSTP)) {
+        return false;
+    }
+    if (!option_soft_fpu || !option_soft_fpu_fast ||
+        !(load || store || exchange || release || adjust) ||
+        !ft_offset_fits_imm12(top) || !ft_offset_fits_imm12(tag) ||
+        !ft_offset_fits_imm12(fp) || !ft_offset_fits_imm12(status)) {
+        return false;
+    }
+    FastBranchLabel slow = { 0 }, done = { 0 };
+    FastBranchFixup nofp_fix, src_fix, dst_fix, done_fix;
+#ifdef CONFIG_LATX_OPT_NOFP
+    if (!ft_offset_fits_imm12(lsenv_offset_of_nofp(lsenv))) {
+        return false;
+    }
+    FT_LA_LD_W_EMIT(out, la_t0, la_s0, lsenv_offset_of_nofp(lsenv));
+    ft_emit_branch_placeholder(out, &nofp_fix, FT_BRANCH_BNE,
+                               la_t0, la_zero, &slow);
+#endif
+    FT_LA_LD_W_EMIT(out, la_t0, la_s0, top);
+    FT_LA_ADDI_D_EMIT(out, la_t1, la_t0, index);
+    FT_LA_ANDI_EMIT(out, la_t1, la_t1, 7);
+    if (load) {
+        FT_LA_ADDI_D_EMIT(out, la_t2, la_t0, -1);
+        FT_LA_ANDI_EMIT(out, la_t2, la_t2, 7);
+    } else {
+        FT_LA_OR_EMIT(out, la_t2, la_t0, la_zero);
+    }
+    if (load || exchange || store) {
+        FT_LA_ADD_D_EMIT(out, la_t3, la_s0, store ? la_t0 : la_t1);
+        FT_LA_LD_BU_EMIT(out, la_t3, la_t3, tag);
+        ft_emit_branch_placeholder(out, &src_fix, FT_BRANCH_BNE,
+                                   la_t3, la_zero, &slow);
+        if (load || exchange) {
+            FT_LA_ADD_D_EMIT(out, la_t3, la_s0, la_t2);
+            FT_LA_LD_BU_EMIT(out, la_t3, la_t3, tag);
+            ft_emit_branch_placeholder(out, &dst_fix,
+                                       load ? FT_BRANCH_BEQ : FT_BRANCH_BNE,
+                                       la_t3, la_zero, &slow);
+        }
+        FT_LA_SLLI_D_EMIT(out, la_t3, store ? la_t0 : la_t1, 4);
+        FT_LA_ADD_D_EMIT(out, la_t3, la_s0, la_t3);
+        FT_LA_SLLI_D_EMIT(out, la_t4, store ? la_t1 : la_t2, 4);
+        FT_LA_ADD_D_EMIT(out, la_t4, la_s0, la_t4);
+        FT_LA_VLD_EMIT(out, ft_vscratch, la_t3, fp);
+        if (exchange) {
+            FT_LA_VLD_EMIT(out, ft_vscratch + 1, la_t4, fp);
+            FT_LA_VST_EMIT(out, ft_vscratch + 1, la_t3, fp);
+        }
+        FT_LA_VST_EMIT(out, ft_vscratch, la_t4, fp);
+        if (load || store) {
+            FT_LA_ADD_D_EMIT(out, la_t3, la_s0, load ? la_t2 : la_t1);
+            FT_LA_ST_B_EMIT(out, la_zero, la_t3, tag);
+        }
+        if (load) {
+            FT_LA_ST_W_EMIT(out, la_t2, la_s0, top);
+        }
+    }
+    if (release) {
+        FT_LA_ADD_D_EMIT(out, la_t3, la_s0, la_t1);
+        FT_LA_ORI_EMIT(out, la_t4, la_zero, 1);
+        FT_LA_ST_B_EMIT(out, la_t4, la_t3, tag);
+    }
+    bool pop = kind == FT_X87_FSTP_REG ||
+               (release && fields->id == dt_X86_INS_FFREEP);
+    if (pop || adjust) {
+        if (pop) {
+            FT_LA_ADD_D_EMIT(out, la_t3, la_s0, la_t0);
+            FT_LA_ORI_EMIT(out, la_t4, la_zero, 1);
+            FT_LA_ST_B_EMIT(out, la_t4, la_t3, tag);
+        }
+        FT_LA_ADDI_D_EMIT(out, la_t0, la_t0,
+                          adjust && fields->id == dt_X86_INS_FDECSTP ? -1 : 1);
+        FT_LA_ANDI_EMIT(out, la_t0, la_t0, 7);
+        FT_LA_ST_W_EMIT(out, la_t0, la_s0, top);
+    }
+    if (!release && !exchange) {
+        FT_LA_LD_HU_EMIT(out, la_t0, la_s0, status);
+        FT_LA_BSTRINS_D_EMIT(out, la_t0, la_zero, 9, 9);
+        FT_LA_ST_H_EMIT(out, la_t0, la_s0, status);
+    }
+    ft_emit_branch_placeholder(out, &done_fix, FT_BRANCH_BEQ,
+                               la_zero, la_zero, &done);
+    ft_bind_branch_label(&slow, *out);
+#ifdef CONFIG_LATX_OPT_NOFP
+    ft_resolve_branch_fixup(&nofp_fix);
+#endif
+    if (load || store || exchange) {
+        ft_resolve_branch_fixup(&src_fix);
+        if (load || exchange) ft_resolve_branch_fixup(&dst_fix);
+    }
+    ft_emit_helper_prologue(out);
+    ft_emit_cpu_env_ptr(out, la_a0);
+    FT_LA_ADDI_D_EMIT(out, la_a1, la_zero, index);
+    void *helper = load ? (void *)ft_x87_helper_fld_reg :
+                   store ? (void *)ft_x87_helper_fst_reg :
+                   exchange ? (void *)ft_x87_helper_fxch :
+                   release ? (void *)helper_ffree_STN :
+                   fields->id == dt_X86_INS_FDECSTP ?
+                       (void *)helper_fdecstp : (void *)helper_fincstp;
+    if (store) FT_LA_ADDI_D_EMIT(out, la_a2, la_zero, pop);
+    ft_emit_host_call(out, helper, 1u << 0);
+    if (release && pop) {
+        ft_emit_cpu_env_ptr(out, la_a0);
+        ft_emit_host_call(out, (void *)helper_fpop, 1u << 0);
+    }
+    ft_emit_helper_epilogue(out);
+    ft_bind_branch_label(&done, *out);
+    ft_resolve_branch_fixup(&done_fix);
+    return true;
+#else
+    (void)out;
+    (void)fields;
+    return false;
+#endif
+}
+
+#include "emit-x87-soft-fast.inc.c"
+
 static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
 
     (void)tb;
 
+    if (ft_emit_x87_soft_stack(&out, fields)) {
+        return out - code;
+    }
+    FtSoftX87 extra;
+    bool direct_extra = ft_emit_x87_soft_extra(&out, fields, pc, &extra);
+    FtSoftEnv memory_call;
+    memory_call.active = false;
+    ft_emit_soft_memory_call(&out, fields, pc, &memory_call);
     switch (fields->kind) {
     case FT_X87_FLD1:
         if (option_soft_fpu) {
@@ -1102,15 +1706,19 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         if (option_soft_fpu) {
             ft_emit_helper_prologue(&out);
-            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
-                return 0;
-            }
-            if (fields->kind == FT_X87_FLD_M32) {
-                FT_LA_LD_WU_EMIT(&out, la_a1, addr,
-                                 ft_mem_access_offset(fields, addr));
+            if (direct_extra && extra.loaded) {
+                FT_LA_MOVFR2GR_D_EMIT(&out, la_a1, ft_vscratch + 1);
             } else {
-                FT_LA_LD_D_EMIT(&out, la_a1, addr,
-                                ft_mem_access_offset(fields, addr));
+                if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                    return 0;
+                }
+                if (fields->kind == FT_X87_FLD_M32) {
+                    FT_LA_LD_WU_EMIT(&out, la_a1, addr,
+                                     ft_mem_access_offset(fields, addr));
+                } else {
+                    FT_LA_LD_D_EMIT(&out, la_a1, addr,
+                                    ft_mem_access_offset(fields, addr));
+                }
             }
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, fields->kind == FT_X87_FLD_M32 ?
@@ -1227,12 +1835,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         if (option_soft_fpu &&
             (fields->id == dt_X86_INS_FABS ||
              fields->id == dt_X86_INS_FCHS)) {
-            ft_emit_helper_prologue(&out);
-            ft_emit_cpu_env_ptr(&out, la_a0);
-            FT_LA_ADDI_D_EMIT(&out, la_a1, la_zero,
-                              fields->id == dt_X86_INS_FCHS);
-            ft_emit_host_call(&out, (void *)ft_x87_helper_unary, 1u << 0);
-            ft_emit_helper_epilogue(&out);
+            ft_emit_x87_soft_sign(&out, fields->id == dt_X86_INS_FCHS);
         } else if (fields->id == dt_X86_INS_FABS) {
             FT_LA_FABS_D_EMIT(&out, ft_mmx(0), ft_mmx(0));
         } else if (fields->id == dt_X86_INS_FCHS) {
@@ -1505,7 +2108,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     case FT_X87_FRNDINT:
         if (option_soft_fpu) {
-            ft_emit_x87_helper(&out, (void *)ft_x87_helper_frndint);
+            ft_emit_x87_soft_unary(&out, false);
             break;
         }
         FT_LA_FRINT_D_EMIT(&out, ft_mmx(0), ft_mmx(0));
@@ -1800,7 +2403,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         break;
     case FT_X87_FSQRT:
         if (option_soft_fpu) {
-            ft_emit_x87_helper(&out, (void *)ft_x87_helper_fsqrt);
+            ft_emit_x87_soft_unary(&out, true);
             break;
         }
         FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(0));
@@ -1896,39 +2499,37 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         int addr;
         int op_ext = (fields->modrm >> 3) & 7;
         int width = fields->kind == FT_X87_FI_BIN_M16 ? 16 : 32;
-        void *helper;
 
         if (fields->modrm_mod == 3) {
             return 0;
         }
         if (option_soft_fpu) {
-            switch (op_ext) {
-            case 0: helper = (void *)ft_x87_memory_fadd; break;
-            case 1: helper = (void *)ft_x87_memory_fmul; break;
-            case 2:
-            case 3: helper = (void *)helper_fcom_ST0_FT0; break;
-            case 4: helper = (void *)ft_x87_memory_fsub; break;
-            case 5: helper = (void *)ft_x87_memory_fsubr; break;
-            case 6: helper = (void *)ft_x87_memory_fdiv; break;
-            case 7: helper = (void *)ft_x87_memory_fdivr; break;
-            default: return 0;
+            if (op_ext != 2 && op_ext != 3) {
+                if (!ft_emit_x87_soft_binary_mem(&out, fields, pc, width,
+                                                true, op_ext)) {
+                    return 0;
+                }
+                break;
             }
-
             ft_emit_helper_prologue(&out);
-            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
-                return 0;
-            }
-            if (width == 16) {
-                FT_LA_LD_H_EMIT(&out, la_a1, addr,
-                                 ft_mem_access_offset(fields, addr));
+            if (direct_extra && extra.loaded) {
+                FT_LA_MOVFR2GR_D_EMIT(&out, la_a1, ft_vscratch + 1);
             } else {
-                FT_LA_LD_W_EMIT(&out, la_a1, addr,
-                                 ft_mem_access_offset(fields, addr));
+                if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                    return 0;
+                }
+                if (width == 16) {
+                    FT_LA_LD_H_EMIT(&out, la_a1, addr,
+                                     ft_mem_access_offset(fields, addr));
+                } else {
+                    FT_LA_LD_W_EMIT(&out, la_a1, addr,
+                                     ft_mem_access_offset(fields, addr));
+                }
             }
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, (void *)helper_fildl_FT0, 1u << 0);
             ft_emit_cpu_env_ptr(&out, la_a0);
-            ft_emit_host_call(&out, helper, 1u << 0);
+            ft_emit_host_call(&out, (void *)helper_fcom_ST0_FT0, 1u << 0);
             if (op_ext == 3) {
                 ft_emit_cpu_env_ptr(&out, la_a0);
                 ft_emit_host_call(&out, (void *)helper_fpop, 1u << 0);
@@ -1993,18 +2594,22 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         if (option_soft_fpu) {
             ft_emit_helper_prologue(&out);
-            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
-                return 0;
-            }
-            if (width == 16) {
-                FT_LA_LD_H_EMIT(&out, la_a1, addr,
-                                ft_mem_access_offset(fields, addr));
-            } else if (width == 32) {
-                FT_LA_LD_W_EMIT(&out, la_a1, addr,
-                                ft_mem_access_offset(fields, addr));
+            if (direct_extra && extra.loaded) {
+                FT_LA_MOVFR2GR_D_EMIT(&out, la_a1, ft_vscratch + 1);
             } else {
-                FT_LA_LD_D_EMIT(&out, la_a1, addr,
-                                ft_mem_access_offset(fields, addr));
+                if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                    return 0;
+                }
+                if (width == 16) {
+                    FT_LA_LD_H_EMIT(&out, la_a1, addr,
+                                    ft_mem_access_offset(fields, addr));
+                } else if (width == 32) {
+                    FT_LA_LD_W_EMIT(&out, la_a1, addr,
+                                    ft_mem_access_offset(fields, addr));
+                } else {
+                    FT_LA_LD_D_EMIT(&out, la_a1, addr,
+                                    ft_mem_access_offset(fields, addr));
+                }
             }
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, width == 64 ?
@@ -2252,12 +2857,8 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             case dt_X86_INS_FDIVR: op = FT_X87_REG_DIVR; break;
             default: return 0;
             }
-            ft_emit_helper_prologue(&out);
-            ft_emit_cpu_env_ptr(&out, la_a0);
-            FT_LA_ADDI_D_EMIT(&out, la_a1, la_zero, st_index);
-            ft_emit_host_call(&out, (void *)ft_x87_binary_helpers[
-                              fields->opcode0 != 0xd8][op], 1u << 0);
-            ft_emit_helper_epilogue(&out);
+            ft_emit_x87_soft_binary_reg(&out, st_index, op,
+                                        fields->opcode0 != 0xd8);
             break;
         }
         if (fields->opcode0 == 0xd8) {
@@ -2315,38 +2916,16 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         int addr;
         int op_ext = (fields->modrm >> 3) & 7;
         bool is_m32 = fields->kind == FT_X87_BIN_M32;
-        void *helper;
 
         if (fields->modrm_mod == 3) {
             return 0;
         }
         if (option_soft_fpu) {
-            switch (op_ext) {
-            case 0: helper = (void *)ft_x87_memory_fadd; break;
-            case 1: helper = (void *)ft_x87_memory_fmul; break;
-            case 4: helper = (void *)ft_x87_memory_fsub; break;
-            case 5: helper = (void *)ft_x87_memory_fsubr; break;
-            case 6: helper = (void *)ft_x87_memory_fdiv; break;
-            case 7: helper = (void *)ft_x87_memory_fdivr; break;
-            default: return 0;
-            }
-            ft_emit_helper_prologue(&out);
-            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+            if (op_ext == 2 || op_ext == 3 ||
+                !ft_emit_x87_soft_binary_mem(&out, fields, pc,
+                                            is_m32 ? 32 : 64, false, op_ext)) {
                 return 0;
             }
-            if (is_m32) {
-                FT_LA_LD_WU_EMIT(&out, la_a1, addr,
-                                 ft_mem_access_offset(fields, addr));
-            } else {
-                FT_LA_LD_D_EMIT(&out, la_a1, addr,
-                                ft_mem_access_offset(fields, addr));
-            }
-            ft_emit_cpu_env_ptr(&out, la_a0);
-            ft_emit_host_call(&out, is_m32 ? (void *)ft_x87_memory_flds :
-                              (void *)ft_x87_memory_fldl, 1u << 0);
-            ft_emit_cpu_env_ptr(&out, la_a0);
-            ft_emit_host_call(&out, helper, 1u << 0);
-            ft_emit_helper_epilogue(&out);
             break;
         }
         if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
@@ -2395,11 +2974,15 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         if (option_soft_fpu) {
             ft_emit_helper_prologue(&out);
-            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
-                return 0;
+            if (direct_extra && extra.loaded) {
+                FT_LA_MOVFR2GR_D_EMIT(&out, la_a1, ft_vscratch + 1);
+            } else {
+                if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                    return 0;
+                }
+                FT_LA_LD_D_EMIT(&out, la_a1, addr,
+                                ft_mem_access_offset(fields, addr));
             }
-            FT_LA_LD_D_EMIT(&out, la_a1, addr,
-                            ft_mem_access_offset(fields, addr));
             if (!ft_emit_x87_mark_denormal_operand(&out, la_a1, true)) {
                 return 0;
             }
@@ -2441,11 +3024,15 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         if (option_soft_fpu) {
             ft_emit_helper_prologue(&out);
-            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
-                return 0;
+            if (direct_extra && extra.loaded) {
+                FT_LA_MOVFR2GR_D_EMIT(&out, la_a1, ft_vscratch + 1);
+            } else {
+                if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                    return 0;
+                }
+                FT_LA_LD_WU_EMIT(&out, la_a1, addr,
+                                 ft_mem_access_offset(fields, addr));
             }
-            FT_LA_LD_WU_EMIT(&out, la_a1, addr,
-                             ft_mem_access_offset(fields, addr));
             if (!ft_emit_x87_mark_denormal_operand(&out, la_a1, false)) {
                 return 0;
             }
@@ -2497,11 +3084,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             case FT_X87_FDIVRP: op = FT_X87_REG_DIVR; break;
             default: return 0;
             }
-            ft_emit_helper_prologue(&out);
-            ft_emit_cpu_env_ptr(&out, la_a0);
-            FT_LA_ADDI_D_EMIT(&out, la_a1, la_zero, st_index);
-            ft_emit_host_call(&out, (void *)ft_x87_binary_helpers[2][op], 1u << 0);
-            ft_emit_helper_epilogue(&out);
+            ft_emit_x87_soft_binary_reg(&out, st_index, op, 2);
             break;
         }
         switch (fields->kind) {
@@ -2578,6 +3161,19 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     {
         int fpus_offset = lsenv_offset_of_status_word(lsenv);
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (option_soft_fpu && option_soft_fpu_fast &&
+            ft_offset_fits_imm12(fpus_offset) &&
+            ft_offset_fits_imm12(lsenv_offset_of_top(lsenv))) {
+            /* Same status composition as the old soft-fpu translator. */
+            FT_LA_LD_HU_EMIT(&out, la_t0, la_s0, fpus_offset);
+            FT_LA_LD_WU_EMIT(&out, la_t1, la_s0,
+                             lsenv_offset_of_top(lsenv));
+            FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_t1, 13, 11);
+            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(rax_index), la_t0, 15, 0);
+            break;
+        }
+#endif
         if (option_soft_fpu) {
             ft_emit_host_stack_begin(&out);
             FT_LA_ADDI_D_EMIT(&out, la_sp, la_sp, -16);
@@ -2616,6 +3212,25 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         if (fields->modrm_mod == 3) {
             return 0;
         }
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (option_soft_fpu && option_soft_fpu_fast &&
+            ft_offset_fits_imm12(fpus_offset) &&
+            ft_offset_fits_imm12(lsenv_offset_of_top(lsenv))) {
+            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                return 0;
+            }
+            value = addr == la_t0 ? la_t1 : la_t0;
+            int top = ft_scratch_avoid3(addr, value, -1);
+
+            FT_LA_LD_HU_EMIT(&out, value, la_s0, fpus_offset);
+            FT_LA_LD_WU_EMIT(&out, top, la_s0,
+                             lsenv_offset_of_top(lsenv));
+            FT_LA_BSTRINS_D_EMIT(&out, value, top, 13, 11);
+            FT_LA_ST_H_EMIT(&out, value, addr,
+                            ft_mem_access_offset(fields, addr));
+            break;
+        }
+#endif
         if (option_soft_fpu) {
             int offset;
 
@@ -2675,6 +3290,11 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         FT_LA_LD_HU_EMIT(&out, la_t0, addr,
                          ft_mem_access_offset(fields, addr));
         ft_emit_store_env(&out, la_t0, fpuc_offset, FT_LA_OPCODE_ST_H);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (option_soft_fpu && option_soft_fpu_fast) {
+            ft_emit_x87_soft_control(&out);
+        } else
+#endif
         ft_emit_x87_update_fcsr_by_cw(&out, la_t0);
         break;
     }
@@ -2697,6 +3317,12 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     }
     default:
         return 0;
+    }
+
+    ft_soft_environment_end(&out, &memory_call);
+    if (direct_extra) {
+        ft_bind_branch_label(&extra.done, out);
+        ft_resolve_branch_fixup(&extra.done_fix);
     }
 
     if (!option_soft_fpu && !ft_emit_x87_top_store(&out)) {
