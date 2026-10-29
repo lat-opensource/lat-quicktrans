@@ -279,6 +279,12 @@ test(
 )
 
 test(
+  'quicktrans_lats_ldmxcsr_lazy',
+  python,
+  args: [files('tests/test-lats-ldmxcsr-lazy.py')],
+)
+
+test(
   'quicktrans_lats_zero_code',
   python,
   args: [files('tests/test-lats-zero-code.py')],
