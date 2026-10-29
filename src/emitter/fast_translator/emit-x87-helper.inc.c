@@ -410,6 +410,30 @@ static void ft_x87_helper_fsincos(CPUX86State *env)
         return;
     }
     floatx80 input = env->fpregs[env->fpstt].d;
+#ifdef QUICKTRANS_LATU
+    /* Finite supported inputs outside |x| < 2^63 set C2 without a push. */
+    unsigned exponent = input.high & 0x7fff;
+    if (exponent == 0x7fff && input.low == UINT64_C(0x8000000000000000)) {
+        /* Infinity is invalid, not a finite argument-reduction failure. */
+        float_raise(float_flag_invalid, &env->fp_status);
+        env->fpus |= 1;
+        if (!(env->fpuc & 1)) {
+            env->fpus |= 0x8080;
+            return;
+        }
+        env->fpus &= ~0x600; /* Masked invalid: clear C1 and C2. */
+        floatx80 indefinite = floatx80_default_nan(&env->fp_status);
+        env->fpregs[env->fpstt].d = indefinite;
+        helper_fpush(env);
+        env->fpregs[env->fpstt].d = indefinite;
+        env->fptags[env->fpstt] = 0;
+        return;
+    }
+    if (exponent >= 0x403e && exponent < 0x7fff && (input.low >> 63)) {
+        env->fpus = (env->fpus & ~0x200) | 0x400;
+        return;
+    }
+#endif
 
     helper_fsin(env);
     helper_fpush(env);
