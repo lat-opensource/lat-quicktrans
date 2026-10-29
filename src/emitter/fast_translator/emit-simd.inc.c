@@ -1317,7 +1317,7 @@ static int ft_emit_pshufw_template(const FastTemplateFields *fields, Translation
     } else {
         int addr;
 
-        if (!ft_emit_mem_addr(&out, fields, &addr)) {
+        if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
             return 0;
         }
         FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,

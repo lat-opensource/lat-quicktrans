@@ -1455,6 +1455,10 @@ static int ft_emit_fenv_helper(uint32_t **out,
     int addr;
     int offset;
     int data32 = fields->prefix2 != dt_X86_PREFIX_OPSIZE;
+    bool preserve_hard_regs = false;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    preserve_hard_regs = !restore && !option_soft_fpu;
+#endif
 
     if (fields->modrm_mod == 3 ||
         fields->modrm_reg != (restore ? 4 : 6)) {
@@ -1498,11 +1502,26 @@ static int ft_emit_fenv_helper(uint32_t **out,
     ft_emit_save_fprs_to_env(out);
     ft_emit_save_xmms_to_env(out);
     ft_emit_save_condition_flags(out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI)
+    /* This custom prologue has the same complete guest snapshot as the
+     * generic helper prologue. A fault inside C must not restore its scratch
+     * registers as guest GPRs (in particular RSP). */
+    if (!option_soft_fpu) {
+        FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 0);
+        ft_emit_store_env(out, la_t0, lsenv_offset_of_fcsr(lsenv),
+                          FT_LA_OPCODE_ST_W);
+    }
+    FT_LA_ORI_EMIT(out, la_t0, la_zero, 1);
+    ft_emit_store_env(out, la_t0, offsetof(CPUX86State, qt_helper_env_saved),
+                      FT_LA_OPCODE_ST_B);
+#endif
 
     if (!restore && !option_soft_fpu) {
-        ft_emit_cpu_env_ptr(out, la_a0);
-        ft_emit_host_call(out, (void *)ft_convert_fpregs_64_to_x80,
-                          1u << 0);
+        if (!preserve_hard_regs) {
+            ft_emit_cpu_env_ptr(out, la_a0);
+            ft_emit_host_call(out, (void *)ft_convert_fpregs_64_to_x80,
+                              1u << 0);
+        }
         ft_emit_cpu_env_ptr(out, la_a0);
         ft_emit_host_call(out, (void *)update_fp_status, 1u << 0);
         if (!ft_emit_x87_sync_status_from_fcsr(out)) {
@@ -1517,7 +1536,9 @@ static int ft_emit_fenv_helper(uint32_t **out,
     FT_LA_ADDI_D_EMIT(out, la_a2, la_zero, data32);
     void *save_helper = (void *)helper_fstenv;
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
-    if (!restore && data32 && ft_x87_latu_legacy_no_tag()) {
+    if (preserve_hard_regs) {
+        save_helper = (void *)ft_x87_latu_fstenv_hard;
+    } else if (!restore && data32 && ft_x87_latu_legacy_no_tag()) {
         save_helper = (void *)ft_x87_latu_fstenv32_no_tag;
     }
 #endif
@@ -1549,15 +1570,24 @@ static int ft_emit_fenv_helper(uint32_t **out,
             ft_emit_store_env(out, la_t0, fpuc_offset, FT_LA_OPCODE_ST_H);
             ft_emit_x87_update_fcsr_by_cw(out, la_t0);
 
-            ft_emit_cpu_env_ptr(out, la_a0);
-            ft_emit_host_call(out, (void *)ft_convert_fpregs_x80_to_64,
-                              1u << 0);
+            if (!preserve_hard_regs) {
+                ft_emit_cpu_env_ptr(out, la_a0);
+                ft_emit_host_call(out, (void *)ft_convert_fpregs_x80_to_64,
+                                  1u << 0);
+            }
         }
     }
 
     ft_emit_host_stack_begin(out);
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
     ft_emit_host_stack_end(out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI)
+    if (option_soft_fpu) {
+        ft_emit_store_env(out, la_zero,
+                          offsetof(CPUX86State, qt_helper_env_saved),
+                          FT_LA_OPCODE_ST_B);
+    }
+#endif
     ft_emit_x87_helper_epilogue(out);
     ft_soft_environment_end(out, &fast);
     return *out - start;
@@ -2898,6 +2928,14 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
         if (st_index != 0) {
             FT_LA_FMOV_D_EMIT(&out, ft_mmx(st_index), ft_mmx(0));
+        }
+        /* The register destination becomes occupied before a possible pop.
+         * Otherwise a later helper/state save treats the copied value as empty.
+         * Keep the legacy tag-off policy, and let FSTP ST(0) invalidate the
+         * slot again when it pops below.
+         */
+        if (!ft_x87_latu_legacy_no_tag()) {
+            ft_emit_x87_mark_st_tag(&out, st_index, 0);
         }
         if (fields->kind == FT_X87_FSTP_REG) {
             ft_emit_x87_pop(&out);

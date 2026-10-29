@@ -176,8 +176,7 @@ static void fd_ft_set_alu(FastTemplateFields *fields, FastAluOp op,
     fields->alu_width = width;
 }
 
-static bool fd_ft_read_modrm_ex(FDState *s, FastTemplateFields *fields,
-                                bool allow_truncated_disp)
+static bool fd_ft_read_modrm(FDState *s, FastTemplateFields *fields)
 {
     int modrm = fd_read_byte(s);
     int mod;
@@ -207,11 +206,7 @@ static bool fd_ft_read_modrm_ex(FDState *s, FastTemplateFields *fields,
         if ((rm == 5 && fields->sib == 0) ||
             (rm == 4 && (base & 7) == 5)) {
             if (s->pos + 4 > s->code_size) {
-                if (!allow_truncated_disp) {
-                    return false;
-                }
-                s->pos = s->code_size;
-                return true;
+                return false;
             }
             fields->disp = fd_ft_read_i32(&s->code[s->pos]);
             s->pos += 4;
@@ -220,30 +215,17 @@ static bool fd_ft_read_modrm_ex(FDState *s, FastTemplateFields *fields,
         int disp = fd_read_byte(s);
 
         if (disp < 0) {
-            if (!allow_truncated_disp) {
-                return false;
-            }
-            s->pos = s->code_size;
-            return true;
+            return false;
         }
         fields->disp = (int8_t)disp;
     } else if (mod == 2) {
         if (s->pos + 4 > s->code_size) {
-            if (!allow_truncated_disp) {
-                return false;
-            }
-            s->pos = s->code_size;
-            return true;
+            return false;
         }
         fields->disp = fd_ft_read_i32(&s->code[s->pos]);
         s->pos += 4;
     }
     return true;
-}
-
-static bool fd_ft_read_modrm(FDState *s, FastTemplateFields *fields)
-{
-    return fd_ft_read_modrm_ex(s, fields, false);
 }
 
 static bool fd_ft_finish_direct(FastDecodedFT *decoded, FDState *s,

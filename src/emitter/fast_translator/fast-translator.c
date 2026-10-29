@@ -1907,6 +1907,11 @@ static FastTemplateEflagMasks ft_template_eflag_masks(
         break;
     case dt_X86_INS_SHLD:
     case dt_X86_INS_SHRD:
+        if ((fields->kind == FT_SHLD_RM_R_IMM8 ||
+             fields->kind == FT_SHRD_RM_R_IMM8) &&
+            (fields->imm & (ft_rex_w(fields) ? 63 : 31)) == 0) {
+            break;
+        }
         masks.def |= FT_EFLAGS_ALL;
         break;
     case dt_X86_INS_LAHF:
@@ -2241,6 +2246,7 @@ static void ft_analyze_cmp_sbb(FastTemplateFields *fields, int count)
             sbb->alu_form != FT_ALU_FORM_RM_R || sbb->modrm_mod != 3 ||
             sbb->modrm_rm_index != sbb->modrm_reg_index ||
             sbb->modrm_rm_index >= GPR_NUM ||
+            (sbb->alu_width == 8 && ft_modrm_rm_is_high8(sbb)) ||
             !ft_direct_alu_reg_operands(cmp, &lhs, &rhs) ||
             !ft_instptn_enabled(FT_INSTPTN_CMP_SBB)) {
             continue;
@@ -2649,7 +2655,10 @@ static void ft_analyze_direct_jcc_gap(
         for (int gap = head + 1; gap < count - 1; ++gap) {
             if (!ft_direct_gap_is_safe(&fields[gap], meta[gap],
                                        trial.direct_cmp_lhs_gpr,
-                                       trial.direct_cmp_rhs_gpr)) {
+                                       trial.direct_cmp_rhs_gpr) ||
+                (trial.direct_bit_index_gpr >= 0 &&
+                 ft_gap_writes_gpr(&fields[gap],
+                                   trial.direct_bit_index_gpr))) {
                 safe = false;
                 break;
             }

@@ -52,6 +52,49 @@ static void ft_x87_latu_fstenv32_no_tag(CPUX86State *env, target_ulong ptr)
     ft_x87_latu_store_env32(env, ptr, tag, ra);
 }
 
+/* FNSTENV observes registers; even on a guest-memory fault their raw bits
+ * must survive. Convert only a local value for tag classification. */
+static void ft_x87_latu_fstenv_hard(CPUX86State *env, target_ulong ptr,
+                                    int data32)
+{
+    uintptr_t ra = GETPC();
+    unsigned int tag = 0;
+    float_status status = env->fp_status;
+
+    for (unsigned int i = 0; i < 8; ++i) {
+        unsigned int entry;
+        if (data32 && !option_fputag) {
+            unsigned int byte = env->fptags[i];
+            entry = (byte | (byte << 1)) & 3;
+        } else if (env->fptags[i]) {
+            entry = 3;
+        } else if (!env->mode_fpu) {
+            /* MMX aliases have an all-ones x87 exponent. */
+            entry = 2;
+        } else {
+            floatx80 value = float64_to_floatx80(
+                (float64)env->fpregs[i].d.low, &status);
+            unsigned int exp = value.high & 0x7fff;
+            entry = exp == 0 && value.low == 0 ? 1 :
+                    exp == 0 || exp == 0x7fff ||
+                    !(value.low & (1ULL << 63)) ? 2 : 0;
+        }
+        tag |= entry << (2 * i);
+    }
+    if (data32) {
+        ft_x87_latu_store_env32(env, ptr, tag, ra);
+    } else {
+        unsigned int sw = (env->fpus & ~0x3800) |
+                          ((env->fpstt & 7) << 11);
+        cpu_stw_data_ra(env, ptr, env->fpuc, ra);
+        cpu_stw_data_ra(env, ptr + 2, sw, ra);
+        cpu_stw_data_ra(env, ptr + 4, tag, ra);
+        for (int i = 6; i < 14; i += 2) {
+            cpu_stw_data_ra(env, ptr + i, 0, ra);
+        }
+    }
+}
+
 static void ft_x87_latu_fsave32_no_tag(CPUX86State *env, target_ulong ptr)
 {
     uintptr_t ra = GETPC();
@@ -180,6 +223,10 @@ static void ft_x87_hard_bcd_merge_flags(CPUX86State *env, uint8_t old_flags)
 
 static void ft_x87_hard_fbstp(CPUX86State *env, target_ulong ptr)
 {
+    static const FloatRoundMode rounding_modes[4] = {
+        float_round_nearest_even, float_round_down,
+        float_round_up, float_round_to_zero
+    };
     uintptr_t ra = GETPC();
     float_status status;
     floatx80 value;
@@ -189,6 +236,10 @@ static void ft_x87_hard_fbstp(CPUX86State *env, target_ulong ptr)
 
     env->qt_bcd_helper_env_hard64 = true;
     signal_barrier();
+    /* Hard-FPU FLDCW updates the hardware rounding state, not necessarily
+     * fp_status. The software integer conversion must use the current RC. */
+    set_float_rounding_mode(rounding_modes[(env->fpuc >> 10) & 3],
+                            &env->fp_status);
     status = env->fp_status;
     value = float64_to_floatx80(
         (float64)env->fpregs[env->fpstt].d.low, &status);
@@ -1017,7 +1068,12 @@ static void ft_x87_hard_set_quotient_flags(CPUX86State *env, int quotient)
 static void ft_x87_hard_fpatan(CPUX86State *env)
 {
     if (ft_x87_st1_empty(env)) {
-        ft_x87_hard_set_st0_qnan(env);
+        /* A masked stack fault still writes ST(1) and pops ST(0).
+         * After the pop, the result destination is the new ST(0). */
+        if (ft_x87_masked_stack_underflow(env)) {
+            ft_x87_hard_pop(env);
+            ft_x87_hard_set_st0_qnan(env);
+        }
         return;
     }
     ft_x87_hard_set_st(env, 1,
@@ -1103,7 +1159,12 @@ static void ft_x87_hard_fprem1(CPUX86State *env)
 static void ft_x87_hard_fyl2x(CPUX86State *env)
 {
     if (ft_x87_st1_empty(env)) {
-        ft_x87_hard_set_st0_qnan(env);
+        /* A masked stack fault still writes ST(1) and pops ST(0).
+         * After the pop, the result destination is the new ST(0). */
+        if (ft_x87_masked_stack_underflow(env)) {
+            ft_x87_hard_pop(env);
+            ft_x87_hard_set_st0_qnan(env);
+        }
         return;
     }
     ft_x87_hard_set_st(env, 1,

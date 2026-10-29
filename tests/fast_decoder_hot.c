@@ -3078,9 +3078,36 @@ static void test_rejects(void)
     CHECK(!matched, "unsupported opcode must reject");
 }
 
+/* Fetch-window reuse may expose every partial displacement length. */
+static void test_sse_partial_displacements(void)
+{
+    static const struct { uint8_t code[10]; size_t size; } cases[] = {
+        {{0x66,0x41,0x0f,0x12,0x86,0x78,0xff,0xff,0xff},9},
+        {{0x66,0x0f,0x13,0x85,0x78,0xff,0xff,0xff},8},
+        {{0x66,0x48,0x0f,0x6e,0x85,0x78,0xff,0xff,0xff},9},
+        {{0x66,0x0f,0x7e,0x45,0x78},5},
+        {{0x66,0x0f,0x63,0x05,0x78,0xff,0xff,0xff},8},
+        {{0x66,0x0f,0x67,0x04,0x25,0x78,0xff,0xff,0xff},9},
+        {{0x66,0x0f,0x6b,0x85,0x78,0xff,0xff,0xff},8},
+    };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
+        int matched;
+        FastDecodedFT decoded = decode(cases[i].code, cases[i].size,
+                                        0x404738, &matched);
+        CHECK(matched, "complete SSE displacement must decode");
+        CHECK(decoded.fields.size == cases[i].size,
+              "complete SSE instruction length changed");
+        for (size_t n = 1; n < cases[i].size; ++n) {
+            decode(cases[i].code, n, 0x404738, &matched);
+            CHECK(!matched, "incomplete SSE displacement must reject");
+        }
+    }
+}
+
 int main(void)
 {
     test_default_32bit_address_size();
+    test_sse_partial_displacements();
     test_hot_gpr();
     test_mov_imm8_rex_registers();
     test_mov_moffs();

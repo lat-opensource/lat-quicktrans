@@ -1177,6 +1177,25 @@ static int ft_emit_shld_shrd_template(const FastTemplateFields *fields, Translat
         return 0;
     }
 
+    if (is_imm && (fields->imm & mask) == 0) {
+        /* Keep the memory read/write: zero count does not suppress faults.
+         * An r32 destination still clears its upper half; flags are unchanged.
+         */
+        if (fields->modrm_mod != 3) {
+            if (!ft_emit_store_shld_shrd_rm(&out, fields, pc, width, dst_value)) {
+                return 0;
+            }
+        } else if (width == 32) {
+            int dst = ft_modrm_rm_index(fields);
+            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+        }
+        if (out == code) {
+            /* The emitter's zero return value denotes failure. */
+            FT_LA_NOP_EMIT(&out);
+        }
+        return out - code;
+    }
+
     x86_op = ft_shld_shrd_x86_op(is_shld, is_imm, width);
     ft_emit_mask_to_width(&out, la_t0, dst_value, width);
     ft_emit_mask_to_width(&out, la_t1, ft_gpr(src), width);
@@ -1185,7 +1204,7 @@ static int ft_emit_shld_shrd_template(const FastTemplateFields *fields, Translat
         int count = fields->imm & mask;
         int other_count;
 
-        if (count == 0 || count >= width) {
+        if (count >= width) {
             return 0;
         }
         other_count = width - count;

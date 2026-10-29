@@ -1321,7 +1321,7 @@ static inline FastDecoderFTMatch fd_ft_try_sse(FDState *s, uint8_t opcode0,
             }
             fd_ft_init_fields(&decoded->fields, kind, s, address, opcode0,
                               opcode1, id);
-            if (!fd_ft_read_modrm_ex(s, &decoded->fields, true)) {
+            if (!fd_ft_read_modrm(s, &decoded->fields)) {
                 return FD_FT_REJECT;
             }
             if (opcode1 == 0x6e && s->rex_w &&
@@ -2095,7 +2095,7 @@ static inline FastDecoderFTMatch fd_ft_try_sse(FDState *s, uint8_t opcode0,
                                     dt_X86_INS_PACKSSDW;
             fd_ft_init_fields(&decoded->fields, FT_PACK_XMM_XMM, s,
                               address, opcode0, opcode1, id);
-            if (!fd_ft_read_modrm_ex(s, &decoded->fields, true)) {
+            if (!fd_ft_read_modrm(s, &decoded->fields)) {
                 return FD_FT_REJECT;
             }
             return fd_ft_finish_match(decoded, s, FT_PACK_XMM_XMM, false);
@@ -2246,7 +2246,7 @@ static inline FastDecoderFTMatch fd_ft_try_sse(FDState *s, uint8_t opcode0,
 
             fd_ft_init_fields(&decoded->fields, FT_MOVQ_XMM_RM64, s,
                               address, opcode0, opcode1, dt_X86_INS_MOVLPS);
-            if (!fd_ft_read_modrm_ex(s, &decoded->fields, true)) {
+            if (!fd_ft_read_modrm(s, &decoded->fields)) {
                 return FD_FT_REJECT;
             }
             is_reg = ((decoded->fields.modrm >> 6) & 3) == 3;
