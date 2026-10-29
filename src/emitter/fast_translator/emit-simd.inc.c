@@ -1437,6 +1437,27 @@ static int ft_emit_insertps_template(const FastTemplateFields *fields, Translati
     return (out - code);
 }
 
+#ifdef QUICKTRANS_LATU
+static int __attribute__((noinline))
+ft_emit_extractps_memory(const FastTemplateFields *fields, target_ulong pc,
+                          uint32_t *code, int src, int imm)
+{
+    uint32_t *out = code;
+    int addr;
+    if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+        return 0;
+    }
+    int offset = ft_mem_access_offset(fields, addr);
+    if (!(offset & 3) && offset >= -512 && offset <= 508) {
+        FT_LA_VSTELM_W_EMIT(&out, ft_xmm(src), addr, offset / 4, imm);
+    } else {
+        FT_LA_VPICKVE2GR_WU_EMIT(&out, la_t4, ft_xmm(src), imm);
+        FT_LA_ST_W_EMIT(&out, la_t4, addr, offset);
+    }
+    return out - code;
+}
+#endif
+
 static int ft_emit_extractps_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -1455,10 +1476,14 @@ static int ft_emit_extractps_template(const FastTemplateFields *fields, Translat
         }
         FT_LA_VPICKVE2GR_WU_EMIT(&out, ft_gpr(dst), ft_xmm(src), imm);
     } else {
+#ifdef QUICKTRANS_LATU
+        return ft_emit_extractps_memory(fields, pc, code, src, imm);
+#else
         FT_LA_VPICKVE2GR_WU_EMIT(&out, la_t1, ft_xmm(src), imm);
         if (!ft_emit_store_rm32(&out, fields, pc, la_t1, false)) {
             return 0;
         }
+#endif
     }
     return (out - code);
 }
@@ -2348,11 +2373,18 @@ static int ft_emit_pmaddwd_mmx_template(const FastTemplateFields *fields,
         src = ft_vscratch;
     }
 
+#ifdef QUICKTRANS_LATU
+    FT_LA_VMULWEV_W_H_EMIT(&out, ft_vscratch + 1, ft_mmx(dst), src);
+    FT_LA_VMULWOD_W_H_EMIT(&out, ft_vscratch + 2, ft_mmx(dst), src);
+    FT_LA_VADD_W_EMIT(&out, ft_mmx(dst), ft_vscratch + 1,
+                      ft_vscratch + 2);
+#else
     FT_LA_VXOR_V_EMIT(&out, ft_vscratch + 1, ft_vscratch + 1,
                       ft_vscratch + 1);
     FT_LA_VMADDWEV_W_H_EMIT(&out, ft_vscratch + 1, ft_mmx(dst), src);
     FT_LA_VMADDWOD_W_H_EMIT(&out, ft_vscratch + 1, ft_mmx(dst), src);
     FT_LA_VBSLL_V_EMIT(&out, ft_mmx(dst), ft_vscratch + 1, 0);
+#endif
     return (out - code);
 }
 
@@ -2677,6 +2709,15 @@ static int ft_emit_phminposuw_template(const FastTemplateFields *fields, Transla
         return 0;
     }
 
+#ifdef QUICKTRANS_LATU
+    /* Only the low halfword is used before broadcasting the minimum. */
+    FT_LA_VBSRL_V_EMIT(&out, temp, src, 8);
+    FT_LA_VMIN_HU_EMIT(&out, temp, temp, src);
+    FT_LA_VSRLI_D_EMIT(&out, temp2, temp, 32);
+    FT_LA_VMIN_HU_EMIT(&out, temp, temp, temp2);
+    FT_LA_VSRLI_D_EMIT(&out, temp2, temp, 16);
+    FT_LA_VMIN_HU_EMIT(&out, temp, temp, temp2);
+#else
     FT_LA_VSRLI_D_EMIT(&out, temp, src, 0x10);
     FT_LA_VMIN_HU_EMIT(&out, temp, temp, src);
     FT_LA_VSRLI_D_EMIT(&out, temp, temp, 0x10);
@@ -2690,6 +2731,7 @@ static int ft_emit_phminposuw_template(const FastTemplateFields *fields, Transla
         FT_LA_VEXTRINS_D_EMIT(&out, temp2, temp, 1);
     }
     FT_LA_VMIN_HU_EMIT(&out, temp, temp, temp2);
+#endif
     if (lasx) {
         FT_LA_XVREPLVE0_H_EMIT(&out, temp, temp);
     } else {
@@ -3042,8 +3084,13 @@ static int ft_emit_cvt_fp_xmm_template(const FastTemplateFields *fields, Transla
         FT_LA_VSHUF4I_W_EMIT(&out, ft_vscratch, src, 0x55);
         FT_LA_FCVT_D_S_EMIT(&out, ft_vscratch, ft_vscratch);
         ft_emit_lats_simd_fpe_check(&out, tb, pc);
+#ifdef QUICKTRANS_LATU
+        FT_LA_VILVL_D_EMIT(&out, ft_xmm(dst), ft_vscratch,
+                          ft_vscratch + 1);
+#else
         FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_vscratch + 1, 0);
         FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_vscratch, 0x10);
+#endif
         break;
     case dt_X86_INS_CVTSD2SS:
         if (fields->prefix0 != 0xf2 ||

@@ -560,7 +560,11 @@ static bool ft_emit_logic_imm_reg(uint32_t **out,
     uint64_t imm = width == 32 ? (uint32_t)fields->imm :
                                  (uint64_t)fields->imm;
 
-    if (!fields->skip_flags || (width != 32 && width != 64) ||
+    if (!fields->skip_flags || (width != 32 && width != 64
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        && width != 16
+#endif
+        ) ||
         imm > 0xfff) {
         return false;
     }

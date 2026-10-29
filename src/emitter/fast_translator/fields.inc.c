@@ -447,21 +447,33 @@ static bool ft_simd_bin_opcode_info(uint8_t prefix0, uint8_t prefix2,
         if (!is_double) {
             return false;
         }
+#ifdef QUICKTRANS_LATU
+        *la_opcode = FT_LA_OPCODE_VSIGNCOV_B;
+#else
         *la_opcode = FT_LA_OPCODE_VABSD_B;
+#endif
         *id = dt_X86_INS_PABSB;
         return true;
     case 0x1d:
         if (!is_double) {
             return false;
         }
+#ifdef QUICKTRANS_LATU
+        *la_opcode = FT_LA_OPCODE_VSIGNCOV_H;
+#else
         *la_opcode = FT_LA_OPCODE_VABSD_H;
+#endif
         *id = dt_X86_INS_PABSW;
         return true;
     case 0x1e:
         if (!is_double) {
             return false;
         }
+#ifdef QUICKTRANS_LATU
+        *la_opcode = FT_LA_OPCODE_VSIGNCOV_W;
+#else
         *la_opcode = FT_LA_OPCODE_VABSD_W;
+#endif
         *id = dt_X86_INS_PABSD;
         return true;
     case 0x08:

@@ -100,6 +100,13 @@ static void ft_count_bits_set_cf_from_zero(uint32_t **out, int value)
 static void ft_emit_popcnt_value(uint32_t **out, int result, int src,
                                  int width)
 {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    (void)width;
+    /* The integer input is already zero-extended to its operand width. */
+    FT_LA_MOVGR2FR_D_EMIT(out, ft_vscratch, src);
+    FT_LA_VPCNT_D_EMIT(out, ft_vscratch, ft_vscratch);
+    FT_LA_MOVFR2GR_D_EMIT(out, result, ft_vscratch);
+#else
     FT_LA_OR_EMIT(out, result, src, la_zero);
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
     ft_emit_li64(out, la_t4, width == 16 ? 0x5555ull :
@@ -150,6 +157,7 @@ static void ft_emit_popcnt_value(uint32_t **out, int result, int src,
     }
     FT_LA_ANDI_EMIT(out, result, result, width == 64 ? 0x7f :
                                   width == 32 ? 0x3f : 0x1f);
+#endif
 }
 
 static int ft_emit_count_bits_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
@@ -193,9 +201,16 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
                 fields->kind == FT_POPCNT_R16_RM16;
 
     if (is_lzcnt) {
-        FT_LA_CLZ_D_EMIT(&out, result, src);
-        if (width != 64) {
-            FT_LA_ADDI_D_EMIT(&out, result, result, -(64 - width));
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (width == 32 && fields->modrm_mod == 3) {
+            FT_LA_CLZ_W_EMIT(&out, result, src);
+        } else
+#endif
+        {
+            FT_LA_CLZ_D_EMIT(&out, result, src);
+            if (width != 64) {
+                FT_LA_ADDI_D_EMIT(&out, result, result, -(64 - width));
+            }
         }
     } else if (is_tzcnt) {
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
@@ -1130,16 +1145,30 @@ static int ft_emit_btx_reg_template(const FastTemplateFields *fields, Translatio
             return 0;
         }
         mem_offset = ft_mem_access_offset(fields, addr);
-        if (width != 64) {
-            int shift = 64 - width;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (ext == 4) {
+            if (width == 32) {
+                FT_LA_SRAI_W_EMIT(&out, la_t4, ft_gpr(bit_idx), 5);
+            } else if (width == 16) {
+                FT_LA_SLLI_D_EMIT(&out, la_t4, ft_gpr(bit_idx), 48);
+                FT_LA_SRAI_D_EMIT(&out, la_t4, la_t4, 52);
+            } else {
+                FT_LA_SRAI_D_EMIT(&out, la_t4, ft_gpr(bit_idx), 6);
+            }
+        } else
+#endif
+        {
+            if (width != 64) {
+                int shift = 64 - width;
 
-            FT_LA_SLLI_D_EMIT(&out, la_t4, ft_gpr(bit_idx), shift);
-            FT_LA_SRAI_D_EMIT(&out, la_t4, la_t4, shift);
+                FT_LA_SLLI_D_EMIT(&out, la_t4, ft_gpr(bit_idx), shift);
+                FT_LA_SRAI_D_EMIT(&out, la_t4, la_t4, shift);
+            }
+            /* Keep the final address in t4 across CF and mask generation. */
+            FT_LA_SRAI_D_EMIT(&out, la_t4,
+                              width == 64 ? ft_gpr(bit_idx) : la_t4,
+                              log2_width);
         }
-        /* Keep the final address in t4 across CF and mask generation. */
-        FT_LA_SRAI_D_EMIT(&out, la_t4,
-                          width == 64 ? ft_gpr(bit_idx) : la_t4,
-                          log2_width);
         FT_LA_ALSL_D_EMIT(&out, la_t4, la_t4, addr, log2_bytes - 1);
         addr = la_t4;
         FT_LA_ANDI_EMIT(&out, la_t0, ft_gpr(bit_idx), width - 1);

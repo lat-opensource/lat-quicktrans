@@ -3766,9 +3766,15 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             if (dst == src) {
                 FT_LA_VSSRANI_H_W_EMIT(&out, dst, dst, 0);
             } else {
+#ifdef QUICKTRANS_LATU
+                ft_emit_raw(&out, ft_gpr2_rd_rj(FT_LA_OPCODE_VSAT_W | (15u << 10), dst, dst));
+                ft_emit_raw(&out, ft_gpr2_rd_rj(FT_LA_OPCODE_VSAT_W | (15u << 10), scratch, src));
+                ft_emit_raw(&out, ft_gpr3(FT_LA_OPCODE_VPICKEV_H, dst, scratch, dst));
+#else
                 FT_LA_VSSRANI_H_W_EMIT(&out, dst, dst, 0);
                 FT_LA_VSSRANI_H_W_EMIT(&out, scratch, src, 0);
                 FT_LA_VEXTRINS_D_EMIT(&out, dst, scratch, 0x10);
+#endif
             }
         } else if (fields->id == dt_X86_INS_PACKUSWB) {
             if (dst == src) {
@@ -3781,18 +3787,39 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             }
         } else if (fields->id == dt_X86_INS_PACKUSDW) {
             if (dst == src) {
+#ifdef QUICKTRANS_LATU
+                FT_LA_VMAXI_W_EMIT(&out, dst, dst, 0);
+#else
                 FT_LA_VSLTI_W_EMIT(&out, scratch, dst, 0);
                 FT_LA_VANDN_V_EMIT(&out, dst, scratch, dst);
+#endif
                 FT_LA_VSSRANI_HU_W_EMIT(&out, dst, dst, 0);
                 FT_LA_VEXTRINS_D_EMIT(&out, dst, dst, 0x10);
             } else {
+#ifdef QUICKTRANS_LATU
+                FT_LA_VMAXI_W_EMIT(&out, dst, dst, 0);
+#else
                 FT_LA_VSLTI_W_EMIT(&out, scratch, dst, 0);
                 FT_LA_VANDN_V_EMIT(&out, dst, scratch, dst);
+#endif
+#ifdef QUICKTRANS_LATU
+                ft_emit_raw(&out, ft_gpr2_rd_rj(FT_LA_OPCODE_VSAT_WU | (15u << 10), dst, dst));
+#else
                 FT_LA_VSSRANI_HU_W_EMIT(&out, dst, dst, 0);
+#endif
+#ifdef QUICKTRANS_LATU
+                FT_LA_VMAXI_W_EMIT(&out, scratch2, src, 0);
+#else
                 FT_LA_VSLTI_W_EMIT(&out, scratch2, src, 0);
                 FT_LA_VANDN_V_EMIT(&out, scratch2, scratch2, src);
+#endif
+#ifdef QUICKTRANS_LATU
+                ft_emit_raw(&out, ft_gpr2_rd_rj(FT_LA_OPCODE_VSAT_WU | (15u << 10), scratch2, scratch2));
+                ft_emit_raw(&out, ft_gpr3(FT_LA_OPCODE_VPICKEV_H, dst, scratch2, dst));
+#else
                 FT_LA_VSSRANI_HU_W_EMIT(&out, scratch2, scratch2, 0);
                 FT_LA_VEXTRINS_D_EMIT(&out, dst, scratch2, 0x10);
+#endif
             }
         } else {
             return 0;
@@ -3904,10 +3931,16 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         dst = ft_xmm(dst);
         if (fields->id == dt_X86_INS_PMADDWD) {
             scratch = src == ft_vscratch ? ft_vscratch + 1 : ft_vscratch;
+#ifdef QUICKTRANS_LATU
+            FT_LA_VMULWEV_W_H_EMIT(&out, scratch, dst, src);
+            FT_LA_VMULWOD_W_H_EMIT(&out, scratch + 1, dst, src);
+            FT_LA_VADD_W_EMIT(&out, dst, scratch, scratch + 1);
+#else
             FT_LA_VXOR_V_EMIT(&out, scratch, scratch, scratch);
             FT_LA_VMADDWEV_W_H_EMIT(&out, scratch, dst, src);
             FT_LA_VMADDWOD_W_H_EMIT(&out, scratch, dst, src);
             FT_LA_VBSLL_V_EMIT(&out, dst, scratch, 0);
+#endif
         } else if (fields->id == dt_X86_INS_PMULHRSW) {
             int even = src == ft_vscratch ? ft_vscratch + 1 : ft_vscratch;
             int odd = even + 1;
@@ -4193,6 +4226,13 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             int dst_sub = ft_vscratch + 3;
             bool is_pd = id == dt_X86_INS_ADDSUBPD;
 
+#ifdef QUICKTRANS_LATU
+            /* Read a memory scratch source before replacing it with src_add. */
+            FT_LA_VSHUF4I_W_EMIT(&out, src_sub, src, is_pd ? 0x44 : 0x88);
+            FT_LA_VSHUF4I_W_EMIT(&out, src_add, src, is_pd ? 0xee : 0xdd);
+            FT_LA_VSHUF4I_W_EMIT(&out, dst_add, ft_xmm(dst), is_pd ? 0xee : 0xdd);
+            FT_LA_VSHUF4I_W_EMIT(&out, dst_sub, ft_xmm(dst), is_pd ? 0x44 : 0x88);
+#else
             FT_LA_VOR_V_EMIT(&out, src_add, src, src);
             FT_LA_VOR_V_EMIT(&out, src_sub, src, src);
             FT_LA_VOR_V_EMIT(&out, dst_add, ft_xmm(dst), ft_xmm(dst));
@@ -4201,6 +4241,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             FT_LA_VPERMI_W_EMIT(&out, dst_add, dst_add, is_pd ? 0xee : 0xf5);
             FT_LA_VPERMI_W_EMIT(&out, src_sub, src_sub, is_pd ? 0x44 : 0xa0);
             FT_LA_VPERMI_W_EMIT(&out, dst_sub, dst_sub, is_pd ? 0x44 : 0xa0);
+#endif
             ft_emit_raw(&out, ft_gpr3(is_pd ? FT_LA_OPCODE_VFSUB_D :
                                              FT_LA_OPCODE_VFSUB_S,
                                       dst_sub, dst_sub, src_sub));
@@ -4215,6 +4256,10 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                                       fpe ? dst_add : ft_xmm(dst),
                                       dst_sub, 0);
             } else {
+#ifdef QUICKTRANS_LATU
+                FT_LA_VILVL_W_EMIT(&out, fpe ? dst_add : ft_xmm(dst),
+                                   fpe ? dst_add : ft_xmm(dst), dst_sub);
+#else
                 FT_LA_VEXTRINS_W_EMIT(&out,
                                       fpe ? dst_add : ft_xmm(dst),
                                       dst_sub, 0);
@@ -4222,6 +4267,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 FT_LA_VEXTRINS_W_EMIT(&out,
                                       fpe ? dst_add : ft_xmm(dst),
                                       dst_sub, 0x2 << 4);
+#endif
             }
             if (fpe) {
                 FT_LA_VOR_V_EMIT(&out, ft_xmm(dst), dst_add, dst_add);
@@ -4309,10 +4355,14 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         }
         if (id == dt_X86_INS_PABSB || id == dt_X86_INS_PABSW ||
             id == dt_X86_INS_PABSD) {
+#ifdef QUICKTRANS_LATU
+            ft_emit_raw(&out, ft_gpr3(la_opcode, ft_xmm(dst), src, src));
+#else
             /* A separate zero preserves an aliased source without a copy. */
             int zero = ft_vscratch + 1;
             FT_LA_VANDI_B_EMIT(&out, zero, zero, 0);
             ft_emit_raw(&out, ft_gpr3(la_opcode, ft_xmm(dst), src, zero));
+#endif
             goto simd_bin_done;
         }
         if (simd_fpe) {
