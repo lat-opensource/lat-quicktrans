@@ -201,9 +201,13 @@ static bool ft_emit_alu_store_modrm_reg(uint32_t **out,
     switch (width) {
     case 64:
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
+#ifdef QUICKTRANS_LATU
+        if (value == ft_gpr(reg)) {
+#else
         if (fields->modrm_mod == 3 &&
             fields->alu_form == FT_ALU_FORM_R_RM &&
             !ft_alu_uses_cf(fields->alu_op) && value == ft_gpr(reg)) {
+#endif
             return true;
         }
 #endif
@@ -284,8 +288,13 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
             (fields->alu_form != FT_ALU_FORM_RM_R &&
              fields->alu_form != FT_ALU_FORM_R_RM)) {
 #endif
-            flag_lhs = la_t3;
-            FT_LA_OR_EMIT(out, flag_lhs, lhs, la_zero);
+#ifdef QUICKTRANS_LATU
+            if (op != FT_ALU_ADC || result == lhs)
+#endif
+            {
+                flag_lhs = la_t3;
+                FT_LA_OR_EMIT(out, flag_lhs, lhs, la_zero);
+            }
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         }
 #endif
@@ -764,12 +773,20 @@ static bool ft_emit_alu_template(uint32_t **out,
             return false;
         }
         if (width == 8) {
+#ifdef QUICKTRANS_LATU
+            lhs = ft_gpr(rax_index);
+#else
             FT_LA_BSTRPICK_D_EMIT(out, la_t0, ft_gpr(rax_index), 7, 0);
             lhs = la_t0;
+#endif
             result = la_t2;
         } else if (width == 16) {
+#ifdef QUICKTRANS_LATU
+            lhs = ft_gpr(rax_index);
+#else
             FT_LA_BSTRPICK_D_EMIT(out, la_t0, ft_gpr(rax_index), 15, 0);
             lhs = la_t0;
+#endif
             result = la_t2;
         } else {
             lhs = ft_gpr(rax_index);

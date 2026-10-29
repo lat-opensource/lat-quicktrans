@@ -216,10 +216,17 @@ static bool ft_emit_imul_rm(uint32_t **out, const FastTemplateFields *fields,
             ft_emit_li64(out, la_t1,
                          (uint64_t)(int64_t)(int16_t)fields->imm);
         }
+#ifdef QUICKTRANS_LATU
+        /* Both the stored product and X86MUL_H consume only low 16 bits. */
+        ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_H,
+                              src, la_t1);
+        FT_LA_MUL_W_EMIT(out, la_t0, src, la_t1);
+#else
         FT_LA_EXT_W_H_EMIT(out, la_t2, src);
         ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_H,
                               la_t2, la_t1);
         FT_LA_MUL_W_EMIT(out, la_t0, la_t2, la_t1);
+#endif
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(dst), la_t0, 15, 0);
         return true;
     default:
@@ -349,8 +356,12 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
             FT_LA_X86SUB_B_EMIT(out, ft_gpr(rax_index), la_t1);
         }
         FT_LA_ANDI_EMIT(out, la_t3, ft_gpr(rax_index), 0xff);
+#ifdef QUICKTRANS_LATU
+        FT_LA_BEQ_EMIT(out, la_t1, la_t3, 2);
+#else
         FT_LA_XOR_EMIT(out, la_t3, la_t1, la_t3);
         FT_LA_BEQ_EMIT(out, la_t3, la_zero, 2);
+#endif
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), la_t1, 7, 0);
         return true;
     }
@@ -364,8 +375,12 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
             FT_LA_X86SUB_H_EMIT(out, ft_gpr(rax_index), la_t1);
         }
         FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index), 15, 0);
+#ifdef QUICKTRANS_LATU
+        FT_LA_BEQ_EMIT(out, la_t1, la_t3, 2);
+#else
         FT_LA_XOR_EMIT(out, la_t3, la_t1, la_t3);
         FT_LA_BEQ_EMIT(out, la_t3, la_zero, 2);
+#endif
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), la_t1, 15, 0);
         return true;
     }
@@ -376,8 +391,12 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
         ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_D,
                            la_t1, la_t2, addr);
         FT_LA_X86SUB_D_EMIT(out, ft_gpr(rax_index), la_t1);
+#ifdef QUICKTRANS_LATU
+        FT_LA_BEQ_EMIT(out, la_t1, ft_gpr(rax_index), 2);
+#else
         FT_LA_XOR_EMIT(out, la_t3, la_t1, ft_gpr(rax_index));
         FT_LA_BEQ_EMIT(out, la_t3, la_zero, 2);
+#endif
         FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
     } else {
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rax_index), 31, 0);
@@ -387,8 +406,12 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t1, 31, 0);
         FT_LA_X86SUB_W_EMIT(out, ft_gpr(rax_index), la_t1);
         FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index), 31, 0);
+#ifdef QUICKTRANS_LATU
+        FT_LA_BEQ_EMIT(out, la_t1, la_t3, 3);
+#else
         FT_LA_XOR_EMIT(out, la_t3, la_t1, la_t3);
         FT_LA_BEQ_EMIT(out, la_t3, la_zero, 3);
+#endif
         FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
         FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rax_index), ft_gpr(rax_index), 31,
                                   0);
@@ -413,13 +436,21 @@ static bool ft_emit_cmpxchg8b(uint32_t **out,
     ft_preserve_cmpxchg_addr(out, &addr);
 
     /* CMPXCHG8B compares EDX:EAX with m64 and exchanges ECX:EBX on match. */
+#ifdef QUICKTRANS_LATU
+    FT_LA_SLLI_D_EMIT(out, la_t3, ft_gpr(rdx_index), 32);
+#else
     FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rdx_index), 31, 0);
     FT_LA_SLLI_D_EMIT(out, la_t3, la_t3, 32);
+#endif
     FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rax_index), 31, 0);
     FT_LA_OR_EMIT(out, la_t3, la_t3, la_t1);
 
+#ifdef QUICKTRANS_LATU
+    FT_LA_SLLI_D_EMIT(out, la_t2, ft_gpr(rcx_index), 32);
+#else
     FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rcx_index), 31, 0);
     FT_LA_SLLI_D_EMIT(out, la_t2, la_t2, 32);
+#endif
     FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rbx_index), 31, 0);
     FT_LA_OR_EMIT(out, la_t2, la_t2, la_t1);
 
@@ -769,8 +800,12 @@ static bool ft_emit_div_rm32(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+#ifdef QUICKTRANS_LATU
+    FT_LA_BSTRPICK_D_EMIT(out, la_t0, src, 31, 0);
+#else
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     FT_LA_BSTRPICK_D_EMIT(out, la_t0, la_t0, 31, 0);
+#endif
     {
         FastBranchLabel nonzero = { 0 };
         FastBranchFixup fixup;
@@ -883,8 +918,12 @@ static bool ft_emit_idiv_rm8(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+#ifdef QUICKTRANS_LATU
+    FT_LA_EXT_W_B_EMIT(out, la_t0, src);
+#else
     FT_LA_SLLI_D_EMIT(out, la_t0, src, 56);
     FT_LA_SRAI_D_EMIT(out, la_t0, la_t0, 56);
+#endif
     {
         FastBranchLabel nonzero = { 0 };
         FastBranchFixup fixup;
@@ -896,12 +935,20 @@ static bool ft_emit_idiv_rm8(uint32_t **out, const FastTemplateFields *fields,
         ft_resolve_branch_fixup(&fixup);
     }
 
+#ifdef QUICKTRANS_LATU
+    FT_LA_EXT_W_H_EMIT(out, la_t1, ft_gpr(rax_index));
+#else
     FT_LA_SLLI_D_EMIT(out, la_t1, ft_gpr(rax_index), 48);
     FT_LA_SRAI_D_EMIT(out, la_t1, la_t1, 48);
+#endif
     FT_LA_MOD_D_EMIT(out, la_t2, la_t1, la_t0);
     FT_LA_DIV_D_EMIT(out, la_t3, la_t1, la_t0);
+#ifdef QUICKTRANS_LATU
+    FT_LA_EXT_W_B_EMIT(out, la_t4, la_t3);
+#else
     FT_LA_SLLI_D_EMIT(out, la_t4, la_t3, 56);
     FT_LA_SRAI_D_EMIT(out, la_t4, la_t4, 56);
+#endif
     {
         FastBranchLabel quotient_fits = { 0 };
         FastBranchFixup fixup;
@@ -927,8 +974,12 @@ static bool ft_emit_idiv_rm16(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+#ifdef QUICKTRANS_LATU
+    FT_LA_EXT_W_H_EMIT(out, la_t0, src);
+#else
     FT_LA_SLLI_D_EMIT(out, la_t0, src, 48);
     FT_LA_SRAI_D_EMIT(out, la_t0, la_t0, 48);
+#endif
     {
         FastBranchLabel nonzero = { 0 };
         FastBranchFixup fixup;
@@ -944,13 +995,21 @@ static bool ft_emit_idiv_rm16(uint32_t **out, const FastTemplateFields *fields,
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 16);
     FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rax_index), 15, 0);
     FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
+#ifdef QUICKTRANS_LATU
+    FT_LA_SLLI_W_EMIT(out, la_t1, la_t1, 0);
+#else
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 32);
     FT_LA_SRAI_D_EMIT(out, la_t1, la_t1, 32);
+#endif
 
     FT_LA_MOD_D_EMIT(out, la_t2, la_t1, la_t0);
     FT_LA_DIV_D_EMIT(out, la_t3, la_t1, la_t0);
+#ifdef QUICKTRANS_LATU
+    FT_LA_EXT_W_H_EMIT(out, la_t4, la_t3);
+#else
     FT_LA_SLLI_D_EMIT(out, la_t4, la_t3, 48);
     FT_LA_SRAI_D_EMIT(out, la_t4, la_t4, 48);
+#endif
     {
         FastBranchLabel quotient_fits = { 0 };
         FastBranchFixup fixup;
@@ -985,9 +1044,13 @@ static bool ft_emit_idiv_rm32(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+#ifdef QUICKTRANS_LATU
+    FT_LA_SLLI_W_EMIT(out, la_t0, src, 0);
+#else
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 32);
     FT_LA_SRAI_D_EMIT(out, la_t0, la_t0, 32);
+#endif
     {
         FastBranchLabel nonzero = { 0 };
         FastBranchFixup fixup;
@@ -1006,8 +1069,12 @@ static bool ft_emit_idiv_rm32(uint32_t **out, const FastTemplateFields *fields,
 
     FT_LA_MOD_D_EMIT(out, la_t2, la_t1, la_t0);
     FT_LA_DIV_D_EMIT(out, la_t3, la_t1, la_t0);
+#ifdef QUICKTRANS_LATU
+    FT_LA_SLLI_W_EMIT(out, la_t4, la_t3, 0);
+#else
     FT_LA_SLLI_D_EMIT(out, la_t4, la_t3, 32);
     FT_LA_SRAI_D_EMIT(out, la_t4, la_t4, 32);
+#endif
     {
         FastBranchLabel quotient_fits = { 0 };
         FastBranchFixup fixup;

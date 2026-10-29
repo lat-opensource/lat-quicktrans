@@ -138,6 +138,19 @@ static int ft_emit_movd_xmm_r32_template(const FastTemplateFields *fields, Trans
     if (dst >= XMM_NUM) {
         return 0;
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+    if (fields->modrm_mod != 3 && option_enable_lasx) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+            return 0;
+        }
+        /* Complete the load before clearing the architectural high lanes. */
+        FT_LA_FLD_S_EMIT(&out, ft_vscratch, addr,
+                         ft_mem_access_offset(fields, addr));
+        FT_LA_XVPICKVE_W_EMIT(&out, ft_xmm(dst), ft_vscratch, 0);
+        return (out - code);
+    }
+#endif
     if (fields->modrm_mod == 3) {
         src = ft_modrm_rm_index(fields);
         if (src >= GPR_NUM) {
@@ -180,10 +193,19 @@ static int ft_emit_movd_r32_xmm_template(const FastTemplateFields *fields, Trans
         ft_emit_raw(&out, FT_LA_OPCODE_VPICKVE2GR_WU | ft_gpr(dst) |
                     (ft_xmm(src) << 5));
     } else {
+#ifdef QUICKTRANS_LATU
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+            return 0;
+        }
+        FT_LA_FST_S_EMIT(&out, ft_xmm(src), addr,
+                         ft_mem_access_offset(fields, addr));
+#else
         FT_LA_VPICKVE2GR_WU_EMIT(&out, la_t0, ft_xmm(src), 0);
         if (!ft_emit_store_rm32(&out, fields, pc, la_t0, true)) {
             return 0;
         }
+#endif
     }
     return (out - code);
 }
@@ -206,6 +228,19 @@ static int ft_emit_movd_mmx_rm32_template(const FastTemplateFields *fields,
     if (dst >= 8) {
         return 0;
     }
+#ifdef QUICKTRANS_LATU
+    if (fields->modrm_mod != 3) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+            return 0;
+        }
+        /* LD.WU already supplies the required zero high half of MMX. */
+        FT_LA_LD_WU_EMIT(&out, la_t0, addr,
+                         ft_mem_access_offset(fields, addr));
+        FT_LA_MOVGR2FR_D_EMIT(&out, ft_mmx(dst), la_t0);
+        return (out - code);
+    }
+#endif
     if (fields->modrm_mod == 3) {
         src = ft_modrm_rm_index(fields);
         if (src >= GPR_NUM) {
@@ -237,6 +272,17 @@ static int ft_emit_movd_rm32_mmx_template(const FastTemplateFields *fields,
     if (src >= 8) {
         return 0;
     }
+#ifdef QUICKTRANS_LATU
+    if (fields->modrm_mod != 3) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+            return 0;
+        }
+        FT_LA_FST_S_EMIT(&out, ft_mmx(src), addr,
+                         ft_mem_access_offset(fields, addr));
+        return (out - code);
+    }
+#endif
     FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(src));
     if (!ft_emit_store_rm32(&out, fields, pc, la_t0,
                             !ft_omit_gpr_zext32(fields))) {
@@ -413,6 +459,31 @@ static bool ft_emit_xmmm_src_bytes(uint32_t **out,
     }
     *src = ft_vscratch;
     return true;
+}
+
+/* Scalar consumers do not observe the unused upper scratch lanes. */
+static bool ft_emit_xmmm_low_src(uint32_t **out,
+                                  const FastTemplateFields *fields,
+                                  target_ulong pc, int bytes, int *src)
+{
+#ifdef QUICKTRANS_LATU
+    if (fields->modrm_mod != 3 && (bytes == 4 || bytes == 8)) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+            return false;
+        }
+        if (bytes == 4) {
+            FT_LA_FLD_S_EMIT(out, ft_vscratch, addr,
+                             ft_mem_access_offset(fields, addr));
+        } else {
+            FT_LA_FLD_D_EMIT(out, ft_vscratch, addr,
+                             ft_mem_access_offset(fields, addr));
+        }
+        *src = ft_vscratch;
+        return true;
+    }
+#endif
+    return ft_emit_xmmm_src_bytes(out, fields, pc, bytes, src);
 }
 
 static void ft_emit_blendps(uint32_t **out, int dst, int src, int imm)
@@ -698,14 +769,26 @@ static int ft_emit_simd_madd_mmx_template(const FastTemplateFields *fields,
     if (fields->id == dt_X86_INS_PMULHRSW) {
         FT_LA_VMULWEV_W_H_EMIT(&out, ft_vscratch + 1, ft_mmx(dst), src);
         FT_LA_VMULWOD_W_H_EMIT(&out, ft_vscratch + 2, ft_mmx(dst), src);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* Rounded narrowing wraps, rather than saturating, at +32768. */
+        FT_LA_VSRARNI_H_W_EMIT(&out, ft_vscratch + 2, ft_vscratch + 1, 15);
+#else
         FT_LA_VSRAI_W_EMIT(&out, ft_vscratch + 1, ft_vscratch + 1, 14);
         FT_LA_VSRAI_W_EMIT(&out, ft_vscratch + 2, ft_vscratch + 2, 14);
         FT_LA_VADDI_WU_EMIT(&out, ft_vscratch + 1, ft_vscratch + 1, 1);
         FT_LA_VADDI_WU_EMIT(&out, ft_vscratch + 2, ft_vscratch + 2, 1);
         FT_LA_VSRANI_H_W_EMIT(&out, ft_vscratch + 2, ft_vscratch + 1, 1);
+#endif
         FT_LA_VSHUF4I_W_EMIT(&out, ft_vscratch + 2, ft_vscratch + 2, 0xd8);
         FT_LA_VSHUF4I_H_EMIT(&out, ft_mmx(dst), ft_vscratch + 2, 0xd8);
     } else if (fields->id == dt_X86_INS_PMADDUBSW) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* Each signed product fits in 16 bits; saturate only their sum. */
+        FT_LA_VMULWEV_H_BU_B_EMIT(&out, ft_vscratch + 1, ft_mmx(dst), src);
+        FT_LA_VMULWOD_H_BU_B_EMIT(&out, ft_vscratch + 2, ft_mmx(dst), src);
+        FT_LA_VSADD_H_EMIT(&out, ft_mmx(dst), ft_vscratch + 1,
+                           ft_vscratch + 2);
+#else
         FT_LA_VXOR_V_EMIT(&out, ft_vscratch + 1, ft_vscratch + 1,
                           ft_vscratch + 1);
         FT_LA_VABSD_B_EMIT(&out, ft_vscratch + 3, src, ft_vscratch + 1);
@@ -729,6 +812,7 @@ static int ft_emit_simd_madd_mmx_template(const FastTemplateFields *fields,
                           ft_vscratch + 3);
         FT_LA_VSADD_H_EMIT(&out, ft_mmx(dst), ft_vscratch + 2,
                            ft_vscratch + 1);
+#endif
     } else {
         return 0;
     }
@@ -1109,6 +1193,25 @@ static int ft_emit_pmovx_template(const FastTemplateFields *fields, TranslationB
         fields->prefix2 != dt_X86_PREFIX_OPSIZE) {
         return 0;
     }
+#ifdef QUICKTRANS_LATU
+    /* Only the low source bytes contribute to the extended result.  Load
+     * them directly without clearing unused scratch lanes or using a GPR. */
+    if (!ft_pmovx_is_vex(fields->id) && fields->modrm_mod != 3 &&
+        (bytes == 4 || bytes == 8)) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+            return 0;
+        }
+        if (bytes == 4) {
+            FT_LA_FLD_S_EMIT(&out, ft_vscratch, addr,
+                             ft_mem_access_offset(fields, addr));
+        } else {
+            FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
+                             ft_mem_access_offset(fields, addr));
+        }
+        src = ft_vscratch;
+    } else
+#endif
     if (!ft_emit_xmmm_src_bytes(&out, fields, pc, bytes, &src)) {
         return 0;
     }
@@ -1217,17 +1320,29 @@ static int ft_emit_ptest_template(const FastTemplateFields *fields, TranslationB
         return 0;
     }
 
+#ifdef QUICKTRANS_LATU
+    /* Match legacy's one constant for both conditional flag updates. */
+    FT_LA_ORI_EMIT(&out, la_t4, la_zero, 0xfff);
+#endif
     FT_LA_X86MTFLAG_EMIT(&out, la_zero, 0x3f);
     FT_LA_VAND_V_EMIT(&out, temp, src, ft_xmm(dst));
     FT_LA_VSETEQZ_V_EMIT(&out, 0, temp);
+#ifdef QUICKTRANS_LATU
+    FT_LA_BCEQZ_EMIT(&out, 0, 2);
+#else
     FT_LA_BCEQZ_EMIT(&out, 0, 3);
     FT_LA_ORI_EMIT(&out, la_t4, la_zero, 0xfff);
+#endif
     FT_LA_X86MTFLAG_EMIT(&out, la_t4, ZF_USEDEF_BIT);
 
     FT_LA_VANDN_V_EMIT(&out, temp, ft_xmm(dst), src);
     FT_LA_VSETEQZ_V_EMIT(&out, 0, temp);
+#ifdef QUICKTRANS_LATU
+    FT_LA_BCEQZ_EMIT(&out, 0, 2);
+#else
     FT_LA_BCEQZ_EMIT(&out, 0, 3);
     FT_LA_ORI_EMIT(&out, la_t4, la_zero, 0xfff);
+#endif
     FT_LA_X86MTFLAG_EMIT(&out, la_t4, CF_USEDEF_BIT);
     return (out - code);
 }
@@ -1249,6 +1364,17 @@ static int ft_emit_insertps_template(const FastTemplateFields *fields, Translati
         fields->id != dt_X86_INS_INSERTPS) {
         return 0;
     }
+#ifdef QUICKTRANS_LATU
+    if (fields->modrm_mod != 3) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+            return 0;
+        }
+        FT_LA_FLD_S_EMIT(&out, ft_vscratch, addr,
+                         ft_mem_access_offset(fields, addr));
+        src = ft_vscratch;
+    } else
+#endif
     if (!ft_emit_xmmm_src_bytes(&out, fields, pc, 4, &src)) {
         return 0;
     }
@@ -2822,7 +2948,7 @@ static int ft_emit_cvt_fp_xmm_template(const FastTemplateFields *fields, Transla
     switch (fields->id) {
     case dt_X86_INS_CVTDQ2PD:
         if (fields->prefix0 != 0xf3 ||
-            !ft_emit_xmmm_src_bytes(&out, fields, pc, 8, &src)) {
+            !ft_emit_xmmm_low_src(&out, fields, pc, 8, &src)) {
             return 0;
         }
         FT_LA_VFFINTL_D_W_EMIT(&out, result, src);
@@ -3122,7 +3248,12 @@ static void ft_emit_cvt_fp2i_lanes(uint32_t **out, TranslationBlock *tb,
             FT_LA_VEXTRINS_W_EMIT(out, result, converted, lane << 4);
         }
     }
-    FT_LA_VAND_V_EMIT(out, dst, result, result);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (dst != result)
+#endif
+    {
+        FT_LA_VAND_V_EMIT(out, dst, result, result);
+    }
 }
 
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
@@ -3165,7 +3296,12 @@ static void ft_emit_cvt_fp2i_unoptimized(uint32_t **out, int src, int dst,
         FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
         FT_LA_VINSGR2VR_W_EMIT(out, result, la_t1, lane);
     }
-    FT_LA_VAND_V_EMIT(out, dst, result, result);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (dst != result)
+#endif
+    {
+        FT_LA_VAND_V_EMIT(out, dst, result, result);
+    }
 }
 #endif
 
@@ -3223,7 +3359,12 @@ static bool ft_emit_cvt_fp2i_core(uint32_t **out,
     if (!ft_fast_masked_v_enabled()) {
         ft_emit_cvt_fp2i_fix_invalid(out, temp, src, is_double, trunc);
     }
-    FT_LA_VAND_V_EMIT(out, dst_vec, temp, temp);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (dst_vec != temp)
+#endif
+    {
+        FT_LA_VAND_V_EMIT(out, dst_vec, temp, temp);
+    }
     return true;
 }
 
@@ -3259,6 +3400,13 @@ static int ft_emit_cvt_fp2i_mmx_template(const FastTemplateFields *fields, Trans
     uint32_t *out = code;
     int dst = ft_modrm_reg_index(fields);
     int src;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* All conversion branches assemble the result here. Keep it there
+     * until the final low-64-bit MMX write, avoiding an intermediate copy. */
+    int result = ft_vscratch + 1;
+#else
+    int result = ft_vscratch;
+#endif
     bool is_double = fields->id == dt_X86_INS_CVTPD2PI ||
                      fields->id == dt_X86_INS_CVTTPD2PI;
 
@@ -3279,7 +3427,7 @@ static int ft_emit_cvt_fp2i_mmx_template(const FastTemplateFields *fields, Trans
         FT_LA_X86MTTOP_EMIT(&out, 0);
         FT_LA_X86SETTM_EMIT(&out);
     }
-    if (!ft_emit_xmmm_src_bytes(&out, fields, pc, is_double ? 16 : 8, &src)) {
+    if (!ft_emit_xmmm_low_src(&out, fields, pc, is_double ? 16 : 8, &src)) {
         return 0;
     }
     if (!is_double) {
@@ -3287,10 +3435,10 @@ static int ft_emit_cvt_fp2i_mmx_template(const FastTemplateFields *fields, Trans
         FT_LA_VREPLVEI_D_EMIT(&out, ft_vscratch, src, 0);
         src = ft_vscratch;
     }
-    if (!ft_emit_cvt_fp2i_core(&out, fields, tb, pc, src, ft_vscratch)) {
+    if (!ft_emit_cvt_fp2i_core(&out, fields, tb, pc, src, result)) {
         return 0;
     }
-    FT_LA_VEXTRINS_D_EMIT(&out, ft_mmx(dst), ft_vscratch, 0);
+    FT_LA_VEXTRINS_D_EMIT(&out, ft_mmx(dst), result, 0);
     return (out - code);
 }
 
@@ -3384,7 +3532,7 @@ static int ft_emit_cmp_xmm_template(const FastTemplateFields *fields, Translatio
         int scalar_rhs = ft_vscratch + 2;
         int scalar_result = ft_vscratch + 3;
 
-        if (!ft_emit_xmmm_src_bytes(&out, fields, pc, is_double ? 8 : 4, &src)) {
+        if (!ft_emit_xmmm_low_src(&out, fields, pc, is_double ? 8 : 4, &src)) {
             return 0;
         }
         lhs = ft_xmm(dst);
@@ -3531,6 +3679,7 @@ static bool ft_emit_round_core(uint32_t **out, int dst, int src,
     return true;
 }
 
+#ifndef QUICKTRANS_LATU
 static void ft_emit_round_save_precision_flag(uint32_t **out)
 {
     FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 2);
@@ -3546,6 +3695,8 @@ static void ft_emit_round_restore_precision_flag(uint32_t **out)
     FT_LA_MOVGR2FCSR_EMIT(out, 2, la_t1);
 }
 
+#endif
+
 static int ft_emit_round_xmm_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -3557,6 +3708,8 @@ static int ft_emit_round_xmm_template(const FastTemplateFields *fields, Translat
     bool is_double;
     bool is_scalar;
     bool fpe = ft_lats_simd_fpe_enabled(tb);
+
+    /* LATU round_core already restores FCSR, including the precision flag. */
 
     if (dst >= XMM_NUM || fields->prefix0 != 0 ||
         fields->prefix2 != dt_X86_PREFIX_OPSIZE) {
@@ -3595,15 +3748,19 @@ static int ft_emit_round_xmm_template(const FastTemplateFields *fields, Translat
         } else {
             FT_LA_VREPLVEI_W_EMIT(&out, round_src, src, 0);
         }
+#ifndef QUICKTRANS_LATU
         if (imm & 0x08) {
             ft_emit_round_save_precision_flag(&out);
         }
+#endif
         if (!ft_emit_round_core(&out, round_dst, round_src, is_double, imm)) {
             return 0;
         }
+#ifndef QUICKTRANS_LATU
         if (imm & 0x08) {
             ft_emit_round_restore_precision_flag(&out);
         }
+#endif
         ft_emit_lats_simd_fpe_check_ex(&out, tb, pc, imm & 0x08);
         if (is_double) {
             FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), round_dst, 0);
@@ -3617,15 +3774,19 @@ static int ft_emit_round_xmm_template(const FastTemplateFields *fields, Translat
         return 0;
     }
     round_dst = fpe ? ft_vscratch + 1 : ft_xmm(dst);
+#ifndef QUICKTRANS_LATU
     if (imm & 0x08) {
         ft_emit_round_save_precision_flag(&out);
     }
+#endif
     if (!ft_emit_round_core(&out, round_dst, src, is_double, imm)) {
         return 0;
     }
+#ifndef QUICKTRANS_LATU
     if (imm & 0x08) {
         ft_emit_round_restore_precision_flag(&out);
     }
+#endif
     ft_emit_lats_simd_fpe_check_ex(&out, tb, pc, imm & 0x08);
     if (fpe) {
         FT_LA_VOR_V_EMIT(&out, ft_xmm(dst), round_dst, round_dst);
@@ -3636,6 +3797,14 @@ static int ft_emit_round_xmm_template(const FastTemplateFields *fields, Translat
 static void ft_emit_dpps_lane_select(uint32_t **out, int lhs, int rhs,
                                      int dst, int src, uint8_t imm)
 {
+#ifdef QUICKTRANS_LATU
+    /* A full input mask already has the required lanes and NaN payloads. */
+    if ((imm & 0xf0) == 0xf0) {
+        FT_LA_VOR_V_EMIT(out, lhs, dst, dst);
+        FT_LA_VOR_V_EMIT(out, rhs, src, src);
+        return;
+    }
+#endif
     FT_LA_VANDI_B_EMIT(out, lhs, lhs, 0);
     FT_LA_VANDI_B_EMIT(out, rhs, rhs, 0);
     if (imm & 0x10) {
@@ -3659,6 +3828,14 @@ static void ft_emit_dpps_lane_select(uint32_t **out, int lhs, int rhs,
 static void ft_emit_dppd_lane_select(uint32_t **out, int lhs, int rhs,
                                      int dst, int src, uint8_t imm)
 {
+#ifdef QUICKTRANS_LATU
+    /* A full input mask already has the required lanes and NaN payloads. */
+    if ((imm & 0x30) == 0x30) {
+        FT_LA_VOR_V_EMIT(out, lhs, dst, dst);
+        FT_LA_VOR_V_EMIT(out, rhs, src, src);
+        return;
+    }
+#endif
     FT_LA_VANDI_B_EMIT(out, lhs, lhs, 0);
     FT_LA_VANDI_B_EMIT(out, rhs, rhs, 0);
     if (imm & 0x10) {
@@ -3674,6 +3851,12 @@ static void ft_emit_dppd_lane_select(uint32_t **out, int lhs, int rhs,
 static void ft_emit_dpps_result_mask(uint32_t **out, int dst, int sum,
                                      uint8_t imm)
 {
+#ifdef QUICKTRANS_LATU
+    if ((imm & 0x0f) == 0x0f) {
+        FT_LA_VOR_V_EMIT(out, dst, sum, sum);
+        return;
+    }
+#endif
     FT_LA_VANDI_B_EMIT(out, dst, dst, 0);
     if (imm & 0x01) {
         FT_LA_VEXTRINS_W_EMIT(out, dst, sum, 0x00);
@@ -3733,6 +3916,26 @@ static int ft_emit_dp_xmm_template(const FastTemplateFields *fields, Translation
     }
 
     if (fields->id == dt_X86_INS_DPPD) {
+#ifdef QUICKTRANS_LATU
+        /* Follow the legacy reduction order: the low product is the first
+         * addend, and its sum is broadcast to every selected output lane.
+         * Keep all arithmetic and exception checks even for a zero mask. */
+        ft_emit_dppd_lane_select(&out, lhs, rhs, ft_xmm(dst), src, imm);
+        FT_LA_VFMUL_D_EMIT(&out, lhs, lhs, rhs);
+        ft_emit_lats_simd_fpe_check(&out, tb, pc);
+        FT_LA_VPACKOD_D_EMIT(&out, rhs, lhs, lhs);
+        FT_LA_VPACKEV_D_EMIT(&out, lhs, lhs, lhs);
+        FT_LA_VFADD_D_EMIT(&out, lhs, lhs, rhs);
+        ft_emit_lats_simd_fpe_check(&out, tb, pc);
+        FT_LA_VANDI_B_EMIT(&out, ft_xmm(dst), ft_xmm(dst), 0);
+        if (imm & 0x01) {
+            FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), lhs, 0x00);
+        }
+        if (imm & 0x02) {
+            FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), lhs, 0x11);
+        }
+        return (out - code);
+#else
         int product = ft_vscratch + 5;
         int quiet = ft_vscratch + 6;
         int high_sum = ft_vscratch;
@@ -3762,45 +3965,64 @@ static int ft_emit_dp_xmm_template(const FastTemplateFields *fields, Translation
         }
 
         /* Commit only after every operation that can raise an FP exception. */
-        FT_LA_VANDI_B_EMIT(&out, lhs, lhs, 0);
+#ifdef QUICKTRANS_LATU
+        int result = ft_xmm(dst);
+#else
+        int result = lhs;
+#endif
+        FT_LA_VANDI_B_EMIT(&out, result, result, 0);
         if (imm & 0x01) {
-            FT_LA_VEXTRINS_D_EMIT(&out, lhs, product, 0x00);
+            FT_LA_VEXTRINS_D_EMIT(&out, result, product, 0x00);
         }
         if (imm & 0x02) {
-            FT_LA_VEXTRINS_D_EMIT(&out, lhs, high_sum, 0x11);
+            FT_LA_VEXTRINS_D_EMIT(&out, result, high_sum, 0x11);
         }
-        FT_LA_VOR_V_EMIT(&out, ft_xmm(dst), lhs, lhs);
+#ifndef QUICKTRANS_LATU
+        FT_LA_VOR_V_EMIT(&out, ft_xmm(dst), result, result);
+#endif
         return (out - code);
+#endif
     }
 
+#ifndef QUICKTRANS_LATU
     int rhs_nan = ft_vscratch + 3;
+#endif
+    /* LATU follows the legacy low-element-first reduction order. */
 
     ft_emit_dpps_lane_select(&out, lhs, rhs, ft_xmm(dst), src, imm);
     FT_LA_VFMUL_S_EMIT(&out, lhs, lhs, rhs);
     ft_emit_lats_simd_fpe_check(&out, tb, pc);
     FT_LA_VPACKOD_W_EMIT(&out, rhs, lhs, lhs);
     FT_LA_VPACKEV_W_EMIT(&out, lhs, lhs, lhs);
+#ifndef QUICKTRANS_LATU
     if (imm & 0xa0) {
         FT_LA_VFCMP_COND_S_EMIT(&out, rhs_nan, rhs, rhs, 0x08);
         FT_LA_VSRLI_D_EMIT(&out, rhs_nan, rhs_nan, 32);
     }
+#endif
     FT_LA_VFADD_S_EMIT(&out, lhs, lhs, rhs);
     ft_emit_lats_simd_fpe_check(&out, tb, pc);
+#ifndef QUICKTRANS_LATU
     if (imm & 0xa0) {
         FT_LA_VBITSEL_V_EMIT(&out, lhs, lhs, rhs, rhs_nan);
     }
+#endif
     FT_LA_VPACKOD_D_EMIT(&out, rhs, lhs, lhs);
     FT_LA_VPACKEV_D_EMIT(&out, lhs, lhs, lhs);
+#ifndef QUICKTRANS_LATU
     if (imm & 0xc0) {
         FT_LA_VFCMP_COND_S_EMIT(&out, rhs_nan, rhs, rhs, 0x08);
         FT_LA_VANDI_B_EMIT(&out, ft_vscratch, ft_vscratch, 0);
         FT_LA_VEXTRINS_D_EMIT(&out, ft_vscratch, rhs_nan, 0x11);
     }
+#endif
     FT_LA_VFADD_S_EMIT(&out, lhs, lhs, rhs);
     ft_emit_lats_simd_fpe_check(&out, tb, pc);
+#ifndef QUICKTRANS_LATU
     if (imm & 0xc0) {
         FT_LA_VBITSEL_V_EMIT(&out, lhs, lhs, rhs, ft_vscratch);
     }
+#endif
     ft_emit_dpps_result_mask(&out, ft_xmm(dst), lhs, imm);
     return (out - code);
 }

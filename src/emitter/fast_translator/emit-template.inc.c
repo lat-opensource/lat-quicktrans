@@ -493,7 +493,11 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         }
 #endif
         flag_src = src;
-        if (!fields->skip_flags) {
+        if (!fields->skip_flags
+#ifdef QUICKTRANS_LATU
+            && (src == result || src == ft_gpr(dst))
+#endif
+        ) {
             flag_src = ft_scratch_avoid3(src, ft_gpr(dst), la_t0);
             FT_LA_OR_EMIT(&out, flag_src, src, la_zero);
         }
@@ -557,8 +561,12 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                                    ft_mem_access_offset(fields, addr));
         }
         FT_LA_BSTRPICK_D_EMIT(&out, la_t2, ft_gpr(rax_index), 31, 0);
+#ifdef QUICKTRANS_LATU
+        FT_LA_MUL_D_EMIT(&out, la_t0, la_t2, la_t1);
+#else
         FT_LA_OR_EMIT(&out, la_t0, la_t2, la_zero);
         FT_LA_MUL_D_EMIT(&out, la_t0, la_t0, la_t1);
+#endif
         FT_LA_SRLI_D_EMIT(&out, ft_gpr(rdx_index), la_t0, 32);
         FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(rax_index), la_t0, 31, 0);
         FT_FLAG2(FT_LA_OPCODE_X86MUL_WU, la_t2, la_t1);
@@ -803,14 +811,6 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             break;
         }
 
-        if (fields->modrm_mod == 0 && fields->modrm_rm == 4 &&
-            !ft_sib_has_index(fields) && (fields->sib & 7) == 5) {
-            if (!ft_emit_li32(&out, ft_gpr(dst), (uint32_t)fields->disp)) {
-                return 0;
-            }
-            break;
-        }
-
         if (fields->modrm_mod == 0 && fields->modrm_rm == 5) {
             target = fields->addr32 ? (uint32_t)fields->disp :
                                       pc + fields->size + fields->disp;
@@ -834,34 +834,32 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             if (index >= GPR_NUM) {
                 return 0;
             }
-            if (scale) {
-                FT_LA_SLLI_D_EMIT(&out, la_t0, ft_gpr(index),
-                                       scale);
-                if (!no_base) {
-                    if (!ft_base_from_modrm_sib_with_index(fields, &base)) {
-                        return 0;
-                    }
-                    FT_LA_ADD_D_EMIT(&out, la_t0, ft_gpr(base), la_t0);
+            if (!no_base) {
+                if (!ft_base_from_modrm_sib_with_index(fields, &base)) {
+                    return 0;
                 }
-            } else {
-                if (no_base) {
-                    FT_LA_OR_EMIT(&out, la_t0, ft_gpr(index), la_zero);
+                if (scale) {
+                    FT_LA_ALSL_D_EMIT(&out, ft_gpr(dst), ft_gpr(index),
+                                     ft_gpr(base), scale - 1);
                 } else {
-                    if (!ft_base_from_modrm_sib_with_index(fields, &base)) {
-                        return 0;
-                    }
-                    FT_LA_ADD_D_EMIT(&out, la_t0, ft_gpr(base),
+                    FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), ft_gpr(base),
                                      ft_gpr(index));
                 }
+            } else if (scale) {
+                FT_LA_SLLI_D_EMIT(&out, ft_gpr(dst), ft_gpr(index), scale);
+            } else {
+                FT_LA_OR_EMIT(&out, ft_gpr(dst), ft_gpr(index), la_zero);
             }
             if (ft_fits_simm12(fields->disp)) {
-                FT_LA_ADDI_D_EMIT(&out, ft_gpr(dst), la_t0,
-                                       fields->disp);
+                if (fields->disp) {
+                    FT_LA_ADDI_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst),
+                                     fields->disp);
+                }
             } else {
                 if (!ft_emit_li32(&out, la_t1, (uint32_t)fields->disp)) {
                     return 0;
                 }
-                FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), la_t0, la_t1);
+                FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), la_t1);
             }
             if (fields->addr32) {
                 FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst),
@@ -896,6 +894,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
     {
         target_ulong target;
         int dst;
+        int result;
         bool is16 = fields->kind == FT_LEA_R16_M;
 
         if (ft_rex_w(fields) || fields->modrm_mod == 3 ||
@@ -907,54 +906,35 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         if (dst >= GPR_NUM) {
             return 0;
         }
-        if (is16) {
-            FT_LA_OR_EMIT(&out, la_t2, ft_gpr(dst), la_zero);
-        }
+        result = is16 ? la_t2 : ft_gpr(dst);
 
         if (fields->modrm_mod == 0 && fields->modrm_rm == 4 &&
             !ft_sib_has_index(fields) && (fields->sib & 7) == 5) {
-            if (!ft_emit_li32(&out, ft_gpr(dst), (uint32_t)fields->disp)) {
+            if (!ft_emit_li32(&out, result, (uint32_t)fields->disp)) {
                 return 0;
             }
             if (is16) {
-                FT_LA_OR_EMIT(&out, la_t0, ft_gpr(dst), la_zero);
-                FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t2, la_zero);
-                FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), la_t0, 15, 0);
+                FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), result, 15, 0);
             }
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
             else {
                 /* li32 sign-extends; LEA32 must clear the high word. */
-                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+                FT_LA_BSTRPICK_D_EMIT(&out, result, result, 31, 0);
             }
 #endif
-            break;
-        }
-
-        if (fields->modrm_mod == 0 && fields->modrm_rm == 4 &&
-            !ft_sib_has_index(fields) && (fields->sib & 7) == 5) {
-            if (!ft_emit_li32(&out, ft_gpr(dst), (uint32_t)fields->disp)) {
-                return 0;
-            }
-            if (is16) {
-                FT_LA_OR_EMIT(&out, la_t0, ft_gpr(dst), la_zero);
-                FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t2, la_zero);
-                FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), la_t0, 15, 0);
-            }
             break;
         }
 
         if (fields->modrm_mod == 0 && fields->modrm_rm == 5) {
             target = fields->addr32 ? (uint32_t)fields->disp :
                                       pc + fields->size + fields->disp;
-            if (!ft_emit_guest_addr(&out, ft_gpr(dst), target)) {
+            if (!ft_emit_guest_addr(&out, result, target)) {
                 return 0;
             }
             if (is16) {
-                FT_LA_OR_EMIT(&out, la_t0, ft_gpr(dst), la_zero);
-                FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t2, la_zero);
-                FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), la_t0, 15, 0);
+                FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), result, 15, 0);
             } else {
-                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+                FT_LA_BSTRPICK_D_EMIT(&out, result, result, 31, 0);
             }
             break;
         }
@@ -970,30 +950,34 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 return 0;
             }
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
-            if (!is16 && !no_base) {
+            if (!no_base) {
                 if (!ft_base_from_modrm_sib_with_index(fields, &base)) {
                     return 0;
                 }
                 /* Consume both address operands before writing an alias. */
                 if (scale) {
-                    FT_LA_ALSL_D_EMIT(&out, ft_gpr(dst), ft_gpr(index),
+                    FT_LA_ALSL_D_EMIT(&out, result, ft_gpr(index),
                                      ft_gpr(base), scale - 1);
                 } else {
-                    FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), ft_gpr(base),
+                    FT_LA_ADD_D_EMIT(&out, result, ft_gpr(base),
                                      ft_gpr(index));
                 }
                 if (ft_fits_simm12(fields->disp)) {
                     if (fields->disp) {
-                        FT_LA_ADDI_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst),
+                        FT_LA_ADDI_D_EMIT(&out, result, result,
                                          fields->disp);
                     }
                 } else {
                     if (!ft_emit_li32(&out, la_t1, (uint32_t)fields->disp)) {
                         return 0;
                     }
-                    FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), la_t1);
+                    FT_LA_ADD_D_EMIT(&out, result, result, la_t1);
                 }
-                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+                if (is16) {
+                    FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), result, 15, 0);
+                } else {
+                    FT_LA_BSTRPICK_D_EMIT(&out, result, result, 31, 0);
+                }
                 break;
             }
 #endif
@@ -1018,13 +1002,13 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 }
             }
             if (ft_fits_simm12(fields->disp)) {
-                FT_LA_ADDI_D_EMIT(&out, ft_gpr(dst), la_t0,
+                FT_LA_ADDI_D_EMIT(&out, result, la_t0,
                                        fields->disp);
             } else {
                 if (!ft_emit_li32(&out, la_t1, (uint32_t)fields->disp)) {
                     return 0;
                 }
-                FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), la_t0, la_t1);
+                FT_LA_ADD_D_EMIT(&out, result, la_t0, la_t1);
             }
         } else {
             int base;
@@ -1033,21 +1017,19 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 return 0;
             }
             if (ft_fits_simm12(fields->disp)) {
-                FT_LA_ADDI_D_EMIT(&out, ft_gpr(dst), ft_gpr(base),
+                FT_LA_ADDI_D_EMIT(&out, result, ft_gpr(base),
                                        fields->disp);
             } else {
                 if (!ft_emit_li32(&out, la_t1, (uint32_t)fields->disp)) {
                     return 0;
                 }
-                FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), ft_gpr(base), la_t1);
+                FT_LA_ADD_D_EMIT(&out, result, ft_gpr(base), la_t1);
             }
         }
         if (is16) {
-            FT_LA_OR_EMIT(&out, la_t0, ft_gpr(dst), la_zero);
-            FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t2, la_zero);
-            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), la_t0, 15, 0);
+            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), result, 15, 0);
         } else {
-            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+            FT_LA_BSTRPICK_D_EMIT(&out, result, result, 31, 0);
         }
         break;
     }
@@ -3551,11 +3533,17 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             }
             ft_emit_raw(&out, FT_LA_OPCODE_VPICKVE2GR_DU | la_t4 | (ft_xmm(src) << 5) |
                      (((uint32_t)fields->imm & 1) << 10));
+#ifdef QUICKTRANS_LATU
+            /* Match LATU's native-width store, including unaligned accesses. */
+            FT_LA_ST_D_EMIT(&out, la_t4, addr,
+                            ft_mem_access_offset(fields, addr));
+#else
             if (!ft_emit_store_addr64_bytes(&out, addr,
                                             ft_mem_access_offset(fields, addr),
                                             la_t4)) {
                 return 0;
             }
+#endif
         }
         break;
     }
@@ -3848,17 +3836,26 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
 
             FT_LA_VMULWEV_W_H_EMIT(&out, even, dst, src);
             FT_LA_VMULWOD_W_H_EMIT(&out, odd, dst, src);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            FT_LA_VSRARNI_H_W_EMIT(&out, odd, even, 15);
+#else
             FT_LA_VSRAI_W_EMIT(&out, even, even, 14);
             FT_LA_VSRAI_W_EMIT(&out, odd, odd, 14);
             FT_LA_VADDI_WU_EMIT(&out, even, even, 1);
             FT_LA_VADDI_WU_EMIT(&out, odd, odd, 1);
             FT_LA_VSRANI_H_W_EMIT(&out, odd, even, 1);
+#endif
             FT_LA_VSHUF4I_W_EMIT(&out, odd, odd,
                                  0xd8);
             FT_LA_VSHUF4I_H_EMIT(&out, dst, odd, 0xd8);
         } else if (fields->id == dt_X86_INS_PMADDUBSW) {
             int base = src == ft_vscratch ? ft_vscratch + 1 : ft_vscratch;
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            FT_LA_VMULWEV_H_BU_B_EMIT(&out, base, dst, src);
+            FT_LA_VMULWOD_H_BU_B_EMIT(&out, base + 1, dst, src);
+            FT_LA_VSADD_H_EMIT(&out, dst, base, base + 1);
+#else
             FT_LA_VXOR_V_EMIT(&out, base, base, base);
             FT_LA_VABSD_B_EMIT(&out, base + 2, src, base);
             FT_LA_VMADDWEV_H_BU_EMIT(&out, base, dst, base + 2);
@@ -3872,6 +3869,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             FT_LA_VMUL_H_EMIT(&out, base, base, base + 4);
             FT_LA_VMUL_H_EMIT(&out, base + 1, base + 1, base + 2);
             FT_LA_VSADD_H_EMIT(&out, dst, base + 1, base);
+#endif
         } else {
             return 0;
         }
@@ -3985,9 +3983,15 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                                  ft_mem_access_offset(fields, addr));
                 src = ft_vscratch;
             }
+#ifdef QUICKTRANS_LATU
+            /* MMX consumes only the low 64 bits of the mask. */
+            int mask_src = src;
+#else
             FT_LA_VREPLVEI_D_EMIT(&out, mask, src, 0);
+            int mask_src = mask;
+#endif
             if (is_word) {
-                FT_LA_VSLEI_DU_EMIT(&out, mask, mask, 15);
+                FT_LA_VSLEI_DU_EMIT(&out, mask, mask_src, 15);
                 ft_emit_raw(&out, FT_LA_OPCODE_VREPLVEI_H | count |
                             (src << 5));
                 ft_emit_raw(&out, ft_gpr3(is_left ? FT_LA_OPCODE_VSLL_H :
@@ -3995,7 +3999,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                                           ft_mmx(mmx_dst), ft_mmx(mmx_dst),
                                           count));
             } else if (is_dword) {
-                FT_LA_VSLEI_DU_EMIT(&out, mask, mask, 31);
+                FT_LA_VSLEI_DU_EMIT(&out, mask, mask_src, 31);
                 ft_emit_raw(&out, FT_LA_OPCODE_VREPLVEI_W | count |
                             (src << 5));
                 ft_emit_raw(&out, ft_gpr3(is_left ? FT_LA_OPCODE_VSLL_W :
@@ -4003,7 +4007,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                                           ft_mmx(mmx_dst), ft_mmx(mmx_dst),
                                           count));
             } else {
-                FT_LA_VSRLI_D_EMIT(&out, mask, mask, 6);
+                FT_LA_VSRLI_D_EMIT(&out, mask, mask_src, 6);
                 FT_LA_VSEQI_D_EMIT(&out, mask, mask, 0);
                 ft_emit_raw(&out, FT_LA_OPCODE_VREPLVEI_D | count |
                             (src << 5));
@@ -4522,11 +4526,17 @@ simd_bin_done:
                 return 0;
             }
             FT_LA_VPICKVE2GR_DU_EMIT(&out, la_t4, ft_xmm(reg), 1);
+#ifdef QUICKTRANS_LATU
+            /* Match LATU's native-width store, including unaligned accesses. */
+            FT_LA_ST_D_EMIT(&out, la_t4, addr,
+                            ft_mem_access_offset(fields, addr));
+#else
             if (!ft_emit_store_addr64_bytes(&out, addr,
                                             ft_mem_access_offset(fields, addr),
                                             la_t4)) {
                 return 0;
             }
+#endif
         } else {
             int src;
 
@@ -4626,7 +4636,9 @@ simd_bin_done:
                      ft_xmm(dst) | (ft_xmm(src) << 5));
         } else {
             int addr;
+#ifndef QUICKTRANS_LATU
             int value = la_t4;
+#endif
             int offset;
 
             if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
@@ -4634,10 +4646,14 @@ simd_bin_done:
             }
             offset = ft_mem_access_offset(fields, addr);
             if (is_double) {
+#ifdef QUICKTRANS_LATU
+                FT_LA_FST_D_EMIT(&out, ft_xmm(src), addr, offset);
+#else
                 FT_LA_VPICKVE2GR_DU_EMIT(&out, value, ft_xmm(src), 0);
                 if (!ft_emit_store_addr64_bytes(&out, addr, offset, value)) {
                     return 0;
                 }
+#endif
             } else {
                 FT_LA_FST_S_EMIT(&out, ft_xmm(src), addr, offset);
             }
@@ -4662,11 +4678,38 @@ simd_bin_done:
             return 0;
         }
         dst = ft_modrm_reg_index(fields);
-        if (dst >= XMM_NUM ||
-            !ft_emit_xmmm_src_bytes(&out, fields, pc,
-                                    is_double ? 8 : 4, &src)) {
+        if (dst >= XMM_NUM) {
             return 0;
         }
+#ifdef QUICKTRANS_LATU
+        /* These scalar operations only consume the low element. Match the
+         * legacy load without zeroing unused scratch lanes or using a GPR. */
+        if (fields->modrm_mod == 3) {
+            int rm = ft_modrm_rm_index(fields);
+            if (rm >= XMM_NUM) {
+                return 0;
+            }
+            src = ft_xmm(rm);
+        } else {
+            int addr;
+            if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                return 0;
+            }
+            if (is_double) {
+                FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
+                                 ft_mem_access_offset(fields, addr));
+            } else {
+                FT_LA_FLD_S_EMIT(&out, ft_vscratch, addr,
+                                 ft_mem_access_offset(fields, addr));
+            }
+            src = ft_vscratch;
+        }
+#else
+        if (!ft_emit_xmmm_src_bytes(&out, fields, pc,
+                                     is_double ? 8 : 4, &src)) {
+            return 0;
+        }
+#endif
         simd_fpe = id != dt_X86_INS_RCPSS &&
                    id != dt_X86_INS_RSQRTSS;
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \

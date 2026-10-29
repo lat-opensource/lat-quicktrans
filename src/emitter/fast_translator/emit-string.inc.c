@@ -332,8 +332,11 @@ static bool ft_emit_string_body(uint32_t **out,
     int src_addr = la_t3;
     int dst_addr = la_t4;
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
-    bool direct_addr = ft_string_wide_access(id) && tb &&
-                       (tb->flags & HF_CS64_MASK) && !fields->addr32;
+    bool direct_addr =
+#ifndef QUICKTRANS_LATU
+                       ft_string_wide_access(id) &&
+#endif
+                       tb && (tb->flags & HF_CS64_MASK) && !fields->addr32;
 
     /* In long mode only FS/GS retain a source segment base.  Keep all
      * other modes and address-size overrides on the existing path. */
@@ -380,7 +383,7 @@ static bool ft_emit_string_body(uint32_t **out,
             return true;
         }
 #endif
-        return ft_emit_store_addr_bytes(out, fields->address, la_t4, 0,
+        return ft_emit_store_addr_bytes(out, fields->address, dst_addr, 0,
                                         la_t0, bytes);
     }
     if (ft_string_is_stos(id)) {
@@ -390,7 +393,7 @@ static bool ft_emit_string_body(uint32_t **out,
             return true;
         }
 #endif
-        return ft_emit_store_addr_bytes(out, fields->address, la_t4, 0,
+        return ft_emit_store_addr_bytes(out, fields->address, dst_addr, 0,
                                         ft_gpr(rax_index), bytes);
     }
     if (ft_string_is_lods(id)) {

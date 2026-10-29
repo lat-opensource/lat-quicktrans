@@ -6,9 +6,23 @@
 
 /* r/m load-store emit helpers. */
 
-static int ft_store_preserve_src(uint32_t **out, int src_reg)
+static int ft_store_preserve_src(uint32_t **out,
+                                  const FastTemplateFields *fields, int src_reg)
 {
-    /* Address generation may overwrite t0/t1 and uses t4 for segment bases. */
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    int base;
+
+    /* A native-width base+small-displacement address emits no instructions.
+     * Its GPR base cannot alias the temporary value register. */
+    if (!fields->addr32 && fields->segment < 0 &&
+        ft_fits_simm12(fields->disp) &&
+        ft_base_from_modrm_sib(fields, &base)) {
+        return src_reg;
+    }
+#else
+    (void)fields;
+#endif
+    /* Other address forms may overwrite the temporary value. */
     if (src_reg == la_t0 || src_reg == la_t1 || src_reg == la_t4) {
         FT_LA_OR_EMIT(out, la_t3, src_reg, la_zero);
         return la_t3;
@@ -250,7 +264,7 @@ static bool ft_emit_store_rm64(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    value_reg = ft_store_preserve_src(out, src_reg);
+    value_reg = ft_store_preserve_src(out, fields, src_reg);
     if (!ft_emit_mem_addr(out, fields, &dst_or_addr)) {
         return false;
     }
@@ -274,6 +288,9 @@ static bool ft_emit_store_rm32(uint32_t **out, const FastTemplateFields *fields,
         if (dst_or_addr >= GPR_NUM) {
             return false;
         }
+#ifdef QUICKTRANS_LATU
+        if (ft_gpr(dst_or_addr) != src_reg)
+#endif
         FT_LA_OR_EMIT(out, ft_gpr(dst_or_addr), src_reg, la_zero);
         if (zero_extend_reg) {
             FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(dst_or_addr),
@@ -308,7 +325,7 @@ static bool ft_emit_store_rm32(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    value_reg = ft_store_preserve_src(out, src_reg);
+    value_reg = ft_store_preserve_src(out, fields, src_reg);
     if (!ft_emit_mem_addr(out, fields, &dst_or_addr)) {
         return false;
     }
@@ -356,7 +373,7 @@ static bool ft_emit_store_rm16(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    value_reg = ft_store_preserve_src(out, src_reg);
+    value_reg = ft_store_preserve_src(out, fields, src_reg);
     if (!ft_emit_mem_addr(out, fields, &dst_or_addr)) {
         return false;
     }
@@ -401,7 +418,7 @@ static bool ft_emit_store_rm8(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 
-    value_reg = ft_store_preserve_src(out, src_reg);
+    value_reg = ft_store_preserve_src(out, fields, src_reg);
     if (!ft_emit_mem_addr(out, fields, &dst_or_addr)) {
         return false;
     }

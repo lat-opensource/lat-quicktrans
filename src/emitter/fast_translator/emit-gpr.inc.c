@@ -1652,8 +1652,12 @@ static int ft_emit_neg_template(const FastTemplateFields *fields, TranslationBlo
             !ft_emit_load_rm16(&out, fields, pc, &src)) {
             return 0;
         }
+#ifdef QUICKTRANS_LATU
+        FT_FLAG2(FT_LA_OPCODE_X86SUB_H, la_zero, src);
+#else
         FT_LA_OR_EMIT(&out, la_t1, la_zero, la_zero);
         FT_FLAG2(FT_LA_OPCODE_X86SUB_H, la_t1, src);
+#endif
         FT_LA_SUB_W_EMIT(&out, la_t2, la_zero, src);
         if (!ft_emit_store_rm16(&out, fields, pc, la_t2)) {
             return 0;
@@ -1664,8 +1668,12 @@ static int ft_emit_neg_template(const FastTemplateFields *fields, TranslationBlo
             !ft_emit_load_rm8(&out, fields, pc, &src)) {
             return 0;
         }
+#ifdef QUICKTRANS_LATU
+        FT_FLAG2(FT_LA_OPCODE_X86SUB_B, la_zero, src);
+#else
         FT_LA_OR_EMIT(&out, la_t1, la_zero, la_zero);
         FT_FLAG2(FT_LA_OPCODE_X86SUB_B, la_t1, src);
+#endif
         FT_LA_SUB_W_EMIT(&out, la_t2, la_zero, src);
         if (!ft_emit_store_rm8(&out, fields, pc, la_t2)) {
             return 0;
@@ -1767,6 +1775,9 @@ static int ft_emit_inc_dec_template(const FastTemplateFields *fields, Translatio
             }
             break;
         }
+#endif
+#ifdef QUICKTRANS_LATU
+        if (!fields->skip_flags)
 #endif
         ft_emit_raw(&out,
                     ft_gpr2(is_inc ? (is_64 ? FT_LA_OPCODE_X86INC_D :

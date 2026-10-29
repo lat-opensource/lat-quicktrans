@@ -12,8 +12,9 @@ header=header.replace('segment,addr32,size,disp;','segment,addr32,size,disp,skip
 header=header.replace('static uint32_t ft_gpr3_imm12(int op,int d,int s,int i){return 0;}','static uint32_t ft_gpr3_imm12(int op,int d,int s,int i){r[d]=op==FT_LA_OPCODE_ADDI_W?(uint64_t)(int64_t)(int32_t)(r[s]+i):r[s]+i;return 0;}')
 header=header.replace('FT_LA_OPCODE_LU12I_W=1,','FT_LA_OPCODE_ADDI_W=1000,FT_LA_OPCODE_ADDI_D,FT_LA_OPCODE_LU12I_W=1,')
 header+=r'''
-enum {FT_LEA_R32_M=200,FT_LEA_R16_M,FT_LA_OPCODE_X86INC_B=8,FT_LA_OPCODE_X86INC_H=16,FT_LA_OPCODE_X86INC_W=32,FT_LA_OPCODE_X86INC_D=64,FT_LA_OPCODE_X86DEC_B=108,FT_LA_OPCODE_X86DEC_H=116,FT_LA_OPCODE_X86DEC_W=132,FT_LA_OPCODE_X86DEC_D=164};
+enum {FT_LEA_R32_M=200,FT_LEA_R16_M,FT_LEA_R64_M,FT_LA_OPCODE_X86INC_B=8,FT_LA_OPCODE_X86INC_H=16,FT_LA_OPCODE_X86INC_W=32,FT_LA_OPCODE_X86INC_D=64,FT_LA_OPCODE_X86DEC_B=108,FT_LA_OPCODE_X86DEC_H=116,FT_LA_OPCODE_X86DEC_W=132,FT_LA_OPCODE_X86DEC_D=164};
 static uint64_t flags;
+#define ft_omit_gpr_zext32(f) false
 static uint64_t incflags(uint64_t v,int w,bool inc){uint64_t m=w==64?UINT64_MAX:(1ULL<<w)-1,a=v&m,z=(a+(inc?1:-1))&m;return (flags&1)|((!__builtin_parity((unsigned char)z))<<2)|((!!((a^z)&16))<<4)|((z==0)<<6)|(((z>>(w-1))&1)<<7)|((a==(inc?(1ULL<<(w-1))-1:1ULL<<(w-1)))<<11);}
 static uint32_t ft_gpr2(int op,int s,int z){bool inc=op<100;int w=inc?op:op-100;assert(z==la_zero);flags=incflags(r[s],w,inc);return 0;}
 #define FT_LA_ADDI_W_EMIT(o,d,s,i) do{r[d]=(uint64_t)(int64_t)(int32_t)(r[s]+(i));T(o);}while(0)
@@ -32,15 +33,15 @@ static bool ft_emit_li32(uint32_t**o,int d,uint32_t v){r[d]=(uint64_t)(int64_t)(
 '''
 start=g.index('        if (!(is_64 ? ft_emit_load_rm64',g.index('static int ft_emit_inc_dec_template('));end=g.index('    case FT_INC_RM8:',start);wide=g[start:end]
 start=g.index('        if (!ft_emit_load_rm8',end);end=g.index('    default:',start);small=g[start:end]
-lea=t[t.index('    case FT_LEA_R32_M:'):t.index('    case FT_',t.index('    case FT_LEA_R16_M:')+len('    case FT_LEA_R16_M:'))]
+lea=t[t.index('    case FT_LEA_R64_M:'):t.index('    case FT_',t.index('    case FT_LEA_R16_M:')+len('    case FT_LEA_R16_M:'))]
 main=r'''
 int main(void){unsigned count=0;uint64_t edges[]={0,1,15,16,0x7f,0x80,0xff,0x7fff,0x8000,0xffff,0x7fffffff,0x80000000,0xffffffff,0x7fffffffffffffffULL,0x8000000000000000ULL,UINT64_MAX,0xdeadbeef12345678ULL};
 for(int w=8;w<=64;w*=2)for(int inc=0;inc<2;inc++)for(int dst=0;dst<16;dst++)for(int j=0;j<17;j++)for(int dead=0;dead<2;dead++)for(int memory=0;memory<2;memory++)for(int cf=0;cf<2;cf++){
  uint64_t v=edges[j],mask=w==64?UINT64_MAX:(1ULL<<w)-1;for(int k=0;k<32;k++)r[k]=0xabbacddc87654321ULL;r[31]=0;r[dst]=v;mem=v;loads=stores=0;flags=0x8d4|cf;uint64_t expectedflags=incflags(v,w,inc);FastTemplateFields f={.modrm_mod=memory?0:3,.modrm_rm=dst,.skip_flags=dead};uint32_t code[128];int n=emit_inc(&f,inc,w,code);uint64_t z=(v+(inc?1:-1))&mask;assert((memory?mem:r[dst])==(memory||w<32?(v&~mask)|z:z));assert(flags==((INC_CHANGED&&EXPECT_LOCAL&&!memory&&w>=32&&dead)?(0x8d4|cf):expectedflags));assert((flags&1)==cf);if(OPTIMIZED&&!memory&&w>=32)assert(n==(w==32?2:1)+(EXPECT_LOCAL?!dead:2));if(memory)assert(loads==1&&stores==1&&r[dst]==v);count++;
 }
 int disps[]={0,7,-7,2047,-2048,2048,-2049,2147483647,(-2147483647-1)};
-for(int w=16;w<=32;w*=2)for(int d=0;d<16;d++)for(int b=0;b<16;b++)for(int idx=0;idx<16;idx++)for(int sc=0;sc<4;sc++)for(int j=0;j<9;j++)for(int nb=0;nb<2;nb++){
- for(int k=0;k<32;k++)r[k]=0xabbacddc87654321ULL+k*0x1234567;r[31]=0;uint64_t old=r[d],z=(nb?0:r[b])+(r[idx]<<sc)+(int64_t)disps[j];z=w==16?(old&~65535ULL)|(z&65535):(uint32_t)z;flags=0x8d5;FastTemplateFields f={.kind=w==16?FT_LEA_R16_M:FT_LEA_R32_M,.prefix2=w==16?0x66:0,.modrm_mod=nb?0:2,.modrm_rm=4,.modrm_reg=d,.sib=nb?5:0,.index=idx,.base=b,.has_index=1,.scale=sc,.disp=disps[j],.addr32=j%2};uint32_t code[128];int n=emit_lea(&f,code);assert(n>0&&r[d]==z&&flags==0x8d5);if(OPTIMIZED&&EXPECT_LOCAL&&w==32&&!nb){int want=2+(disps[j]!=0)+(ft_fits_simm12(disps[j])?0:1);assert(n==want);}count++;
+for(int w=16;w<=64;w*=2)for(int d=0;d<16;d++)for(int b=0;b<16;b++)for(int idx=0;idx<16;idx++)for(int sc=0;sc<4;sc++)for(int j=0;j<9;j++)for(int nb=0;nb<2;nb++){
+ for(int k=0;k<32;k++)r[k]=0xabbacddc87654321ULL+k*0x1234567;r[31]=0;uint64_t old=r[d],z=(nb?0:r[b])+(r[idx]<<sc)+(int64_t)disps[j];z=w==16?(old&~65535ULL)|(z&65535):w==32||j%2?(uint32_t)z:z;flags=0x8d5;FastTemplateFields f={.kind=w==16?FT_LEA_R16_M:w==32?FT_LEA_R32_M:FT_LEA_R64_M,.rex=w==64?8:0,.prefix2=w==16?0x66:0,.modrm_mod=nb?0:2,.modrm_rm=4,.modrm_reg=d,.sib=nb?5:0,.index=idx,.base=b,.has_index=1,.scale=sc,.disp=disps[j],.addr32=j%2};uint32_t code[128];int n=emit_lea(&f,code);assert(n>0&&r[d]==z&&flags==0x8d5);if(OPTIMIZED&&EXPECT_LOCAL&&w==32&&!nb){int want=2+(disps[j]!=0)+(ft_fits_simm12(disps[j])?0:1);assert(n==want);}count++;
 }
 for(int w=16;w<=32;w*=2)for(int j=0;j<9;j++){
  uint64_t old=0xdeadbeef12345678ULL;for(int k=0;k<32;k++)r[k]=old;r[31]=0;flags=0x8d5;FastTemplateFields f={.kind=w==16?FT_LEA_R16_M:FT_LEA_R32_M,.prefix2=w==16?0x66:0,.modrm_mod=0,.modrm_rm=4,.modrm_reg=0,.sib=5,.has_index=0,.disp=disps[j]};uint32_t code[128];int n=emit_lea(&f,code);uint64_t z=w==16?(old&~65535ULL)|((uint16_t)disps[j]):EXPECT_LOCAL?(uint32_t)disps[j]:(uint64_t)(int64_t)(int32_t)disps[j];assert(n>0&&r[0]==z&&flags==0x8d5);count++;

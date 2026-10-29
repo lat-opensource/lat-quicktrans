@@ -573,6 +573,7 @@ static int ft_emit_pext_template(const FastTemplateFields *fields,
     int dst = fields->reg;
     int src = fields->imm;
     int mask;
+    int value = la_t1;
 
     (void)tb;
 
@@ -592,12 +593,23 @@ static int ft_emit_pext_template(const FastTemplateFields *fields,
     }
 
     /* Keep both inputs before writing dst, because PEXT operands may alias. */
+#ifdef QUICKTRANS_LATU
+    /* dst is written only after the loop; the source need not be copied.
+     * Word shifts consume only its low 32 bits. */
+    value = ft_gpr(src);
+    if (width == 32) {
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t0, mask, 31, 0);
+    } else {
+        FT_LA_OR_EMIT(&out, la_t0, mask, la_zero);
+    }
+#else
     FT_LA_OR_EMIT(&out, la_t0, mask, la_zero);
     FT_LA_OR_EMIT(&out, la_t1, ft_gpr(src), la_zero);
     if (width == 32) {
         FT_LA_BSTRPICK_D_EMIT(&out, la_t0, la_t0, 31, 0);
         FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t1, 31, 0);
     }
+#endif
     FT_LA_OR_EMIT(&out, la_t2, la_zero, la_zero);
     FT_LA_OR_EMIT(&out, la_t3, la_zero, la_zero);
     ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ, la_t0,
@@ -606,7 +618,7 @@ static int ft_emit_pext_template(const FastTemplateFields *fields,
     ft_bind_branch_label(&loop, out);
     if (width == 64) {
         FT_LA_CTZ_D_EMIT(&out, la_t4, la_t0);
-        FT_LA_SRL_D_EMIT(&out, la_t4, la_t1, la_t4);
+        FT_LA_SRL_D_EMIT(&out, la_t4, value, la_t4);
         FT_LA_ANDI_EMIT(&out, la_t4, la_t4, 1);
         FT_LA_SLL_D_EMIT(&out, la_t4, la_t4, la_t3);
         FT_LA_OR_EMIT(&out, la_t2, la_t2, la_t4);
@@ -614,7 +626,7 @@ static int ft_emit_pext_template(const FastTemplateFields *fields,
         FT_LA_ADDI_D_EMIT(&out, la_t4, la_t0, -1);
     } else {
         FT_LA_CTZ_W_EMIT(&out, la_t4, la_t0);
-        FT_LA_SRL_W_EMIT(&out, la_t4, la_t1, la_t4);
+        FT_LA_SRL_W_EMIT(&out, la_t4, value, la_t4);
         FT_LA_ANDI_EMIT(&out, la_t4, la_t4, 1);
         FT_LA_SLL_W_EMIT(&out, la_t4, la_t4, la_t3);
         FT_LA_OR_EMIT(&out, la_t2, la_t2, la_t4);
@@ -671,12 +683,22 @@ static int ft_emit_pdep_template(const FastTemplateFields *fields,
     }
 
     /* Preserve inputs before writing dst because PDEP operands may alias. */
+#ifdef QUICKTRANS_LATU
+    if (width == 32) {
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t0, mask, 31, 0);
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t1, ft_gpr(src), 31, 0);
+    } else {
+        FT_LA_OR_EMIT(&out, la_t0, mask, la_zero);
+        FT_LA_OR_EMIT(&out, la_t1, ft_gpr(src), la_zero);
+    }
+#else
     FT_LA_OR_EMIT(&out, la_t0, mask, la_zero);
     FT_LA_OR_EMIT(&out, la_t1, ft_gpr(src), la_zero);
     if (width == 32) {
         FT_LA_BSTRPICK_D_EMIT(&out, la_t0, la_t0, 31, 0);
         FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t1, 31, 0);
     }
+#endif
     FT_LA_OR_EMIT(&out, la_t2, la_zero, la_zero);
     ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ, la_t0,
                                la_zero, &done);
@@ -719,6 +741,9 @@ static int ft_emit_pdep_template(const FastTemplateFields *fields,
 static void ft_emit_btx_cf(uint32_t **out, const FastTemplateFields *fields,
                            int value, int bit, int width)
 {
+    if (fields->skip_flags) {
+        return;
+    }
     if (width == 64) {
         FT_LA_SRL_D_EMIT(out, la_t1, value, bit);
     } else {
@@ -952,26 +977,24 @@ static int ft_emit_btx_reg_template(const FastTemplateFields *fields, Translatio
             return 0;
         }
         mem_offset = ft_mem_access_offset(fields, addr);
-        if (width == 64) {
-            FT_LA_OR_EMIT(&out, la_t4, ft_gpr(bit_idx), la_zero);
-        } else {
+        if (width != 64) {
             int shift = 64 - width;
 
             FT_LA_SLLI_D_EMIT(&out, la_t4, ft_gpr(bit_idx), shift);
             FT_LA_SRAI_D_EMIT(&out, la_t4, la_t4, shift);
         }
-        FT_LA_OR_EMIT(&out, la_t1, addr, la_zero);
-        addr = la_t1;
-        FT_LA_SRAI_D_EMIT(&out, la_t2, la_t4, log2_width);
-        FT_LA_ALSL_D_EMIT(&out, addr, la_t2, addr, log2_bytes - 1);
-        FT_LA_ANDI_EMIT(&out, la_t0, la_t4, width - 1);
+        /* Keep the final address in t4 across CF and mask generation. */
+        FT_LA_SRAI_D_EMIT(&out, la_t4,
+                          width == 64 ? ft_gpr(bit_idx) : la_t4,
+                          log2_width);
+        FT_LA_ALSL_D_EMIT(&out, la_t4, la_t4, addr, log2_bytes - 1);
+        addr = la_t4;
+        FT_LA_ANDI_EMIT(&out, la_t0, ft_gpr(bit_idx), width - 1);
         ft_emit_raw(&out,
                     ft_gpr3_imm12(width == 64 ? FT_LA_OPCODE_LD_D :
                                   width == 16 ? FT_LA_OPCODE_LD_HU :
                                                 FT_LA_OPCODE_LD_WU,
                                   la_t3, addr, mem_offset));
-        FT_LA_OR_EMIT(&out, la_t4, addr, la_zero);
-        addr = la_t4;
         val_reg = la_t3;
     }
 
@@ -985,8 +1008,7 @@ static int ft_emit_btx_reg_template(const FastTemplateFields *fields, Translatio
                                           FT_LA_OPCODE_SLL_W,
                             la_t2, la_t1, la_t0));
         if (ext == 6) {
-            FT_LA_NOR_EMIT(&out, la_t2, la_t2, la_zero);
-            FT_LA_AND_EMIT(&out, modify_reg, modify_reg, la_t2);
+            FT_LA_ANDN_EMIT(&out, modify_reg, modify_reg, la_t2);
         } else if (ext == 5) {
             FT_LA_OR_EMIT(&out, modify_reg, modify_reg, la_t2);
         } else if (ext == 7) {

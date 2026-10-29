@@ -11,7 +11,7 @@ def section(a, b=None):
 body = section('static int ft_emit_mulx_template', 'static void ft_bls_set_cf_from_nonzero')
 body += section('static void ft_emit_btx_cf', 'static bool ft_emit_locked_btx')
 body += section('static int ft_emit_btx_reg_template')
-ops = ['OR','BSTRPICK_D','MUL_D','MULH_DU','MUL_W','MULH_WU','SRL_D','SRL_W','ANDI','X86MTFLAG','SLLI_D','SRAI_D','ALSL_D','ORI','NOR','AND','XOR']
+ops = ['OR','BSTRPICK_D','MUL_D','MULH_DU','MUL_W','MULH_WU','SRL_D','SRL_W','ANDI','X86MTFLAG','SLLI_D','SRAI_D','ALSL_D','ORI','NOR','AND','XOR','ANDN']
 head = r'''
 #include <stdint.h>
 #include <stdbool.h>
@@ -67,6 +67,7 @@ case 14:r[x.d]=a|x.t;break;
 case 15:r[x.d]=~(a|b);break;
 case 16:r[x.d]=a&b;break;
 case 17:r[x.d]=a^b;break;
+case 18:r[x.d]=a&~b;break;
 case FT_LA_OPCODE_LD_D:case FT_LA_OPCODE_LD_HU:case FT_LA_OPCODE_LD_WU:access=a+x.k;r[x.d]=x.op==50?mem:x.op==51?(uint16_t)mem:(uint32_t)mem;break;
 case FT_LA_OPCODE_ST_D:case FT_LA_OPCODE_ST_H:case FT_LA_OPCODE_ST_W:assert(a+x.k==access);stored=x.op==53?r[x.d]:x.op==54?(uint16_t)r[x.d]:(uint32_t)r[x.d];stores++;break;
 case FT_LA_OPCODE_SLL_D:r[x.d]=a<<(b&63);break;
@@ -90,7 +91,15 @@ FastTemplateFields f={.reg=8,.id=dt_X86_INS_BT+op,.prefix2=w==16?dt_X86_PREFIX_O
 uint64_t value=w==64?mem:w==32?(uint32_t)mem:(uint16_t)mem;int bit=(uint64_t)indexes[j]&(w-1);uint64_t mask=1ULL<<bit;uint64_t want=op==0?value:op==1?value|mask:op==2?value&~mask:value^mask;
 n=0;int count=ft_emit_btx_reg_template(&f,0,0,code);int fused=0;for(int k=0;k<count;k++)if(ins[k].op==13)fused++;assert(fused==1);run(code,count);int64_t word=indexes[j]>=0?indexes[j]/w:-((-indexes[j]+w-1)/w);assert(access==0x100000+13+word*(w/8));assert(stores==(op!=0));if(op)assert(stored==want);assert(flags==(dead?0x8d5:(0x8d4|((value>>bit)&1))));btcases++;
 }
-printf("MULX %u cases; BT/BTS/BTR/BTC memory %u cases PASS (modeled memory interface)\n",mulcases,btcases);
+
+for(int w=16;w<=64;w*=2)for(int op=0;op<4;op++)for(int dead=0;dead<2;dead++)for(int dst=0;dst<16;dst++)for(int idx=0;idx<16;idx++)for(int j=0;j<8;j++){
+for(int k=0;k<32;k++)r[k]=rnd();r[31]=0;if(j==0)r[dst]=0;if(j==1)r[dst]=UINT64_MAX;
+uint64_t value=r[dst],index=r[idx],initial[32];memcpy(initial,r,sizeof r);int bit=index&(w-1);uint64_t mask=1ULL<<bit;
+uint64_t want=op==0?value:op==1?value|mask:op==2?value&~mask:value^mask;if(w==32&&op)want=(uint32_t)want;
+FastTemplateFields f={.reg=idx,.src=dst,.modrm_mod=3,.id=dt_X86_INS_BT+op,.prefix2=w==16?dt_X86_PREFIX_OPSIZE:0,.rex=w==64,.skip_flags=dead};
+flags=0x8d5;n=0;int count=ft_emit_btx_reg_template(&f,0,0,code);assert(count>0);run(code,count);assert(r[dst]==want);for(int k=0;k<16;k++)if(k!=dst)assert(r[k]==initial[k]);assert(flags==(dead?0x8d5:(0x8d4|((value>>bit)&1))));btcases++;
+}
+printf("MULX %u cases; BT/BTS/BTR/BTC register+memory %u cases PASS (modeled memory interface)\n",mulcases,btcases);
 }
 '''
 with tempfile.TemporaryDirectory() as d:

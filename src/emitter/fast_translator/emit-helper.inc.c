@@ -2099,18 +2099,50 @@ static void ft_emit_load_xmm_env(uint32_t **out, int xmm)
     FT_LA_VLD_EMIT(out, ft_xmm(xmm), offset_reg, 0);
 }
 
+/* Consecutive env slots share one address when their offsets exceed imm12.
+ * Keep every vector access and its order; only address construction is shared.
+ * Use the same scratch as the single-slot fallback, preserving helper results.
+ */
+static void ft_emit_xmms_env(uint32_t **out, bool restore)
+{
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    int base_offset = 0;
+    int base_reg = la_s8;
+    int scratch = ft_scratch_avoid3(ft_scratch_avoid3(-1, -1, -1), -1, -1);
+
+    for (int i = 0; i < XMM_NUM; i++) {
+        int offset = lsenv_offset_of_xmm(lsenv, i);
+        if (!ft_offset_fits_imm12(offset - base_offset)) {
+            ft_emit_li64(out, scratch, (uint64_t)(int64_t)offset);
+            FT_LA_ADD_D_EMIT(out, scratch, la_s8, scratch);
+            base_reg = scratch;
+            base_offset = offset;
+        }
+        if (restore) {
+            FT_LA_VLD_EMIT(out, ft_xmm(i), base_reg, offset - base_offset);
+        } else {
+            FT_LA_VST_EMIT(out, ft_xmm(i), base_reg, offset - base_offset);
+        }
+    }
+#else
+    for (int i = 0; i < XMM_NUM; i++) {
+        if (restore) {
+            ft_emit_load_xmm_env(out, i);
+        } else {
+            ft_emit_store_xmm_env(out, i);
+        }
+    }
+#endif
+}
+
 static void ft_emit_save_xmms_to_env(uint32_t **out)
 {
-    for (int i = 0; i < XMM_NUM; i++) {
-        ft_emit_store_xmm_env(out, i);
-    }
+    ft_emit_xmms_env(out, false);
 }
 
 static void ft_emit_load_xmms_from_env(uint32_t **out)
 {
-    for (int i = 0; i < XMM_NUM; i++) {
-        ft_emit_load_xmm_env(out, i);
-    }
+    ft_emit_xmms_env(out, true);
 }
 
 static void ft_emit_helper_prologue(uint32_t **out)
