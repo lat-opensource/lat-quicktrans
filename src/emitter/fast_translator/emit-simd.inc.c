@@ -2407,6 +2407,12 @@ static int ft_emit_movq2dq_template(const FastTemplateFields *fields, Translatio
         dst >= XMM_NUM || src >= 8) {
         return 0;
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+    if (option_enable_lasx) {
+        FT_LA_XVPICKVE_D_EMIT(&out, ft_xmm(dst), ft_mmx(src), 0);
+        return out - code;
+    }
+#endif
     FT_LA_VANDI_B_EMIT(&out, ft_xmm(dst), ft_xmm(dst), 0);
     FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_mmx(src), 0);
     return (out - code);
@@ -2484,6 +2490,13 @@ static int ft_emit_phminposuw_template(const FastTemplateFields *fields, Transla
     int temp1 = ft_vscratch + 2;
     int temp2 = ft_vscratch + 3;
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+    /* No guest YMM state in this configuration; startup gates host LASX. */
+    bool lasx = option_enable_lasx;
+#else
+    bool lasx = false;
+#endif
+
     (void)tb;
     (void)pc;
 
@@ -2501,15 +2514,27 @@ static int ft_emit_phminposuw_template(const FastTemplateFields *fields, Transla
     FT_LA_VMIN_HU_EMIT(&out, temp, temp, src);
     FT_LA_VSRLI_D_EMIT(&out, temp, temp, 0x10);
     FT_LA_VMIN_HU_EMIT(&out, temp, temp, src);
-    FT_LA_VANDI_B_EMIT(&out, temp2, temp2, 0);
-    FT_LA_VEXTRINS_D_EMIT(&out, temp2, temp, 1);
+    if (lasx) {
+        FT_LA_XVPICKVE_D_EMIT(&out, temp2, temp, 1);
+    } else {
+        FT_LA_VANDI_B_EMIT(&out, temp2, temp2, 0);
+        FT_LA_VEXTRINS_D_EMIT(&out, temp2, temp, 1);
+    }
     FT_LA_VMIN_HU_EMIT(&out, temp, temp, temp2);
-    FT_LA_VREPLVEI_H_EMIT(&out, temp, temp, 0);
+    if (lasx) {
+        FT_LA_XVREPLVE0_H_EMIT(&out, temp, temp);
+    } else {
+        FT_LA_VREPLVEI_H_EMIT(&out, temp, temp, 0);
+    }
     FT_LA_VSEQ_H_EMIT(&out, temp1, src, temp);
     FT_LA_VFRSTPI_H_EMIT(&out, temp2, temp1, 0);
     FT_LA_VPACKEV_H_EMIT(&out, ft_xmm(dst), temp2, temp);
-    FT_LA_VINSGR2VR_D_EMIT(&out, ft_xmm(dst), la_zero, 1);
-    FT_LA_VINSGR2VR_W_EMIT(&out, ft_xmm(dst), la_zero, 1);
+    if (lasx) {
+        FT_LA_XVPICKVE_W_EMIT(&out, ft_xmm(dst), ft_xmm(dst), 0);
+    } else {
+        FT_LA_VINSGR2VR_D_EMIT(&out, ft_xmm(dst), la_zero, 1);
+        FT_LA_VINSGR2VR_W_EMIT(&out, ft_xmm(dst), la_zero, 1);
+    }
     return (out - code);
 }
 
@@ -3797,6 +3822,44 @@ static void ft_emit_helper_mem_src_restore(uint32_t **out, int scratch_xmm)
     ft_emit_host_stack_end(out);
 }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Keep the memory operand independent of guest XMM state.  Load before
+ * changing the host stack so a guest read fault sees the original context. */
+static bool ft_emit_latu_crypto_mem_helper(uint32_t **out,
+                                            const FastTemplateFields *fields,
+                                            target_ulong pc, int dst,
+                                            void *func, bool sha, bool has_imm)
+{
+    int addr;
+
+    if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+        return false;
+    }
+    FT_LA_VLD_EMIT(out, ft_vscratch, addr,
+                   ft_mem_access_offset(fields, addr));
+    FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, -16);
+    FT_LA_VST_EMIT(out, ft_vscratch, la_sp, 0);
+    ft_emit_helper_prologue(out);
+    ft_emit_cpu_env_ptr(out, la_a0);
+    ft_emit_xmm_env_addr(out, la_a1, dst);
+    if (sha) {
+        ft_emit_xmm_env_addr(out, la_a2, dst);
+        FT_LA_OR_EMIT(out, la_a3, la_sp, la_zero);
+    } else {
+        FT_LA_OR_EMIT(out, la_a2, la_sp, la_zero);
+        if (has_imm) {
+            ft_emit_li64(out, la_a3, (uint64_t)(uint32_t)fields->imm);
+        }
+    }
+    ft_emit_host_call_via(out, func, sha ? 0xf : 0x7,
+                          sha && fields->id == dt_X86_INS_SHA256RNDS2 ?
+                          la_t4 : la_t0);
+    ft_emit_crypto_helper_epilogue(out, false);
+    FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
+    return true;
+}
+#endif
+
 static bool ft_aes_round_helper(unsigned int id, void **func)
 {
     switch (id) {
@@ -3838,6 +3901,10 @@ static bool ft_emit_aes_helper_src(uint32_t **out,
         return true;
     }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return ft_emit_latu_crypto_mem_helper(out, fields, pc, dst, func,
+                                          false, has_imm);
+#else
     int scratch;
 
     if (!ft_emit_helper_mem_src_to_scratch(out, fields, pc, dst, false,
@@ -3853,6 +3920,7 @@ static bool ft_emit_aes_helper_src(uint32_t **out,
     }
     ft_emit_helper_mem_src_restore(out, scratch);
     return true;
+#endif
 }
 
 static bool ft_sha_helper(unsigned int id, int imm, void **func)
@@ -3914,6 +3982,10 @@ static bool ft_emit_sha_helper_src(uint32_t **out,
         return true;
     }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return ft_emit_latu_crypto_mem_helper(out, fields, pc, dst, func,
+                                          true, false);
+#else
     int scratch;
 
     if (!ft_emit_helper_mem_src_to_scratch(out, fields, pc, dst,
@@ -3923,6 +3995,7 @@ static bool ft_emit_sha_helper_src(uint32_t **out,
     ft_emit_call_sha_reg_helper(out, func, dst, scratch, sha256rnds2);
     ft_emit_helper_mem_src_restore(out, scratch);
     return true;
+#endif
 }
 
 static int ft_emit_sha_template(const FastTemplateFields *fields,

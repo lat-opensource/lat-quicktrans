@@ -3295,6 +3295,12 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             if (dst == src) {
                 FT_LA_VINSGR2VR_D_EMIT(&out, ft_xmm(dst), la_zero, 1);
             } else {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+                if (option_enable_lasx) {
+                    FT_LA_XVPICKVE_D_EMIT(&out, ft_xmm(dst), ft_xmm(src), 0);
+                    break;
+                }
+#endif
                 FT_LA_VANDI_B_EMIT(&out, ft_xmm(dst), ft_xmm(dst), 0);
                 FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_xmm(src), 0);
             }
@@ -3304,6 +3310,12 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             }
             FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
                              ft_mem_access_offset(fields, addr));
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+            if (option_enable_lasx) {
+                FT_LA_XVPICKVE_D_EMIT(&out, ft_xmm(dst), ft_vscratch, 0);
+                break;
+            }
+#endif
             FT_LA_VXOR_V_EMIT(&out, ft_xmm(dst), ft_xmm(dst), ft_xmm(dst));
             FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_vscratch, 0);
         }
@@ -3353,6 +3365,12 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             if (dst == src) {
                 FT_LA_VINSGR2VR_D_EMIT(&out, ft_xmm(dst), la_zero, 1);
             } else {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+                if (option_enable_lasx) {
+                    FT_LA_XVPICKVE_D_EMIT(&out, ft_xmm(dst), ft_xmm(src), 0);
+                    break;
+                }
+#endif
                 FT_LA_VANDI_B_EMIT(&out, ft_xmm(dst), ft_xmm(dst), 0);
                 FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_xmm(src), 0);
             }

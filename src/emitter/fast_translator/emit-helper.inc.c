@@ -2104,15 +2104,35 @@ static void ft_emit_helper_prologue(uint32_t **out)
     ft_emit_save_condition_flags(out);
 }
 
-static void ft_emit_helper_epilogue(uint32_t **out)
+static void ft_emit_helper_epilogue_gprs(uint32_t **out, int first_gpr)
 {
     ft_emit_restore_condition_flags(out);
     ft_emit_load_xmms_from_env(out);
     ft_emit_load_fprs_from_env(out);
-    for (int i = 0; i < GPR_NUM; i++) {
+    for (int i = first_gpr; i < GPR_NUM; i++) {
         ft_emit_load_env(out, ft_gpr(i), lsenv_offset_of_gpr(lsenv, i),
                          FT_LA_OPCODE_LD_D);
     }
+}
+
+static void ft_emit_helper_epilogue(uint32_t **out)
+{
+    ft_emit_helper_epilogue_gprs(out, 0);
+}
+
+/* x87 helpers do not change guest GPRs. Keep the pre-call fault snapshot,
+ * but retain ABI-preserved mappings on a normal mode-2 LATU return. */
+static void ft_emit_x87_helper_epilogue(uint32_t **out)
+{
+    int first_gpr = 0;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (option_soft_fpu == 2) {
+        while (first_gpr < 8 && ft_gpr(first_gpr) == la_s0 + first_gpr) {
+            ++first_gpr;
+        }
+    }
+#endif
+    ft_emit_helper_epilogue_gprs(out, first_gpr);
 }
 
 #ifndef QUICKTRANS_LATU
@@ -2273,6 +2293,24 @@ static void ft_emit_default_helper_epilogue(uint32_t **out,
     ft_emit_helper_epilogue(out);
 }
 
+/* AES/SHA helpers only update the destination vector.  Guest GPRs in
+ * ABI-preserved host registers need no normal-return reload.  Keep the
+ * complete pre-call snapshot for faults and all vector/FPR/flags handling. */
+static void ft_emit_crypto_helper_epilogue(uint32_t **out, bool static_context)
+{
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    int first_gpr = 0;
+
+    (void)static_context;
+    while (first_gpr < 8 && ft_gpr(first_gpr) == la_s0 + first_gpr) {
+        ++first_gpr;
+    }
+    ft_emit_helper_epilogue_gprs(out, first_gpr);
+#else
+    ft_emit_default_helper_epilogue(out, static_context, true);
+#endif
+}
+
 static void ft_emit_xmm_env_addr(uint32_t **out, int dst, int xmm)
 {
     int offset = lsenv_offset_of_xmm(lsenv, xmm);
@@ -2311,7 +2349,7 @@ static int ft_emit_call_xmm_helper3(uint32_t **out, void *func,
     ft_emit_xmm_env_addr(out, la_a2, src1_xmm);
     ft_emit_xmm_env_addr(out, la_a3, src2_xmm);
     ft_emit_default_helper_call(out, func, 0xf, static_context);
-    ft_emit_default_helper_epilogue(out, static_context, true);
+    ft_emit_crypto_helper_epilogue(out, static_context);
     return *out - start;
 }
 
@@ -2328,7 +2366,7 @@ static int ft_emit_call_sha_reg_helper(uint32_t **out, void *func,
     ft_emit_default_helper_call_via(out, func, pointer_args,
                                     sha256rnds2 ? la_t4 : la_t0,
                                     static_context);
-    ft_emit_default_helper_epilogue(out, static_context, true);
+    ft_emit_crypto_helper_epilogue(out, static_context);
     return *out - start;
 }
 
@@ -2343,7 +2381,7 @@ static int ft_emit_call_xmm_helper_imm(uint32_t **out, void *func,
     ft_emit_xmm_env_addr(out, la_a2, src_xmm);
     ft_emit_li64(out, la_a3, (uint64_t)(uint32_t)imm);
     ft_emit_default_helper_call(out, func, 0x7, static_context);
-    ft_emit_default_helper_epilogue(out, static_context, true);
+    ft_emit_crypto_helper_epilogue(out, static_context);
     return *out - start;
 }
 

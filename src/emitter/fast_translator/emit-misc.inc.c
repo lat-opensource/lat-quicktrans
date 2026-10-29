@@ -5,7 +5,8 @@
  */
 
 /* Zero words are success only for explicitly recognized no-code forms.
- * Ordinary emitters still return zero on failure. Never omit memory access.
+ * Ordinary emitters still return zero on failure. Never omit data accesses;
+ * prefetch hints follow the explicitly selected legacy policy.
  */
 static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
 {
@@ -15,6 +16,14 @@ static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
     case FT_ENDBR64:
     case FT_PAUSE:
         return true;
+    case FT_PREFETCHNTA:
+    case FT_PREFETCHT1:
+    case FT_PREFETCHT2:
+        /* Legacy LATU omits these hints; T0 and PREFETCHW still execute. */
+        return fields->modrm_mod != 3 && fields->prefix0 == 0 &&
+               fields->prefix2 == 0 &&
+               fields->modrm_reg == (fields->kind == FT_PREFETCHNTA ? 0 :
+                                      fields->kind == FT_PREFETCHT1 ? 2 : 3);
     case FT_NOP_MULTI:
         return fields->id == dt_X86_INS_FNOP && !option_soft_fpu;
     case FT_MOV128_XMM_XMMM:
@@ -238,6 +247,11 @@ static int ft_emit_prefetch_read_template(const FastTemplateFields *fields,
     int modrm_reg;
 
     (void)tb;
+#ifdef QUICKTRANS_LATU
+    if (ft_emit_zero_code_allowed(fields)) {
+        return 0;
+    }
+#endif
     switch (fields->kind) {
     case FT_PREFETCHNTA:
         modrm_reg = 0;
