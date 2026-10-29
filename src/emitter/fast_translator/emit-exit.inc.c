@@ -46,6 +46,7 @@ static void ft_tu_direct_emit_stats_dump(void)
 
 static bool ft_tu_direct_stats_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static bool enabled;
 
@@ -57,6 +58,9 @@ static bool ft_tu_direct_stats_enabled(void)
         initialized = true;
     }
     return enabled;
+#else
+    return false;
+#endif
 }
 
 static void ft_prepare_direct_link_exit(TranslationBlock *tb, uint32_t *out,
@@ -133,6 +137,7 @@ static target_ulong ft_exit_target_pc(target_ulong pc)
 #ifndef QUICKTRANS_LATU
 static bool ft_debug_jcc_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static bool enabled;
 
@@ -141,6 +146,9 @@ static bool ft_debug_jcc_enabled(void)
         initialized = true;
     }
     return enabled;
+#else
+    return false;
+#endif
 }
 
 /*

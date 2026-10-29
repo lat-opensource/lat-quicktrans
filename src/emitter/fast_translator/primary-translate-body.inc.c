@@ -323,7 +323,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
         int64_t now = ft_bench_now_ns();
 
         stage_analyze_ns = now - stage_emit_start;
-        if (getenv("LATX_FT_TB_KIND_TRACE")) {
+        if (ft_startup_flags() & FT_STARTUP_TB_KIND_TRACE) {
             fprintf(stderr, "[FT-TB-KINDS] pc=0x%lx count=%d kinds=",
                     (unsigned long)start_pc, icount);
             for (int trace_i = 0; trace_i < icount; ++trace_i) {

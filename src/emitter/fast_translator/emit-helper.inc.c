@@ -1562,11 +1562,7 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
 #ifndef CONFIG_SOFTMMU
         /* These reports are flushed by the linux-user exit cleanup path. */
         bool exit_cleanup_requested =
-            quicktrans_profile_exit_cleanup_required() ||
-            quicktrans_stats_requested() ||
-            getenv("LATX_TRANSLATOR_STATS") != NULL ||
-            getenv("LATX_FT_TU_STATS") != NULL ||
-            getenv("LATX_FT_TU_DIRECT_STATS") != NULL;
+            (ft_startup_flags() & FT_STARTUP_EXIT_CLEANUP) != 0;
 
         if (!exit_cleanup_requested) {
             /* Guest exit still needs linux-user's per-thread cleanup. */

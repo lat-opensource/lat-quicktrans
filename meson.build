@@ -334,3 +334,9 @@ test('x87-integer-inline-context', python,
 
 test('quicktrans_latu_instptn_switch', python,
      args: files('tests/test-latu-instptn-switch.py'))
+
+test(
+  'quicktrans_startup_env_cache',
+  python,
+  args: [files('tests/test-startup-env-cache.py')],
+)

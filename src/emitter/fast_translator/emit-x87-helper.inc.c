@@ -395,6 +395,7 @@ static void ft_x87_helper_fld_reg(CPUX86State *env, int st_index)
 
 static void ft_x87_trace(const char *op, CPUX86State *env)
 {
+#ifdef CONFIG_LATX_DEBUG
     /* Host startup diagnostic setting, as in the FST wrappers. */
     static int trace_state;
     int trace = __atomic_load_n(&trace_state, __ATOMIC_RELAXED);
@@ -409,6 +410,10 @@ static void ft_x87_trace(const char *op, CPUX86State *env)
                 op, top, env->fptags[top], env->fptags[(top + 1) & 7],
                 st0.high, st0.low);
     }
+#else
+    (void)op;
+    (void)env;
+#endif
 }
 
 static void ft_x87_helper_fsincos(CPUX86State *env)
@@ -466,6 +471,7 @@ static uint64_t ft_x87_helper_fstl(CPUX86State *env)
                      helper_fstl_ST0(env);
     /* This is a host startup diagnostic setting, not guest x87 state.
      * Avoid scanning the process environment for every executed store. */
+#ifdef CONFIG_LATX_DEBUG
     static int trace_state;
     int trace = __atomic_load_n(&trace_state, __ATOMIC_RELAXED);
     if (!trace) {
@@ -475,6 +481,7 @@ static uint64_t ft_x87_helper_fstl(CPUX86State *env)
     if (trace == 2) {
         fprintf(stderr, "[QT-X87] fstl value=%016" PRIx64 "\n", value);
     }
+#endif
     return value;
 }
 
@@ -484,6 +491,7 @@ static uint32_t ft_x87_helper_fsts(CPUX86State *env)
                      helper_fsts_ST0(env);
 
     /* Cache the host startup diagnostic setting, as for FST m64. */
+#ifdef CONFIG_LATX_DEBUG
     static int trace_state;
     int trace = __atomic_load_n(&trace_state, __ATOMIC_RELAXED);
     if (!trace) {
@@ -493,6 +501,7 @@ static uint32_t ft_x87_helper_fsts(CPUX86State *env)
     if (trace == 2) {
         fprintf(stderr, "[QT-X87] fsts value=%08" PRIx32 "\n", value);
     }
+#endif
     return value;
 }
 

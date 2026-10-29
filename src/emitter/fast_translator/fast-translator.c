@@ -524,6 +524,7 @@ static FtPrimaryStageStats ft_primary_stage_stats;
 
 static void ft_primary_stage_stats_dump(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     const FtPrimaryStageStats *s = &ft_primary_stage_stats;
     uint64_t remaining[FT_KIND_COUNT];
     uint64_t emitted_words = 0;
@@ -612,10 +613,14 @@ static void ft_primary_stage_stats_dump(void)
         remaining[best_kind] = 0;
     }
     fputc('\n', stderr);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static bool ft_primary_stage_stats_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static bool enabled;
 
@@ -627,10 +632,14 @@ static bool ft_primary_stage_stats_enabled(void)
         initialized = true;
     }
     return enabled;
+#else
+    return false;
+#endif
 }
 
 static uint64_t ft_primary_stage_stats_interval(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static uint64_t interval;
 
@@ -641,6 +650,9 @@ static uint64_t ft_primary_stage_stats_interval(void)
         initialized = true;
     }
     return interval;
+#else
+    return 0;
+#endif
 }
 
 static void ft_primary_stage_stats_record(int64_t total_ns,
@@ -649,6 +661,7 @@ static void ft_primary_stage_stats_record(int64_t total_ns,
                                           int64_t emit_ns,
                                           int64_t search_ns)
 {
+#ifdef CONFIG_LATX_DEBUG
     ft_primary_stage_stats.tb++;
     ft_primary_stage_stats.total_ns += total_ns;
     ft_primary_stage_stats.decode_ns += decode_ns;
@@ -659,12 +672,16 @@ static void ft_primary_stage_stats_record(int64_t total_ns,
         ft_primary_stage_stats.tb % ft_primary_stage_stats_interval() == 0) {
         ft_primary_stage_stats_dump();
     }
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static inline void ft_primary_tb_trace(const TranslationBlock *tb,
                                        const FastTemplateFields *fields,
                                        int icount, int emitted)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static bool enabled;
 
@@ -686,10 +703,14 @@ static inline void ft_primary_tb_trace(const TranslationBlock *tb,
         }
         fputc('\n', stderr);
     }
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static bool ft_primary_sample_trace_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static bool enabled;
 
@@ -698,11 +719,15 @@ static bool ft_primary_sample_trace_enabled(void)
         initialized = true;
     }
     return enabled;
+#else
+    return false;
+#endif
 }
 
 static void ft_primary_sample_trace(CPUArchState *env,
                                     const FastTemplateFields *fields)
 {
+#ifdef CONFIG_LATX_DEBUG
     uint8_t bytes[15];
 
     if (!fields || fields->size == 0 || fields->size > sizeof(bytes)) {
@@ -717,6 +742,9 @@ static void ft_primary_sample_trace(CPUArchState *env,
         fprintf(stderr, "%02x", bytes[i]);
     }
     fputc('\n', stderr);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 typedef struct FastTemplateRuntimeInfo {
@@ -862,6 +890,7 @@ static bool ft_emit_profile_candidate(const FastTemplateFields *fields,
 
 static void ft_emit_profile_dump(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     FtEmitProfileStats *s = &ft_emit_profile_stats;
     uint64_t remaining[FT_KIND_COUNT];
 
@@ -895,10 +924,14 @@ static void ft_emit_profile_dump(void)
         remaining[best_kind] = 0;
     }
     fputc('\n', stderr);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static bool ft_emit_profile_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static bool enabled;
 
@@ -922,12 +955,16 @@ static bool ft_emit_profile_enabled(void)
         }
     }
     return enabled;
+#else
+    return false;
+#endif
 }
 
 static void ft_emit_profile_record(const FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo *meta,
                                    const uint32_t *code, int words)
 {
+#ifdef CONFIG_LATX_DEBUG
     FtEmitProfileStats *s = &ft_emit_profile_stats;
     FtEmitCacheKey key;
     uint64_t hash;
@@ -972,10 +1009,14 @@ static void ft_emit_profile_record(const FastTemplateFields *fields,
         index = (index + 1) & (FT_EMIT_PROFILE_TABLE_SIZE - 1);
     }
     s->full++;
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static unsigned long ft_debug_live_limit(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static unsigned long limit = 32;
 
@@ -988,11 +1029,15 @@ static unsigned long ft_debug_live_limit(void)
         initialized = true;
     }
     return limit;
+#else
+    return 0;
+#endif
 }
 
 static void ft_debug_dump_live_regs(CPUArchState *env, target_ulong pc,
                                     const char *phase, unsigned long condition)
 {
+#ifdef CONFIG_LATX_DEBUG
     static unsigned long count;
 
     if (count++ >= ft_debug_live_limit()) {
@@ -1025,17 +1070,28 @@ static void ft_debug_dump_live_regs(CPUArchState *env, target_ulong pc,
             (unsigned long)env->regs[r9_index],
             (unsigned long)env->regs[r10_index],
             (unsigned long)env->regs[r11_index]);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static void ft_debug_dump_live_entry(CPUArchState *env, target_ulong pc)
 {
+#ifdef CONFIG_LATX_DEBUG
     ft_debug_dump_live_regs(env, pc, "entry", 0);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static void ft_debug_dump_live_exit(CPUArchState *env, target_ulong pc,
                                     unsigned long condition)
 {
+#ifdef CONFIG_LATX_DEBUG
     ft_debug_dump_live_regs(env, pc, "exit", condition);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 #ifdef CONFIG_LATX_DEBUG
@@ -1044,6 +1100,52 @@ static bool fast_template_emit_constraints_ok(const FastTemplateFields *fields);
 #include "template-class.inc.c"
 
 #include "template-info.inc.c"
+
+/* These diagnostics are process-startup settings, like the primary trace
+ * options above. Cache the parsed bits, not environment-owned pointers.
+ * Relaxed atomics avoid races between simultaneous first translations. */
+enum {
+    FT_STARTUP_READY = 1u,
+    FT_STARTUP_EXIT_CLEANUP = 2u,
+    FT_STARTUP_TU_TRACE = 4u,
+    FT_STARTUP_TU_DIRECT_TRACE = 8u,
+    FT_STARTUP_TB_KIND_TRACE = 16u,
+};
+
+static unsigned int ft_startup_flags(void)
+{
+    static unsigned int cached;
+    unsigned int flags = __atomic_load_n(&cached, __ATOMIC_RELAXED);
+
+    if (flags == 0) {
+        flags = FT_STARTUP_READY;
+#ifndef CONFIG_SOFTMMU
+        if (quicktrans_profile_exit_cleanup_required() ||
+            quicktrans_stats_requested() ||
+            getenv("LATX_TRANSLATOR_STATS") != NULL
+#ifdef CONFIG_LATX_DEBUG
+            || getenv("LATX_FT_TU_STATS") != NULL
+            || getenv("LATX_FT_TU_DIRECT_STATS") != NULL
+#endif
+            ) {
+            flags |= FT_STARTUP_EXIT_CLEANUP;
+        }
+#endif
+#ifdef CONFIG_LATX_DEBUG
+        if (getenv("LATX_FT_TU_TRACE") != NULL) {
+            flags |= FT_STARTUP_TU_TRACE;
+        }
+        if (getenv("LATX_FT_TU_DIRECT_TRACE") != NULL) {
+            flags |= FT_STARTUP_TU_DIRECT_TRACE;
+        }
+        if (getenv("LATX_FT_TB_KIND_TRACE") != NULL) {
+            flags |= FT_STARTUP_TB_KIND_TRACE;
+        }
+#endif
+        __atomic_store_n(&cached, flags, __ATOMIC_RELAXED);
+    }
+    return flags;
+}
 
 #include "emit-core.inc.c"
 
@@ -3109,6 +3211,7 @@ typedef struct FtDebugSkipConfig {
 
 static const FtDebugSkipConfig *ft_debug_skip_config(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static FtDebugSkipConfig cfg;
     static bool initialized;
 
@@ -3169,11 +3272,16 @@ static const FtDebugSkipConfig *ft_debug_skip_config(void)
         initialized = true;
     }
     return &cfg;
+#else
+    static const FtDebugSkipConfig disabled;
+    return &disabled;
+#endif
 }
 
 static bool ft_debug_skip_template(FastTemplateKind kind, int id,
                                    target_ulong pc)
 {
+#ifdef CONFIG_LATX_DEBUG
     const FtDebugSkipConfig *cfg = ft_debug_skip_config();
 
     if (!cfg->enabled) {
@@ -3223,6 +3331,9 @@ static bool ft_debug_skip_template(FastTemplateKind kind, int id,
         return true;
     }
     return false;
+#else
+    return false;
+#endif
 }
 
 typedef struct FtDebugSplitConfig {
@@ -3235,6 +3346,7 @@ typedef struct FtDebugSplitConfig {
 
 static const FtDebugSplitConfig *ft_debug_split_config(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static bool initialized;
     static FtDebugSplitConfig cfg;
 
@@ -3254,11 +3366,16 @@ static const FtDebugSplitConfig *ft_debug_split_config(void)
         initialized = true;
     }
     return &cfg;
+#else
+    static const FtDebugSplitConfig disabled;
+    return &disabled;
+#endif
 }
 
 static bool ft_debug_split_before_template(FastTemplateKind kind,
                                            target_ulong pc)
 {
+#ifdef CONFIG_LATX_DEBUG
     const FtDebugSplitConfig *cfg = ft_debug_split_config();
 
     if (!cfg->enabled) {
@@ -3271,26 +3388,37 @@ static bool ft_debug_split_before_template(FastTemplateKind kind,
         return true;
     }
     return false;
+#else
+    return false;
+#endif
 }
 
 static bool ft_primary_trace_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static int enabled = -1;
 
     if (enabled < 0) {
         enabled = getenv("LATX_FAST_TRANSLATOR_TRACE") != NULL;
     }
     return enabled;
+#else
+    return false;
+#endif
 }
 
 static bool ft_primary_trace_opt_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     static int enabled = -1;
 
     if (enabled < 0) {
         enabled = getenv("LATX_FAST_TRANSLATOR_TRACE_OPT") != NULL;
     }
     return enabled;
+#else
+    return false;
+#endif
 }
 
 static int ft_primary_debug_live_initialized;
@@ -3298,6 +3426,7 @@ static target_ulong ft_primary_debug_live_target;
 
 static bool ft_primary_debug_live_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     if (!ft_primary_debug_live_initialized) {
         const char *env_pc = getenv("LATX_FT_DEBUG_LIVE_PC");
 
@@ -3306,14 +3435,21 @@ static bool ft_primary_debug_live_enabled(void)
         ft_primary_debug_live_initialized = 1;
     }
     return ft_primary_debug_live_target != 0;
+#else
+    return false;
+#endif
 }
 
 static target_ulong ft_primary_debug_live_pc(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     if (!ft_primary_debug_live_initialized) {
         (void)ft_primary_debug_live_enabled();
     }
     return ft_primary_debug_live_target;
+#else
+    return 0;
+#endif
 }
 
 static bool ft_primary_debug_code_initialized;
@@ -3324,6 +3460,7 @@ static unsigned int ft_primary_debug_code_remaining;
 
 static void ft_primary_debug_code_init(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     const char *value;
 
     if (ft_primary_debug_code_initialized) {
@@ -3340,20 +3477,28 @@ static void ft_primary_debug_code_init(void)
     ft_primary_debug_code_remaining =
         value && value[0] ? strtoul(value, NULL, 0) : 4;
     ft_primary_debug_code_initialized = true;
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static bool ft_primary_debug_code_enabled(void)
 {
+#ifdef CONFIG_LATX_DEBUG
     ft_primary_debug_code_init();
     return (ft_primary_debug_code_pc != 0 ||
             ft_primary_debug_code_has_low12) &&
            ft_primary_debug_code_remaining != 0;
+#else
+    return false;
+#endif
 }
 
 static void ft_primary_debug_dump_code(target_ulong pc,
                                        const FastTemplateFields *fields,
                                        const uint32_t *code, int count)
 {
+#ifdef CONFIG_LATX_DEBUG
     ft_primary_debug_code_init();
     bool pc_matches = ft_primary_debug_code_pc &&
                       pc == ft_primary_debug_code_pc;
@@ -3372,10 +3517,14 @@ static void ft_primary_debug_dump_code(target_ulong pc,
     }
     fputc('\n', stderr);
     ft_primary_debug_code_remaining--;
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static void ft_primary_debug_emit_live_regs(uint32_t **out, target_ulong pc)
 {
+#ifdef CONFIG_LATX_DEBUG
     target_ulong debug_pc = ft_primary_debug_live_pc();
 
     if (!debug_pc || debug_pc != pc) {
@@ -3387,11 +3536,15 @@ static void ft_primary_debug_emit_live_regs(uint32_t **out, target_ulong pc)
     ft_emit_li64(out, la_a1, pc);
     ft_emit_host_call(out, (void *)ft_debug_dump_live_entry, 1u << 0);
     ft_emit_helper_epilogue(out);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static void ft_primary_debug_emit_exit_state(uint32_t **out, target_ulong pc,
                                              int condition_reg)
 {
+#ifdef CONFIG_LATX_DEBUG
     if (!ft_primary_debug_live_enabled() ||
         ft_primary_debug_live_pc() != pc) {
         return;
@@ -3403,6 +3556,9 @@ static void ft_primary_debug_emit_exit_state(uint32_t **out, target_ulong pc,
     FT_LA_OR_EMIT(out, la_a2, condition_reg, la_zero);
     ft_emit_host_call(out, (void *)ft_debug_dump_live_exit, 0x7);
     ft_emit_helper_epilogue(out);
+#else
+    /* Diagnostic instrumentation is absent from release builds. */
+#endif
 }
 
 static void ft_primary_update_last_info(TranslationBlock *tb,
@@ -3490,7 +3646,7 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
     const FastTemplateRuntimeInfo *meta_buf[TCG_MAX_INSNS];
     int icount = 0;
     unsigned int analysis_candidates = 0;
-    bool trace = getenv("LATX_FT_TU_TRACE") != NULL;
+    bool trace = (ft_startup_flags() & FT_STARTUP_TU_TRACE) != 0;
     int decode_mode = ft_tu_decode_mode(tb);
 
     if (max_insns == 1) {
@@ -3699,7 +3855,7 @@ bool latx_fast_translate_tu_tb_cached(CPUArchState *env,
     bool x87_top_active = false;
     bool mmx_active = false;
     int count;
-    bool tu_trace = getenv("LATX_FT_TU_TRACE") != NULL;
+    bool tu_trace = (ft_startup_flags() & FT_STARTUP_TU_TRACE) != 0;
 
     (void)env;
     if (!tb || !tu_meta || !code_size || tu_meta->icount == 0) {
@@ -3896,7 +4052,7 @@ bool latx_fast_patch_tu_tb_branches(TranslationBlock *tb)
         if (!ft_patch_lats_tu_branch(branch, (uint32_t *)successor->tc.ptr)) {
             return false;
         }
-        if (getenv("LATX_FT_TU_DIRECT_TRACE")) {
+        if (ft_startup_flags() & FT_STARTUP_TU_DIRECT_TRACE) {
             fprintf(stderr,
                     "[FT-TU-PATCH] pc=0x%lx slot=%d branch=%p target=%p "
                     "word=%08x delta=%td\n",
