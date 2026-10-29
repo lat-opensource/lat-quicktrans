@@ -404,6 +404,67 @@ static bool ft_emit_locked_alu(uint32_t **out,
                             fields->alu_width, old, rhs);
 }
 
+/* Logical immediates can also perform the 32-bit destination zero-extension.
+ * Use this only when the existing flag analysis has discarded all flags. */
+static bool ft_emit_and_imm_reg(uint32_t **out,
+                                const FastTemplateFields *fields)
+{
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    int width = fields->alu_width;
+    int dst;
+    uint64_t mask;
+    uint64_t inverse;
+
+    if (fields->alu_op != FT_ALU_AND || !fields->skip_flags ||
+        fields->prefix0 == dt_X86_PREFIX_LOCK ||
+        (width != 32 && width != 64)) {
+        return false;
+    }
+    if (fields->alu_form == FT_ALU_FORM_ACC_IMM) {
+        dst = rax_index;
+    } else if (fields->alu_form == FT_ALU_FORM_RM_IMM &&
+               fields->modrm_mod == 3) {
+        dst = ft_modrm_rm_index(fields);
+    } else {
+        return false;
+    }
+    if (dst >= GPR_NUM) {
+        return false;
+    }
+    dst = ft_gpr(dst);
+    mask = width == 32 ? (uint32_t)fields->imm : (uint64_t)fields->imm;
+    if (mask <= 0xfff) {
+        FT_LA_ANDI_EMIT(out, dst, dst, mask);
+        return true;
+    }
+    if (mask == UINT64_MAX) {
+        /* Keep the ordinary nonempty emission contract for AND r64,-1. */
+        return false;
+    }
+    if ((mask & (mask + 1)) == 0) {
+        FT_LA_BSTRPICK_D_EMIT(out, dst, dst,
+                             63 - __builtin_clzll(mask), 0);
+        return true;
+    }
+    inverse = ~mask;
+    if (width == 32) {
+        inverse &= UINT32_MAX;
+    }
+    if ((inverse & (inverse + 1)) == 0) {
+        FT_LA_BSTRINS_D_EMIT(out, dst, la_zero,
+                            __builtin_ctzll(mask) - 1, 0);
+        if (width == 32) {
+            FT_LA_BSTRPICK_D_EMIT(out, dst, dst, 31, 0);
+        }
+        return true;
+    }
+#else
+    (void)out;
+    (void)fields;
+#endif
+    return false;
+}
+
 static bool ft_emit_alu_template(uint32_t **out,
                                  const FastTemplateFields *fields,
                                  target_ulong pc)
@@ -456,6 +517,9 @@ static bool ft_emit_alu_template(uint32_t **out,
         return true;
 
     case FT_ALU_FORM_RM_IMM:
+        if (op == FT_ALU_AND && ft_emit_and_imm_reg(out, fields)) {
+            return true;
+        }
         if (fields->skip_flags && width == 64 && fields->modrm_mod == 3 &&
             (op == FT_ALU_ADD || op == FT_ALU_SUB)) {
             int64_t addend = op == FT_ALU_ADD ? fields->imm :
@@ -484,6 +548,9 @@ static bool ft_emit_alu_template(uint32_t **out,
         return true;
 
     case FT_ALU_FORM_ACC_IMM:
+        if (op == FT_ALU_AND && ft_emit_and_imm_reg(out, fields)) {
+            return true;
+        }
         if (!ft_emit_alu_imm(out, fields, width, &rhs)) {
             return false;
         }

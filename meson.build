@@ -279,6 +279,12 @@ test(
 )
 
 test(
+  'quicktrans_and_immediate',
+  python,
+  args: [files('tests/test-and-immediate.py')],
+)
+
+test(
   'quicktrans_simd_fast_masked_v',
   python,
   args: [files('tests/test-simd-fast-masked-v.py')],
