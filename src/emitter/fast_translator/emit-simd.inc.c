@@ -3812,6 +3812,123 @@ static int ft_emit_sha_template(const FastTemplateFields *fields,
     return out - code;
 }
 
+#ifndef QUICKTRANS_LATU
+#include "crypto/aes.h"
+
+static void ft_emit_aes_table(uint32_t **out, int reg, const void *table)
+{
+    ft_emit_li64(out, reg, (uintptr_t)table);
+#ifdef CONFIG_SOFTMMU
+    if (hamt_enabled() && hamt_mode_dmw()) {
+        FT_LA_LU52I_D_EMIT(out, reg, reg, 0x900);
+    }
+#endif
+}
+
+static bool ft_emit_aes_round_inline(uint32_t **out,
+                                    const FastTemplateFields *fields,
+                                    target_ulong pc, int dst)
+{
+    bool decrypt = fields->id == dt_X86_INS_AESDEC ||
+                   fields->id == dt_X86_INS_AESDECLAST;
+    bool last = fields->id == dt_X86_INS_AESENCLAST ||
+                fields->id == dt_X86_INS_AESDECLAST;
+    int key;
+    int table = ft_scratch_avoid3(-1, -1, -1);
+    int word = ft_scratch_avoid3(table, -1, -1);
+    int byte = ft_scratch_avoid3(table, word, -1);
+    int value = ft_scratch_avoid3(table, word, byte);
+    int result = ft_vscratch + 1;
+    int state = ft_xmm(dst);
+#ifdef CONFIG_SOFTMMU
+    /* LATS maps t0-t2 to scratch registers a4, a5 and a7, not guest GPRs.
+     * Load the memory operand before assigning the four table registers. */
+    const int tables[4] = { la_a0, la_a1, la_a2, la_a3 };
+    if (!last) {
+        table = tables[0];
+        word = la_t0;
+        byte = la_t1;
+        value = la_t2;
+    }
+#endif
+
+    if (!ft_emit_xmmm_src(out, fields, pc, &key)) {
+        return false;
+    }
+    ft_emit_aes_table(out, table, last ?
+                      (const void *)(decrypt ? AES_isbox : AES_sbox) :
+                      (const void *)(decrypt ? AES_Td0 : AES_Te0));
+#ifdef CONFIG_SOFTMMU
+    if (!last) {
+        ft_emit_aes_table(out, tables[1], decrypt ? AES_Td1 : AES_Te1);
+        ft_emit_aes_table(out, tables[2], decrypt ? AES_Td2 : AES_Te2);
+        ft_emit_aes_table(out, tables[3], decrypt ? AES_Td3 : AES_Te3);
+    }
+#endif
+    /* Keep the original state and round key intact even when they alias. */
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            int pos = column * 4 + row;
+            int index = (pos * (decrypt ? 13 : 5)) & 15;
+            FT_LA_VPICKVE2GR_BU_EMIT(out, byte, state, index);
+            if (last) {
+                FT_LA_LDX_BU_EMIT(out, value, table, byte);
+                FT_LA_VINSGR2VR_B_EMIT(out, result, value, pos);
+            } else {
+                int term = row == 0 ? word : value;
+#ifdef CONFIG_SOFTMMU
+                FT_LA_ALSL_D_EMIT(out, term, byte, tables[row], 1);
+#else
+                FT_LA_ALSL_D_EMIT(out, term, byte, table, 1);
+#endif
+                FT_LA_LD_W_EMIT(out, term, term, 0);
+                if (row != 0) {
+#ifndef CONFIG_SOFTMMU
+                    FT_LA_ROTRI_W_EMIT(out, value, value, row * 8);
+#endif
+                    FT_LA_XOR_EMIT(out, word, word, value);
+                }
+            }
+        }
+        if (!last) {
+            FT_LA_REVB_2H_EMIT(out, word, word);
+            FT_LA_ROTRI_W_EMIT(out, word, word, 16);
+            FT_LA_VINSGR2VR_W_EMIT(out, result, word, column);
+        }
+    }
+    FT_LA_VXOR_V_EMIT(out, state, result, key);
+    return true;
+}
+
+static bool ft_emit_aeskeygen_inline(uint32_t **out,
+                                     const FastTemplateFields *fields,
+                                     target_ulong pc, int dst)
+{
+    int src;
+    int table = ft_scratch_avoid3(-1, -1, -1);
+    int value = ft_scratch_avoid3(table, -1, -1);
+    int result = ft_vscratch + 1;
+
+    if (!ft_emit_xmmm_src(out, fields, pc, &src)) {
+        return false;
+    }
+    ft_emit_aes_table(out, table, AES_sbox);
+    for (int half = 0; half < 2; ++half) {
+        for (int byte = 0; byte < 4; ++byte) {
+            FT_LA_VPICKVE2GR_BU_EMIT(out, value, src, half * 8 + byte + 4);
+            FT_LA_LDX_BU_EMIT(out, value, table, value);
+            FT_LA_VINSGR2VR_B_EMIT(out, result, value, half * 8 + byte);
+        }
+        FT_LA_VPICKVE2GR_WU_EMIT(out, value, result, half * 2);
+        FT_LA_ROTRI_W_EMIT(out, value, value, 8);
+        FT_LA_XORI_EMIT(out, value, value, fields->imm);
+        FT_LA_VINSGR2VR_W_EMIT(out, result, value, half * 2 + 1);
+    }
+    FT_LA_VOR_V_EMIT(out, ft_xmm(dst), result, result);
+    return true;
+}
+#endif
+
 static int ft_emit_aes_round_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -3831,12 +3948,60 @@ static int ft_emit_aes_round_template(const FastTemplateFields *fields, Translat
     if (!ft_aes_round_helper(fields->id, &func)) {
         return 0;
     }
+#ifndef QUICKTRANS_LATU
+    unsigned int mask = fields->id == dt_X86_INS_AESDEC ? 1 :
+                        fields->id == dt_X86_INS_AESDECLAST ? 2 :
+                        fields->id == dt_X86_INS_AESENC ? 4 : 8;
+    if (option_aes_opt & mask) {
+        return ft_emit_aes_round_inline(&out, fields, pc, dst) ? out - code : 0;
+    }
+#endif
     if (!ft_emit_aes_helper_src(&out, fields, pc, dst, func, false,
                                 lats_aes_round)) {
         return 0;
     }
     return (out - code);
 }
+
+#ifndef QUICKTRANS_LATU
+static bool ft_emit_aesimc_inline(uint32_t **out,
+                                 const FastTemplateFields *fields,
+                                 target_ulong pc, int dst)
+{
+    int src;
+    int table = ft_scratch_avoid3(-1, -1, -1);
+    int word = ft_scratch_avoid3(table, -1, -1);
+    int byte = ft_scratch_avoid3(table, word, -1);
+    int value = ft_scratch_avoid3(table, word, byte);
+    int result = ft_vscratch + 1;
+
+    if (!ft_emit_xmmm_src(out, fields, pc, &src)) {
+        return false;
+    }
+    ft_emit_li64(out, table, (uintptr_t)AES_imc_rot);
+#ifdef CONFIG_SOFTMMU
+    if (hamt_enabled() && hamt_mode_dmw()) {
+        FT_LA_LU52I_D_EMIT(out, table, table, 0x900);
+    }
+#endif
+    /* Avoid serializing source reads behind partial writes when dst == src. */
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            int term = row == 0 ? word : value;
+            FT_LA_VPICKVE2GR_BU_EMIT(out, byte, src, column * 4 + row);
+            FT_LA_ALSL_D_EMIT(out, term, byte, table, 1);
+            FT_LA_LD_W_EMIT(out, term, term, 0);
+            if (row != 0) {
+                FT_LA_ROTRI_W_EMIT(out, value, value, 32 - row * 8);
+                FT_LA_XOR_EMIT(out, word, word, value);
+            }
+        }
+        FT_LA_VINSGR2VR_W_EMIT(out, result, word, column);
+    }
+    FT_LA_VOR_V_EMIT(out, ft_xmm(dst), result, result);
+    return true;
+}
+#endif
 
 static int ft_emit_aesimc_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
@@ -3849,6 +4014,11 @@ static int ft_emit_aesimc_template(const FastTemplateFields *fields, Translation
         fields->id != dt_X86_INS_AESIMC || dst >= XMM_NUM) {
         return 0;
     }
+#ifndef QUICKTRANS_LATU
+    if (option_aes_opt & 0x10) {
+        return ft_emit_aesimc_inline(&out, fields, pc, dst) ? out - code : 0;
+    }
+#endif
     if (!ft_emit_aes_helper_src(&out, fields, pc, dst,
                                 (void *)helper_aesimc_xmm, false, false)) {
         return 0;
@@ -3868,6 +4038,11 @@ static int ft_emit_aeskeygen_template(const FastTemplateFields *fields, Translat
         fields->imm < 0 || fields->imm > 0xff) {
         return 0;
     }
+#ifndef QUICKTRANS_LATU
+    if (option_aes_opt & 0x20) {
+        return ft_emit_aeskeygen_inline(&out, fields, pc, dst) ? out - code : 0;
+    }
+#endif
     if (!ft_emit_aes_helper_src(&out, fields, pc, dst,
                                 (void *)helper_aeskeygenassist_xmm, true,
                                 false)) {
