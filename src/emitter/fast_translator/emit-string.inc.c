@@ -83,8 +83,12 @@ static bool ft_string_is_scas(int id)
            id == dt_X86_INS_SCASD || id == dt_X86_INS_SCASQ;
 }
 
-static bool ft_emit_string_addr(uint32_t **out, int dst, int base, int seg)
+static bool ft_emit_string_addr(uint32_t **out, int dst, int base, int seg,
+                                bool addr32)
 {
+#ifndef QUICKTRANS_LATU
+    (void)addr32;
+#endif
     if (seg >= 0) {
         int seg_base_offset = offsetof(CPUX86State, segs[seg].base);
 
@@ -92,10 +96,23 @@ static bool ft_emit_string_addr(uint32_t **out, int dst, int base, int seg)
             return false;
         }
         ft_emit_load_env(out, dst, seg_base_offset, FT_LA_OPCODE_LD_D);
+#ifdef QUICKTRANS_LATU
+        if (addr32) {
+            FT_LA_BSTRPICK_D_EMIT(out, la_t2, base, 31, 0);
+            FT_LA_ADD_D_EMIT(out, dst, dst, la_t2);
+            return true;
+        }
+#endif
         FT_LA_ADD_D_EMIT(out, dst, dst, base);
         return true;
     }
 
+#ifdef QUICKTRANS_LATU
+    if (addr32) {
+        FT_LA_BSTRPICK_D_EMIT(out, dst, base, 31, 0);
+        return true;
+    }
+#endif
     FT_LA_OR_EMIT(out, dst, base, la_zero);
     return true;
 }
@@ -269,14 +286,14 @@ static bool ft_emit_string_body(uint32_t **out,
             fields->segment != gs_index) {
             src = ft_gpr(rsi_index);
         } else if (!ft_emit_string_addr(out, src, ft_gpr(rsi_index),
-                                       fields->segment)) {
+                                       fields->segment, fields->addr32)) {
             return false;
         }
         FT_LA_LD_D_EMIT(out, la_t0, src, 0);
         if (flat64) {
             dst = ft_gpr(rdi_index);
         } else if (!ft_emit_string_addr(out, dst, ft_gpr(rdi_index),
-                                       es_index)) {
+                                       es_index, fields->addr32)) {
             return false;
         }
         FT_LA_ST_D_EMIT(out, la_t0, dst, 0);
@@ -304,7 +321,7 @@ static bool ft_emit_string_body(uint32_t **out,
         ft_string_is_lods(id)) {
         if (src_addr == la_t3 &&
             !ft_emit_string_addr(out, src_addr, ft_gpr(rsi_index),
-                                 fields->segment)) {
+                                 fields->segment, fields->addr32)) {
             return false;
         }
 #if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
@@ -320,7 +337,8 @@ static bool ft_emit_string_body(uint32_t **out,
     if (ft_string_is_movs(id) || ft_string_is_stos(id) ||
         ft_string_is_cmps(id) || ft_string_is_scas(id)) {
         if (dst_addr == la_t4 &&
-            !ft_emit_string_addr(out, dst_addr, ft_gpr(rdi_index), es_index)) {
+            !ft_emit_string_addr(out, dst_addr, ft_gpr(rdi_index),
+                                 es_index, fields->addr32)) {
             return false;
         }
     }
@@ -428,6 +446,12 @@ static int ft_emit_string_template(const FastTemplateFields *fields, Translation
                  ft_string_is_scas(fields->id);
 
     if (rep) {
+#ifdef QUICKTRANS_LATU
+        if (fields->addr32) {
+            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(rcx_index),
+                                ft_gpr(rcx_index), 31, 0);
+        }
+#endif
         ft_emit_branch_placeholder(&out, &zero_count_fixup, FT_BRANCH_BEQ,
                                    ft_gpr(rcx_index), la_zero, &zero_count);
     }
@@ -535,14 +559,15 @@ static int ft_emit_string_io_template(const FastTemplateFields *fields,
 
     ft_bind_branch_label(&loop, out);
     if (is_in) {
-        if (!ft_emit_string_addr(&out, la_t4, ft_gpr(rdi_index), es_index) ||
+        if (!ft_emit_string_addr(&out, la_t4, ft_gpr(rdi_index),
+                                  es_index, fields->addr32) ||
             !ft_emit_store_addr_bytes(&out, fields->address, la_t4, 0,
                                       la_zero, bytes)) {
             return 0;
         }
     } else {
         if (!ft_emit_string_addr(&out, la_t3, ft_gpr(rsi_index),
-                                 fields->segment)) {
+                                 fields->segment, fields->addr32)) {
             return 0;
         }
         ft_emit_string_load_bytes(&out, la_t0, la_t3, bytes);
@@ -572,7 +597,8 @@ static int ft_emit_string_io_template(const FastTemplateFields *fields,
 
     if (is_in) {
         ft_emit_string_io_spill(&out, la_t0, false, false);
-        if (!ft_emit_string_addr(&out, la_t4, ft_gpr(rdi_index), es_index) ||
+        if (!ft_emit_string_addr(&out, la_t4, ft_gpr(rdi_index),
+                                  es_index, fields->addr32) ||
             !ft_emit_store_addr_bytes(&out, fields->address, la_t4, 0,
                                       la_t0, bytes)) {
             return 0;

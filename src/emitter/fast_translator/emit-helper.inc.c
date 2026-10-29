@@ -4,6 +4,84 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifdef QUICKTRANS_LATU
+/* Same segment cache and CS mode policy as legacy store_ireg_to_ir1_seg.
+ * t2 holds the zero-extended selector; preserve r21 (return target).
+ */
+static void ft_emit_latu_store_seg(uint32_t **out, int seg)
+{
+    FastBranchLabel mode64 = { 0 }, mode_done = { 0 };
+    FastBranchLabel ldt = { 0 }, table_done = { 0 };
+    FastBranchFixup mode64_fix, mode_done_fix, ldt_fix, table_done_fix;
+
+    ft_emit_store_env(out, la_t2,
+                      offsetof(CPUX86State, segs[0].selector) +
+                      seg * sizeof(SegmentCache),
+                      FT_LA_OPCODE_ST_W);
+    if (seg == R_CS) {
+        FT_LA_ORI_EMIT(out, la_t1, la_zero, 0x23);
+        ft_emit_branch_placeholder(out, &mode64_fix, FT_BRANCH_BNE,
+                                   la_t2, la_t1, &mode64);
+        ft_emit_store_env(out, la_zero, offsetof(CPUX86State, sys.codemode),
+                          FT_LA_OPCODE_ST_W);
+        ft_emit_load_env(out, la_t0, offsetof(CPUX86State, hflags), FT_LA_OPCODE_LD_W);
+        ft_emit_li32(out, la_t1, ~HF_CS64_MASK);
+        FT_LA_AND_EMIT(out, la_t0, la_t0, la_t1);
+        ft_emit_li32(out, la_t1, HF_CS32_MASK);
+        FT_LA_OR_EMIT(out, la_t0, la_t0, la_t1);
+        ft_emit_branch_placeholder(out, &mode_done_fix, FT_BRANCH_BEQ,
+                                   la_zero, la_zero, &mode_done);
+        ft_bind_branch_label(&mode64, *out);
+        FT_LA_ORI_EMIT(out, la_t1, la_zero, 1);
+        ft_emit_store_env(out, la_t1, offsetof(CPUX86State, sys.codemode),
+                          FT_LA_OPCODE_ST_W);
+        ft_emit_load_env(out, la_t0, offsetof(CPUX86State, hflags), FT_LA_OPCODE_LD_W);
+        ft_emit_li32(out, la_t1, HF_CS32_MASK | HF_SS32_MASK | HF_CS64_MASK);
+        FT_LA_OR_EMIT(out, la_t0, la_t0, la_t1);
+        ft_emit_li32(out, la_t1, ~HF_ADDSEG_MASK);
+        FT_LA_AND_EMIT(out, la_t0, la_t0, la_t1);
+        ft_bind_branch_label(&mode_done, *out);
+        ft_resolve_branch_fixup(&mode64_fix);
+        ft_resolve_branch_fixup(&mode_done_fix);
+        ft_emit_store_env(out, la_t0, offsetof(CPUX86State, hflags), FT_LA_OPCODE_ST_W);
+    }
+
+    FT_LA_ANDI_EMIT(out, la_t1, la_t2, 4);
+    ft_emit_branch_placeholder(out, &ldt_fix, FT_BRANCH_BNE, la_t1, la_zero, &ldt);
+    ft_emit_load_env(out, la_t0, offsetof(CPUX86State, gdt.base), FT_LA_OPCODE_LD_D);
+    ft_emit_branch_placeholder(out, &table_done_fix, FT_BRANCH_BEQ,
+                               la_zero, la_zero, &table_done);
+    ft_bind_branch_label(&ldt, *out);
+    ft_emit_load_env(out, la_t0, offsetof(CPUX86State, ldt.base), FT_LA_OPCODE_LD_D);
+    ft_bind_branch_label(&table_done, *out);
+    ft_resolve_branch_fixup(&ldt_fix);
+    ft_resolve_branch_fixup(&table_done_fix);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t2, 15, 3);
+    FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 3);
+    FT_LA_ADD_D_EMIT(out, la_t0, la_t0, la_t1);
+    FT_LA_LD_D_EMIT(out, la_t0, la_t0, 0);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t0, 39, 16);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t3, la_t0, 63, 56);
+    FT_LA_BSTRINS_D_EMIT(out, la_t1, la_t3, 31, 24);
+    ft_emit_store_env(out, la_t1,
+                      offsetof(CPUX86State, segs[0].base) +
+                      seg * sizeof(SegmentCache),
+                      FT_LA_OPCODE_ST_D);
+    ft_emit_li32(out, la_t1, 0xffffffffu);
+    ft_emit_store_env(out, la_t1,
+                      offsetof(CPUX86State, segs[0].limit) +
+                      seg * sizeof(SegmentCache),
+                      FT_LA_OPCODE_ST_W);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t0, 55, 40);
+    FT_LA_ORI_EMIT(out, la_t1, la_t1, 1);
+    FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 8);
+    ft_emit_store_env(out, la_t1,
+                      offsetof(CPUX86State, segs[0].flags) +
+                      seg * sizeof(SegmentCache),
+                      FT_LA_OPCODE_ST_W);
+}
+#endif
+
 static int ft_emit_call_pcmpistri_helper(uint32_t **out,
                                          const FastTemplateFields *fields,
                                          target_ulong pc);
@@ -1619,18 +1697,26 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
         FT_LA_LD_D_EMIT(&out, la_t4, ft_gpr(rsp_index), 0);
         FT_LA_OR_EMIT(&out, la_r21, la_t4, la_zero);
         FT_LA_LD_HU_EMIT(&out, la_t2, ft_gpr(rsp_index), 8);
+#ifdef QUICKTRANS_LATU
+        ft_emit_latu_store_seg(&out, R_CS);
+#else
         ft_emit_store_env(&out, la_t2,
                           offsetof(CPUX86State, segs[cs_index].selector),
                           FT_LA_OPCODE_ST_W);
+#endif
         FT_LA_LD_D_EMIT(&out, la_t0, ft_gpr(rsp_index), 16);
         if (!ft_emit_apply_popfq(&out, tb)) {
             return 0;
         }
-        FT_LA_LD_D_EMIT(&out, la_t3, ft_gpr(rsp_index), 24);
         FT_LA_LD_HU_EMIT(&out, la_t2, ft_gpr(rsp_index), 32);
+#ifdef QUICKTRANS_LATU
+        ft_emit_latu_store_seg(&out, R_SS);
+#else
         ft_emit_store_env(&out, la_t2,
                           offsetof(CPUX86State, segs[ss_index].selector),
                           FT_LA_OPCODE_ST_W);
+#endif
+        FT_LA_LD_D_EMIT(&out, la_t3, ft_gpr(rsp_index), 24);
         FT_LA_OR_EMIT(&out, ft_gpr(rsp_index), la_t3, la_zero);
         return ft_emit_helper_indirect_exit(&out, tb, code, la_r21, false);
 #endif
@@ -1676,6 +1762,12 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
         int addr;
         int offset;
 
+#ifndef QUICKTRANS_LATU
+        /* Narrow memory far pointers are newly enabled for LATU only. */
+        if (fields->alu_width != 64) {
+            return 0;
+        }
+#endif
 #ifdef CONFIG_SOFTMMU
         ft_emit_helper_prologue(&out);
 #endif
@@ -1694,12 +1786,30 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
                          FT_LA_OPCODE_LD_D);
         return ft_emit_helper_indirect_exit(&out, tb, code, la_t0, false);
 #else
+#ifdef QUICKTRANS_LATU
+        int bytes = fields->alu_width / 8;
+        /* Keep the address out of selector/scratch registers and make the
+         * complete far pointer fit the byte-load immediate range. */
+        if (!ft_fits_simm12(offset)) {
+            return 0;
+        }
+        FT_LA_ADDI_D_EMIT(&out, la_t4, addr, offset);
+        addr = la_t4;
+        offset = 0;
+        if ((bytes != 2 && bytes != 4 && bytes != 8) ||
+            !ft_emit_load_addr_bytes(&out, addr, offset, la_r21, bytes) ||
+            !ft_emit_load_addr_bytes(&out, addr, offset + bytes, la_t2, 2)) {
+            return 0;
+        }
+        ft_emit_latu_store_seg(&out, R_CS);
+#else
         FT_LA_LD_D_EMIT(&out, la_t4, addr, offset);
         FT_LA_OR_EMIT(&out, la_r21, la_t4, la_zero);
         FT_LA_LD_HU_EMIT(&out, la_t2, addr, offset + 8);
         ft_emit_store_env(&out, la_t2,
                           offsetof(CPUX86State, segs[cs_index].selector),
                           FT_LA_OPCODE_ST_W);
+#endif
         return ft_emit_helper_indirect_exit(&out, tb, code, la_r21, false);
 #endif
     }
@@ -1720,15 +1830,47 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
                          FT_LA_OPCODE_LD_D);
         return ft_emit_helper_indirect_exit(&out, tb, code, la_t0, false);
 #else
+        {
+#ifdef QUICKTRANS_LATU
+        int slot = fields->alu_width / 8;
+        if (slot != 2 && slot != 4 && slot != 8) {
+            return 0;
+        }
+        if (slot == 2) {
+            FT_LA_LD_HU_EMIT(&out, la_t4, ft_gpr(rsp_index), 0);
+        } else if (slot == 4) {
+            FT_LA_LD_WU_EMIT(&out, la_t4, ft_gpr(rsp_index), 0);
+        } else {
+            FT_LA_LD_D_EMIT(&out, la_t4, ft_gpr(rsp_index), 0);
+        }
+#else
+        int slot = 8;
         FT_LA_LD_D_EMIT(&out, la_t4, ft_gpr(rsp_index), 0);
+#endif
         FT_LA_OR_EMIT(&out, la_r21, la_t4, la_zero);
-        FT_LA_LD_HU_EMIT(&out, la_t2, ft_gpr(rsp_index), 8);
+        FT_LA_LD_HU_EMIT(&out, la_t2, ft_gpr(rsp_index), slot);
+#ifdef QUICKTRANS_LATU
+        ft_emit_latu_store_seg(&out, R_CS);
+#else
         ft_emit_store_env(&out, la_t2,
                           offsetof(CPUX86State, segs[cs_index].selector),
                           FT_LA_OPCODE_ST_W);
-        FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index), ft_gpr(rsp_index),
-                          16 + fields->imm);
+#endif
+#ifdef QUICKTRANS_LATU
+        if (!ft_fits_simm12(2 * slot + fields->imm)) {
+            if (!ft_emit_li32(&out, la_t2, 2 * slot + fields->imm)) {
+                return 0;
+            }
+            FT_LA_ADD_D_EMIT(&out, ft_gpr(rsp_index),
+                            ft_gpr(rsp_index), la_t2);
+        } else
+#endif
+        {
+            FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index), ft_gpr(rsp_index),
+                              2 * slot + fields->imm);
+        }
         return ft_emit_helper_indirect_exit(&out, tb, code, la_r21, false);
+        }
 #endif
     case FT_HELPER_UD0:
     case FT_HELPER_UD1:
@@ -1795,14 +1937,21 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
 
 static void ft_emit_save_fprs_to_env(uint32_t **out)
 {
+#ifdef QUICKTRANS_LATU
+    /* Mode 1 still has host MMX aliases: legacy TB exits save them to env. */
+    if (option_soft_fpu == 2) {
+#else
     if (option_soft_fpu) {
+#endif
         return;
     }
 
-    FT_LA_X86MFTOP_EMIT(out, la_t0);
-    ft_emit_store_env(out, la_t0, lsenv_offset_of_top(lsenv),
-                      FT_LA_OPCODE_ST_W);
-    FT_LA_X86CLRTM_EMIT(out);
+    if (!option_soft_fpu) {
+        FT_LA_X86MFTOP_EMIT(out, la_t0);
+        ft_emit_store_env(out, la_t0, lsenv_offset_of_top(lsenv),
+                          FT_LA_OPCODE_ST_W);
+        FT_LA_X86CLRTM_EMIT(out);
+    }
     for (int i = 0; i < 8; i++) {
         ft_emit_store_env(out, ft_mmx(i), lsenv_offset_of_mmx(lsenv, i),
                           FT_LA_OPCODE_FST_D);
@@ -1811,12 +1960,18 @@ static void ft_emit_save_fprs_to_env(uint32_t **out)
 
 static void ft_emit_load_fprs_from_env(uint32_t **out)
 {
+#ifdef QUICKTRANS_LATU
+    if (option_soft_fpu != 2) {
+#else
     if (!option_soft_fpu) {
+#endif
         for (int i = 0; i < 8; i++) {
             ft_emit_load_env(out, ft_mmx(i), lsenv_offset_of_mmx(lsenv, i),
                              FT_LA_OPCODE_FLD_D);
         }
-        ft_emit_x87_top_load(out);
+        if (!option_soft_fpu) {
+            ft_emit_x87_top_load(out);
+        }
     }
 }
 

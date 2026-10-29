@@ -156,9 +156,8 @@ static bool ft_emit_collect_rflags(uint32_t **out)
 {
     FT_LA_X86MFFLAG_EMIT(out, la_t0, 0x3f);
 #ifdef QUICKTRANS_LATU
-    FT_LA_ANDI_EMIT(out, la_t1, la_a6, 0x400);
-    FT_LA_OR_EMIT(out, la_t0, la_t0, la_t1);
-    FT_LA_ORI_EMIT(out, la_t0, la_t0, 0x202);
+    /* Legacy LATU keeps non-arithmetic flags (including ID) in a6. */
+    FT_LA_OR_EMIT(out, la_t0, la_t0, la_a6);
 #else
     ft_emit_load_env(out, la_t1, lsenv_offset_of_eflags(lsenv),
                      FT_LA_OPCODE_LD_WU);

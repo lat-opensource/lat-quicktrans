@@ -91,12 +91,13 @@ static inline FastDecoderFTMatch fd_ft_try_control(FDState *s,
     }
 
     if (!two_byte && (opcode0 == 0xca || opcode0 == 0xcb)) {
-        int id = s->mode ? dt_X86_INS_RETFQ : dt_X86_INS_RETF;
+        int width = s->mode && s->rex_w ? 64 :
+            (s->prefix[2] == dt_X86_PREFIX_OPSIZE ? 16 : 32);
+        int id = width == 64 ? dt_X86_INS_RETFQ : dt_X86_INS_RETF;
 
         fd_ft_init_fields(&decoded->fields, FT_HELPER_RETFQ, s, address,
                           opcode0, 0, id);
-        decoded->fields.alu_width = s->mode ? 64 :
-            (s->prefix[2] == dt_X86_PREFIX_OPSIZE ? 16 : 32);
+        decoded->fields.alu_width = width;
         if (opcode0 == 0xca) {
             if (s->pos + 2 > s->code_size) {
                 return FD_FT_REJECT;
@@ -833,9 +834,11 @@ static inline FastDecoderFTMatch fd_ft_try_control(FDState *s,
         } else if (ext == 4) {
             kind = FT_JMP_RM64;
             id = dt_X86_INS_JMP;
-        } else if (ext == 5 && decoded->fields.modrm_mod != 3 && s->rex_w) {
+        } else if (ext == 5 && decoded->fields.modrm_mod != 3) {
             kind = FT_HELPER_LJMP;
             id = dt_X86_INS_LJMP;
+            decoded->fields.alu_width = s->mode && s->rex_w ? 64 :
+                (s->prefix[2] == dt_X86_PREFIX_OPSIZE ? 16 : 32);
         } else {
             return FD_FT_NO_MATCH;
         }

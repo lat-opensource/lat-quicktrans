@@ -1037,7 +1037,11 @@ static bool fast_template_emit_constraints_ok(const FastTemplateFields *fields)
         return !ft_rex_w(fields) && fields->reg >= 0 && fields->reg < GPR_NUM;
     case FT_POP_R16:
         return !ft_rex_w(fields) && fields->reg >= 0 &&
-               fields->reg < GPR_NUM && fields->reg != rsp_index;
+               fields->reg < GPR_NUM
+#ifndef QUICKTRANS_LATU
+               && fields->reg != rsp_index
+#endif
+               ;
     case FT_INC_RM32:
     case FT_INC_RM16:
         return !ft_rex_w(fields) && fields->modrm_reg == 0;

@@ -3208,6 +3208,23 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
     }
     case FT_RET_IMM16:
 #if defined(QUICKTRANS_LATU) && !defined(QUICKTRANS_LATU_MINIMAL_HOST)
+        /* RET's unsigned imm16 plus the return address may exceed simm12. */
+        if (!ft_fits_simm12(8 + fields->imm)) {
+            int target = option_jr_ra_stack ? la_t1 : la_r21;
+
+            FT_LA_LD_D_EMIT(&out, target, ft_gpr(rsp_index), 0);
+            if (!ft_emit_li32(&out, la_t2, 8 + fields->imm)) {
+                return 0;
+            }
+            FT_LA_ADD_D_EMIT(&out, ft_gpr(rsp_index),
+                            ft_gpr(rsp_index), la_t2);
+            if (option_jr_ra_stack) {
+                FT_LA_JIRL_EMIT(&out, la_zero, target, 0);
+                return out - code;
+            }
+            ft_prepare_ret_indirect_goto(tb, code);
+            return (out - code) + latx_indirect_goto_macro_emit_for_fast(out);
+        }
         if (option_jr_ra_stack) {
             FT_LA_LD_D_EMIT(&out, la_t1, ft_gpr(rsp_index), 0);
             FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index),

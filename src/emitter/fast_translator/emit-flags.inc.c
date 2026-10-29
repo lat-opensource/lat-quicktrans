@@ -128,6 +128,31 @@ static int ft_emit_flags_template(const FastTemplateFields *fields, TranslationB
         } else {
             FT_LA_LD_D_EMIT(&out, la_t0, ft_gpr(rsp_index), 0);
         }
+#ifdef QUICKTRANS_LATU
+        {
+            FastBranchLabel no_tf = { 0 };
+            FastBranchFixup no_tf_fixup;
+
+            /* Match legacy POPF diagnostics, even when flags are dead. */
+            FT_LA_ANDI_EMIT(&out, la_t1, la_t0, TF_MASK);
+            ft_emit_branch_placeholder(&out, &no_tf_fixup, FT_BRANCH_BEQ,
+                                       la_t1, la_zero, &no_tf);
+            ft_emit_helper_prologue(&out);
+            ft_emit_cpu_env_ptr(&out, la_a0);
+            ft_emit_host_call(&out, (void *)helper_eflagtf, 1u << 0);
+            ft_emit_helper_epilogue(&out);
+            /* The C call clobbers t0; recover the pending POPF value. */
+            if (fields->alu_width == 16) {
+                FT_LA_LD_HU_EMIT(&out, la_t0, ft_gpr(rsp_index), 0);
+            } else if (fields->alu_width == 32) {
+                FT_LA_LD_WU_EMIT(&out, la_t0, ft_gpr(rsp_index), 0);
+            } else {
+                FT_LA_LD_D_EMIT(&out, la_t0, ft_gpr(rsp_index), 0);
+            }
+            ft_bind_branch_label(&no_tf, out);
+            ft_resolve_branch_fixup(&no_tf_fixup);
+        }
+#endif
         if (!fields->skip_flags && !ft_emit_apply_popfq(&out, tb)) {
             return 0;
         }

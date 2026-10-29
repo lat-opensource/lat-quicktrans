@@ -2788,9 +2788,41 @@ static void ft_emit_cvt_fp2i_fix_invalid(uint32_t **out, int temp, int src,
 
     FT_LA_VLDI_EMIT(out, invalid, 0x1380);
     if (is_double) {
-        ft_emit_li64(out, la_t0,
-                     trunc ? 0x41E0000000000000ULL :
-                             0x41dfffffffe00000ULL);
+#ifdef QUICKTRANS_LATU
+        if (!trunc) {
+            FastBranchLabel down_zero = { 0 }, upward = { 0 }, ready = { 0 };
+            FastBranchFixup down_fix, up_fix, nearest_fix, upward_fix;
+
+            /* Match legacy's rounding-dependent positive overflow bound. */
+            ft_emit_load_env(out, la_t1, lsenv_offset_of_mxcsr(lsenv),
+                             FT_LA_OPCODE_LD_WU);
+            FT_LA_BSTRPICK_D_EMIT(out, la_t2, la_t1, 13, 13);
+            ft_emit_branch_placeholder(out, &down_fix, FT_BRANCH_BNE,
+                                       la_t2, la_zero, &down_zero);
+            FT_LA_BSTRPICK_D_EMIT(out, la_t2, la_t1, 14, 14);
+            ft_emit_branch_placeholder(out, &up_fix, FT_BRANCH_BNE,
+                                       la_t2, la_zero, &upward);
+            ft_emit_li64(out, la_t0, 0x41dfffffffe00000ULL);
+            ft_emit_branch_placeholder(out, &nearest_fix, FT_BRANCH_BEQ,
+                                       la_zero, la_zero, &ready);
+            ft_bind_branch_label(&upward, *out);
+            ft_emit_li64(out, la_t0, 0x41dfffffffc00001ULL);
+            ft_emit_branch_placeholder(out, &upward_fix, FT_BRANCH_BEQ,
+                                       la_zero, la_zero, &ready);
+            ft_bind_branch_label(&down_zero, *out);
+            ft_emit_li64(out, la_t0, 0x41e0000000000000ULL);
+            ft_bind_branch_label(&ready, *out);
+            ft_resolve_branch_fixup(&down_fix);
+            ft_resolve_branch_fixup(&up_fix);
+            ft_resolve_branch_fixup(&nearest_fix);
+            ft_resolve_branch_fixup(&upward_fix);
+        } else
+#endif
+        {
+            ft_emit_li64(out, la_t0,
+                         trunc ? 0x41E0000000000000ULL :
+                                 0x41dfffffffe00000ULL);
+        }
         FT_LA_VREPLGR2VR_D_EMIT(out, overflow, la_t0);
         FT_LA_VFCMP_COND_D_EMIT(out, mask, overflow, src, 0x0e);
         FT_LA_VSHUF4I_W_EMIT(out, mask, mask, 0x88);
@@ -2927,6 +2959,12 @@ static int ft_emit_cvtpi2ps_template(const FastTemplateFields *fields, Translati
         src = ft_vscratch;
     }
 
+#ifdef QUICKTRANS_LATU
+    /* Only the low two integers belong to the MMX/m64 source. Replicate
+     * them so stale upper host lanes cannot raise extra exceptions. */
+    FT_LA_VREPLVEI_D_EMIT(&out, ft_vscratch, src, 0);
+    src = ft_vscratch;
+#endif
     FT_LA_VFFINT_S_W_EMIT(&out, ft_vscratch, src);
     ft_emit_lats_simd_fpe_check(&out, tb, pc);
     FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_vscratch, 0);

@@ -256,6 +256,10 @@ static int ft_emit_rdrand_template(const FastTemplateFields *fields, Translation
     return (out - code);
 }
 
+#ifdef QUICKTRANS_LATU
+static void ft_emit_latu_store_seg(uint32_t **out, int seg);
+#endif
+
 static int ft_emit_mov_segment_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -304,8 +308,13 @@ static int ft_emit_mov_segment_template(const FastTemplateFields *fields, Transl
         if (!ft_emit_load_rm16(&out, fields, pc, &src)) {
             return 0;
         }
+#ifdef QUICKTRANS_LATU
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t2, src, 15, 0);
+        ft_emit_latu_store_seg(&out, seg);
+#else
         FT_LA_BSTRPICK_D_EMIT(&out, la_t0, src, 15, 0);
         ft_emit_store_env(&out, la_t0, selector_offset, FT_LA_OPCODE_ST_W);
+#endif
         return (out - code);
     }
 

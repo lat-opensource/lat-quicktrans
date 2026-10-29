@@ -49,6 +49,58 @@ static void ft_helper_popa(CPUArchState *env, int width)
 }
 #endif
 
+#ifdef QUICKTRANS_LATU
+static bool ft_emit_latu_pop_addr(uint32_t **out,
+                                  const FastTemplateFields *fields,
+                                  target_ulong pc, int bytes,
+                                  int *addr, int *offset)
+{
+    int base;
+    bool uses_sp = ft_base_from_modrm_sib_with_index(fields, &base) &&
+                   base == rsp_index;
+    bool segmented_rip = !fields->addr32 && fields->segment >= 0 &&
+                         fields->modrm_mod == 0 && fields->modrm_rm == 5;
+
+    if ((fields->addr32 && uses_sp) || segmented_rip) {
+        FastTemplateFields unsegmented = *fields;
+        int tmp = ft_addr_scratch0();
+        int seg = ft_addr_scratch1();
+        unsegmented.segment = -1;
+        if (!ft_emit_rip_or_mem_addr(out, &unsegmented, pc, addr)) {
+            return false;
+        }
+        /* Address-size wrapping precedes adding the segment base. */
+        if (fields->addr32) {
+            FT_LA_ADDI_D_EMIT(out, tmp, *addr, bytes);
+            FT_LA_BSTRPICK_D_EMIT(out, tmp, tmp, 31, 0);
+            *addr = tmp;
+        }
+        if (fields->segment >= 0) {
+            ft_emit_load_env(out, seg,
+                             offsetof(CPUX86State, segs[fields->segment].base),
+                             FT_LA_OPCODE_LD_D);
+            FT_LA_ADD_D_EMIT(out, tmp, *addr, seg);
+            *addr = tmp;
+        }
+        *offset = 0;
+        return true;
+    }
+    if (!ft_emit_rip_or_mem_addr(out, fields, pc, addr)) {
+        return false;
+    }
+    *offset = ft_mem_access_offset(fields, *addr) + (uses_sp ? bytes : 0);
+    return true;
+}
+
+static void ft_emit_latu_pop_sp(uint32_t **out)
+{
+    /* Read from old RSP, increment the full pointer, then replace low 16 bits. */
+    FT_LA_LD_HU_EMIT(out, la_t0, ft_gpr(rsp_index), 0);
+    FT_LA_ADDI_D_EMIT(out, ft_gpr(rsp_index), ft_gpr(rsp_index), 2);
+    FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rsp_index), la_t0, 15, 0);
+}
+#endif
+
 static int ft_emit_push_pop_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -153,6 +205,12 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
         }
         break;
     case FT_POP_R16:
+#ifdef QUICKTRANS_LATU
+        if (fields->reg == rsp_index) {
+            ft_emit_latu_pop_sp(&out);
+            break;
+        }
+#endif
         if (fields->reg < 0 || fields->reg >= GPR_NUM ||
             fields->reg == rsp_index) {
             return 0;
@@ -215,6 +273,12 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
         if (fields->modrm_mod == 3) {
             int dst = ft_modrm_rm_index(fields);
 
+#ifdef QUICKTRANS_LATU
+            if (dst == rsp_index && width != 32) {
+                FT_LA_LD_D_EMIT(&out, ft_gpr(rsp_index), ft_gpr(rsp_index), 0);
+                return out - code;
+            }
+#endif
             if (dst >= GPR_NUM || dst == rsp_index) {
                 return 0;
             }
@@ -228,18 +292,26 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
             return (out - code);
         }
 
+#ifdef QUICKTRANS_LATU
+        int pop_offset;
+        if (!ft_emit_latu_pop_addr(&out, fields, pc, bytes, &addr, &pop_offset)) {
+#else
         if (!ft_emit_mem_addr(&out, fields, &addr)) {
+#endif
             return 0;
         }
         {
+#ifdef QUICKTRANS_LATU
+            int offset = pop_offset;
+#else
             int base;
             int offset = ft_mem_access_offset(fields, addr);
-
             if (fields->segment < 0 &&
                 ft_base_from_modrm_sib(fields, &base) &&
                 base == rsp_index) {
                 offset += bytes;
             }
+#endif
             if (!ft_fits_simm12(offset)) {
                 if (!ft_emit_li32(&out, la_t3, (uint32_t)offset)) {
                     return 0;
@@ -283,6 +355,12 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
         if (fields->modrm_mod == 3) {
             int dst = ft_modrm_rm_index(fields);
 
+#ifdef QUICKTRANS_LATU
+            if (dst == rsp_index) {
+                ft_emit_latu_pop_sp(&out);
+                return out - code;
+            }
+#endif
             if (dst >= GPR_NUM || dst == rsp_index) {
                 return 0;
             }
@@ -293,18 +371,26 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
             return (out - code);
         }
 
+#ifdef QUICKTRANS_LATU
+        int pop_offset;
+        if (!ft_emit_latu_pop_addr(&out, fields, pc, 2, &addr, &pop_offset)) {
+#else
         if (!ft_emit_mem_addr(&out, fields, &addr)) {
+#endif
             return 0;
         }
         {
+#ifdef QUICKTRANS_LATU
+            int offset = pop_offset;
+#else
             int base;
             int offset = ft_mem_access_offset(fields, addr);
-
             if (fields->segment < 0 &&
                 ft_base_from_modrm_sib(fields, &base) &&
                 base == rsp_index) {
                 offset += 2;
             }
+#endif
             if (!ft_fits_simm12(offset)) {
                 if (!ft_emit_li32(&out, la_t3, (uint32_t)offset)) {
                     return 0;

@@ -264,6 +264,14 @@ static int ft_emit_raise_syscall(uint32_t **out, TranslationBlock *tb,
     ft_emit_jump_epilogue(out, ft_context_switch_ret0_target(), la_t0);
 #else
     ft_emit_save_gprs_to_env(out);
+#ifdef QUICKTRANS_LATU
+    /* The linux-user loop restores these from env after the syscall. */
+    FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 0);
+    ft_emit_store_env(out, la_t0, lsenv_offset_of_fcsr(lsenv),
+                      FT_LA_OPCODE_ST_W);
+    ft_emit_save_fprs_to_env(out);
+    ft_emit_save_xmms_to_env(out);
+#endif
     ft_emit_save_condition_flags(out);
 
     ft_emit_li64(out, la_t0, pc);

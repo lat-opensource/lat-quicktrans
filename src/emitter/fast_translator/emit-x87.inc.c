@@ -146,7 +146,10 @@ static int ft_emit_x87_state_template(const FastTemplateFields *fields, Translat
         ft_emit_load_env(&out, la_t0, fpus_offset, FT_LA_OPCODE_LD_HU);
         FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 7, 0);
         FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 15, 15);
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#ifdef QUICKTRANS_LATU
+        /* Soft x87 exceptions live in env; FCSR flags belong to SIMD here. */
+        if (!option_soft_fpu)
+#elif defined(CONFIG_SOFTMMU)
         if (!(option_soft_fpu && option_soft_fpu_fast))
 #endif
         {
@@ -392,6 +395,26 @@ static bool ft_emit_x87_reload_control_status_fcsr(uint32_t **out)
     FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t1);
     return true;
 }
+
+#ifdef QUICKTRANS_LATU
+/* Legacy FDIV variants make IE/ZE sticky in the x87 state immediately.
+ * A later LDMXCSR may clear the shared host FCSR before FNSTSW reads it. */
+static void ft_emit_latu_x87_div_status(uint32_t **out)
+{
+    ft_emit_load_env(out, la_t0, lsenv_offset_of_status_word(lsenv),
+                     FT_LA_OPCODE_LD_HU);
+    FT_LA_MOVFCSR2GR_EMIT(out, la_t1, 0);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t2, la_t1, FCSR_OFF_CAUSE_Z,
+                         FCSR_OFF_CAUSE_Z);
+    FT_LA_SLLI_D_EMIT(out, la_t2, la_t2, X87_SR_OFF_ZE);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t1, FCSR_OFF_CAUSE_V,
+                         FCSR_OFF_CAUSE_V);
+    FT_LA_OR_EMIT(out, la_t0, la_t0, la_t2);
+    FT_LA_OR_EMIT(out, la_t0, la_t0, la_t1);
+    ft_emit_store_env(out, la_t0, lsenv_offset_of_status_word(lsenv),
+                      FT_LA_OPCODE_ST_H);
+}
+#endif
 
 static void ft_emit_x87_status_top(uint32_t **out)
 {
@@ -1969,7 +1992,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         } else {
             return 0;
         }
-        ft_emit_x87_status_top(&out);
+#ifdef QUICKTRANS_LATU
+        /* Soft helpers own fpstt/fpus; the hardware TOP is unrelated. */
+        if (!option_soft_fpu)
+#endif
+        {
+            ft_emit_x87_status_top(&out);
+        }
         break;
     case FT_X87_FTST:
     {
@@ -2264,6 +2293,14 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             ft_emit_x87_call_unary_double(&out,
                                           fields->kind == FT_X87_FSIN ?
                                           (void *)sin : (void *)cos);
+#ifdef QUICKTRANS_LATU
+            /* Legacy hard-FPU FSIN/FCOS clear C2 after the math call. */
+            ft_emit_load_env(&out, la_t0, lsenv_offset_of_status_word(lsenv),
+                             FT_LA_OPCODE_LD_HU);
+            FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_zero, 10, 10);
+            ft_emit_store_env(&out, la_t0, lsenv_offset_of_status_word(lsenv),
+                              FT_LA_OPCODE_ST_H);
+#endif
         }
         break;
     case FT_X87_FSINCOS:
@@ -3035,6 +3072,11 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
                 return 0;
             }
         }
+#ifdef QUICKTRANS_LATU
+        if (fields->id == dt_X86_INS_FDIV || fields->id == dt_X86_INS_FDIVR) {
+            ft_emit_latu_x87_div_status(&out);
+        }
+#endif
         break;
     }
     case FT_X87_BIN_M32:
@@ -3088,6 +3130,11 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         default:
             return 0;
         }
+#ifdef QUICKTRANS_LATU
+        if (op_ext == 6 || op_ext == 7) {
+            ft_emit_latu_x87_div_status(&out);
+        }
+#endif
         break;
     }
     case FT_X87_FCOM_M64:
@@ -3242,6 +3289,11 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         default:
             return 0;
         }
+#ifdef QUICKTRANS_LATU
+        if (fields->kind == FT_X87_FDIVP || fields->kind == FT_X87_FDIVRP) {
+            ft_emit_latu_x87_div_status(&out);
+        }
+#endif
         ft_emit_x87_pop(&out);
         break;
     }

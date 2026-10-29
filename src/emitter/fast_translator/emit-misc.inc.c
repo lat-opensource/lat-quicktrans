@@ -41,6 +41,94 @@ static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
 #endif
 }
 
+#ifdef QUICKTRANS_LATU
+static int ft_emit_latu_bound(const FastTemplateFields *fields,
+                              target_ulong pc, uint32_t *code)
+{
+    uint32_t *out = code;
+    int addr;
+    int source = ft_modrm_reg_index(fields);
+    bool narrow = fields->prefix2 == dt_X86_PREFIX_OPSIZE;
+    FastBranchLabel fault = {0}, done = {0};
+    FastBranchFixup above, valid;
+    if (fields->modrm_mod == 3 || source >= GPR_NUM ||
+        !ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+        return 0;
+    }
+    int value = ft_scratch_avoid3(addr, -1, -1);
+    int low = ft_scratch_avoid3(addr, value, -1);
+    int high = ft_scratch_avoid3(addr, value, low);
+    int offset = ft_mem_access_offset(fields, addr);
+    /* Form the base once so the second load cannot overflow imm12. */
+    if (offset) {
+        FT_LA_ADDI_D_EMIT(&out, high, addr, offset);
+        addr = high;
+        high = ft_scratch_avoid3(addr, value, low);
+    }
+    if (narrow) {
+        FT_LA_EXT_W_H_EMIT(&out, value, ft_gpr(source));
+        FT_LA_LD_H_EMIT(&out, low, addr, 0);
+        FT_LA_LD_H_EMIT(&out, high, addr, 2);
+    } else {
+        FT_LA_SLLI_D_EMIT(&out, value, ft_gpr(source), 32);
+        FT_LA_SRAI_D_EMIT(&out, value, value, 32);
+        FT_LA_LD_W_EMIT(&out, low, addr, 0);
+        FT_LA_LD_W_EMIT(&out, high, addr, 4);
+    }
+    ft_emit_branch_placeholder(&out, &above, FT_BRANCH_BLT, high, value, &fault);
+    ft_emit_branch_placeholder(&out, &valid, FT_BRANCH_BGE, value, low, &done);
+    ft_bind_branch_label(&fault, out);
+    ft_resolve_branch_fixup(&above);
+    ft_emit_raise_exception(&out, pc, EXCP05_BOUND);
+    ft_bind_branch_label(&done, out);
+    ft_resolve_branch_fixup(&valid);
+    return out - code;
+}
+#endif
+
+#ifdef QUICKTRANS_LATU
+static int ft_emit_latu_wait(uint32_t *code)
+{
+    uint32_t *out = code;
+    /* Match legacy WAIT's implemented OE/UE/PE cases, including the
+     * host FCSR enables. Legacy IE/ZE handling remains unimplemented. */
+    static const uint32_t left[] = { 0x7f7fffff, 0x00800000, 0x40000000 };
+    static const uint32_t right[] = { 0x749dc5ae, 0x40400000, 0x40400000 };
+    FastBranchLabel done = { 0 };
+    FastBranchFixup done_fixup;
+
+    ft_emit_load_env(&out, la_t0, lsenv_offset_of_control_word(lsenv),
+                     FT_LA_OPCODE_LD_HU);
+    ft_emit_load_env(&out, la_t1, lsenv_offset_of_status_word(lsenv),
+                     FT_LA_OPCODE_LD_HU);
+    FT_LA_ANDN_EMIT(&out, la_t1, la_t1, la_t0);
+    FT_LA_ANDI_EMIT(&out, la_t1, la_t1, 0x38);
+    ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ,
+                               la_t1, la_zero, &done);
+    for (int i = 0; i < 3; i++) {
+        FastBranchLabel next = { 0 };
+        FastBranchFixup next_fixup;
+        FT_LA_ANDI_EMIT(&out, la_t0, la_t1, 1 << (i + 3));
+        ft_emit_branch_placeholder(&out, &next_fixup, FT_BRANCH_BEQ,
+                                   la_t0, la_zero, &next);
+        ft_emit_li32(&out, la_t0, left[i]);
+        FT_LA_MOVGR2FR_W_EMIT(&out, ft_vscratch, la_t0);
+        ft_emit_li32(&out, la_t0, right[i]);
+        FT_LA_MOVGR2FR_W_EMIT(&out, ft_vscratch + 1, la_t0);
+        if (i == 0) {
+            FT_LA_FADD_S_EMIT(&out, ft_vscratch, ft_vscratch, ft_vscratch + 1);
+        } else {
+            FT_LA_FDIV_S_EMIT(&out, ft_vscratch, ft_vscratch, ft_vscratch + 1);
+        }
+        ft_bind_branch_label(&next, out);
+        ft_resolve_branch_fixup(&next_fixup);
+    }
+    ft_bind_branch_label(&done, out);
+    ft_resolve_branch_fixup(&done_fixup);
+    return out - code;
+}
+#endif
+
 static int ft_emit_nop_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -49,6 +137,35 @@ static int ft_emit_nop_template(const FastTemplateFields *fields, TranslationBlo
     (void)pc;
 
 #ifdef QUICKTRANS_LATU
+    if (fields->kind == FT_WAIT && !option_soft_fpu) {
+        return ft_emit_latu_wait(code);
+    }
+    if (option_soft_fpu && (fields->kind == FT_WAIT ||
+                            fields->id == dt_X86_INS_FNOP)) {
+        FastBranchLabel done = { 0 };
+        FastBranchFixup done_fixup;
+
+        /* Legacy's soft WAIT/FNOP call helper_fwait, which checks ES.
+         * Keep the ordinary no-pending-exception path out of the helper. */
+        ft_emit_load_env(&out, la_t0, lsenv_offset_of_status_word(lsenv),
+                         FT_LA_OPCODE_LD_HU);
+        FT_LA_ANDI_EMIT(&out, la_t0, la_t0, 1u << 7); /* x87 ES */
+        ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ,
+                                   la_t0, la_zero, &done);
+        ft_emit_helper_prologue(&out);
+        ft_emit_li64(&out, la_t0, pc);
+        ft_emit_store_env(&out, la_t0, lsenv_offset_of_eip(lsenv),
+                          FT_LA_OPCODE_ST_D);
+        ft_emit_cpu_env_ptr(&out, la_a0);
+        ft_emit_host_call(&out, (void *)helper_fwait, 1u << 0);
+        ft_emit_helper_epilogue(&out);
+        ft_bind_branch_label(&done, out);
+        ft_resolve_branch_fixup(&done_fixup);
+        return out - code;
+    }
+    if (fields->id == dt_X86_INS_BOUND) {
+        return ft_emit_latu_bound(fields, pc, code);
+    }
     /* Legacy LATU rejects FSETPM in both hard- and soft-FPU modes. */
     if (fields->id == dt_X86_INS_FSETPM) {
         return 0;

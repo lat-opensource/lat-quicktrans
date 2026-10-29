@@ -620,7 +620,11 @@ static void ft_x87_helper_fcmov(CPUX86State *env, int st_index, int mode)
     if (!ft_x87_check_stack(env, 1u | (1u << st_index), 1, 0, 0)) {
         return;
     }
+    /* LATU legacy and native retain C1 when both operands are valid.
+     * The stack-fault helper above still clears C1 on underflow. */
+#ifndef QUICKTRANS_LATU
     env->fpus &= ~(1 << 9);
+#endif
 #ifdef QUICKTRANS_LATU
     unsigned int flags = env->eflags;
 #else
@@ -815,16 +819,39 @@ static void ft_x87_hard_fpatan(CPUX86State *env)
 
 static void ft_x87_hard_fprem_common(CPUX86State *env, bool nearest)
 {
+    if (ft_x87_st1_empty(env)) {
+        ft_x87_hard_set_st0_qnan(env);
+        return;
+    }
+
+#ifdef QUICKTRANS_LATU
+    /* Match legacy's remainder/quotient and exception policy. Convert only
+     * the two live operands, not all eight x87 slots. */
+    int top = env->fpstt;
+    int next = (top + 1) & 7;
+    floatx80 saved_next = env->fpregs[next].d;
+    float_status status = env->fp_status;
+
+    env->fpregs[top].d = float64_to_floatx80(
+        (float64)env->fpregs[top].d.low, &status);
+    env->fpregs[next].d = float64_to_floatx80(
+        (float64)saved_next.low, &status);
+    if (nearest) {
+        helper_fprem1(env);
+    } else {
+        helper_fprem(env);
+    }
+    status = env->fp_status;
+    env->fpregs[top].d.low =
+        (uint64_t)floatx80_to_float64(env->fpregs[top].d, &status);
+    env->fpregs[top].d.high = 0;
+    env->fpregs[next].d = saved_next;
+#else
     double dividend;
     double divisor;
     double result;
     int quotient = 0;
     int expdiff;
-
-    if (ft_x87_st1_empty(env)) {
-        ft_x87_hard_set_st0_qnan(env);
-        return;
-    }
 
     dividend = ft_x87_hard_get_st(env, 0);
     divisor = ft_x87_hard_get_st(env, 1);
@@ -851,6 +878,7 @@ static void ft_x87_hard_fprem_common(CPUX86State *env, bool nearest)
         ft_x87_hard_set_quotient_flags(env, quotient);
     }
     ft_x87_hard_set_st(env, 0, result);
+#endif
 }
 
 static void ft_x87_hard_fprem(CPUX86State *env)
