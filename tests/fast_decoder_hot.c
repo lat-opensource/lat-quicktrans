@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "fast_decoder.h"
 
@@ -3104,8 +3105,107 @@ static void test_sse_partial_displacements(void)
     }
 }
 
+/* Reused output must publish complete status on both success and rejection. */
+static void check_ft_status(const FastDecodedFT *decoded, bool matched,
+                            bool terminal)
+{
+    CHECK((decoded->tmpl != NULL) == matched, "wrong reused template status");
+    CHECK(decoded->fields_valid == matched, "wrong reused fields_valid");
+    CHECK(decoded->is_tb_ending == terminal, "wrong reused TB-ending status");
+    CHECK(decoded->direct_fields == matched, "wrong reused direct_fields");
+    CHECK(decoded->field_source == (matched ? FT_FIELD_SOURCE_SPECIALIZED :
+                                            FT_FIELD_SOURCE_NONE),
+          "wrong reused field_source");
+}
+
+static void test_ft_reused_status(void)
+{
+    static const struct {
+        uint8_t code[8];
+        size_t size;
+        bool terminal;
+    } success[] = {
+        {{0x89,0xd8},2,false},            /* hot GPR, both guest modes */
+        {{0x75,0xfe},2,true},            /* hot control */
+        {{0x83,0xc0,0x01},3,false},      /* general GPR */
+        {{0x0f,0x01,0xd1},3,true},       /* control: XSETBV */
+        {{0xd9,0xe8},2,false},           /* x87: FLD1 */
+        {{0x66,0x0f,0xef,0xc0},4,false}, /* SSE: PXOR */
+        {{0x66,0x0f,0x38,0x0b,0xc0},5,false}, /* three-byte PMULHRSW */
+        {{0xc4,0xe2,0x78,0xf3,0xc9},5,false}, /* VEX BLSR */
+    };
+    static const struct {
+        uint8_t code[8];
+        size_t size;
+        bool mode64_only;
+    } reject[] = {
+        {{0},0}, {{0x48},1,true}, {{0x48,0x8b},2,true},
+        {{0x83},1}, {{0x83,0xc0},2}, {{0x0f,0x85,0},3},
+        {{0xeb},1}, {{0xc2,0x08},2}, {{0x62},1},
+        {{0x66,0x0f,0x01,0xd1},4}, /* illegal XSETBV prefix */
+        {{0x48,0x0f,0x01,0xd1},4,true},
+        {{0x66,0x0f,0x38},3}, {{0xc4,0xe2,0x78},3},
+    };
+    const unsigned char poison[] = {0xa5, 0x5a};
+
+    for (int mode = 0; mode <= 1; ++mode) {
+        for (size_t p = 0; p < sizeof(poison); ++p) {
+            for (size_t i = 0; i < sizeof(success)/sizeof(success[0]); ++i) {
+                if (i == 7 && !mode) {
+                    continue; /* VEX BLSR fixture is supported in 64-bit mode. */
+                }
+                FastDecodedFT clean = {0}, reused;
+                int matched = fast_decoder_get_ft(success[i].code,
+                    success[i].size, 0x1000, &clean, mode);
+                if (!matched) {
+                    fprintf(stderr, "status fixture %zu mode %d rejected\n", i, mode);
+                }
+                CHECK(matched, "status success fixture must decode");
+                check_ft_status(&clean, true, success[i].terminal);
+                memset(&reused, poison[p], sizeof(reused));
+                for (size_t j = 0; j < sizeof(reject)/sizeof(reject[0]); ++j) {
+                    /* 0x48 is DEC EAX, not a REX prefix, in 32-bit mode. */
+                    if (reject[j].mode64_only && !mode) {
+                        continue;
+                    }
+                    matched = fast_decoder_get_ft(success[i].code,
+                        success[i].size, 0x1000, &reused, mode);
+                    CHECK(matched, "poisoned/reused success must decode");
+                    check_ft_status(&reused, true, success[i].terminal);
+                    CHECK(reused.tmpl == clean.tmpl &&
+                          reused.fields.kind == clean.fields.kind &&
+                          reused.fields.id == clean.fields.id &&
+                          reused.fields.size == clean.fields.size &&
+                          reused.fields.address == clean.fields.address,
+                          "reusing output changed successful decode");
+                    matched = fast_decoder_get_ft(reject[j].code,
+                        reject[j].size, 0x1000, &reused, mode);
+                    CHECK(!matched, "reused invalid input must reject");
+                    check_ft_status(&reused, false, false);
+                }
+                matched = fast_decoder_get_ft(success[i].code,
+                    success[i].size, 0x1000, &reused, mode);
+                CHECK(matched, "success after final failure must decode");
+                check_ft_status(&reused, true, success[i].terminal);
+            }
+            for (size_t j = 0; j < sizeof(reject)/sizeof(reject[0]); ++j) {
+                /* 0x48 is DEC EAX, not a REX prefix, in 32-bit mode. */
+                if (reject[j].mode64_only && !mode) {
+                    continue;
+                }
+                FastDecodedFT decoded;
+                memset(&decoded, poison[p], sizeof(decoded));
+                CHECK(!fast_decoder_get_ft(reject[j].code, reject[j].size,
+                      0x1000, &decoded, mode), "poisoned invalid input must reject");
+                check_ft_status(&decoded, false, false);
+            }
+        }
+    }
+}
+
 int main(void)
 {
+    test_ft_reused_status();
     test_default_32bit_address_size();
     test_sse_partial_displacements();
     test_hot_gpr();
