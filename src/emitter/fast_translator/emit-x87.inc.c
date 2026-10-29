@@ -3957,6 +3957,14 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             FT_LA_ST_D_EMIT(&out, la_a1, la_sp, 0);
             ft_emit_host_stack_end(&out);
             ft_emit_helper_prologue(&out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+            if (option_soft_fpu == 2) {
+                FT_LA_ORI_EMIT(&out, la_t0, la_zero, 1);
+                ft_emit_store_env(&out, la_t0,
+                                 offsetof(CPUX86State, qt_helper_env_saved),
+                                 FT_LA_OPCODE_ST_B);
+            }
+#endif
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, (void *)ft_x87_helper_fist, 1u << 0);
             ft_emit_host_stack_begin(&out);
@@ -3965,6 +3973,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             ft_emit_host_stack_end(&out);
             FT_LA_ST_H_EMIT(&out, la_a0, la_a1, 0);
             ft_emit_x87_helper_epilogue(&out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+            if (option_soft_fpu == 2) {
+                ft_emit_store_env(&out, la_zero,
+                                 offsetof(CPUX86State, qt_helper_env_saved),
+                                 FT_LA_OPCODE_ST_B);
+            }
+#endif
             break;
         }
         if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
@@ -3997,6 +4012,14 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             FT_LA_ST_D_EMIT(&out, la_a1, la_sp, 0);
             ft_emit_host_stack_end(&out);
             ft_emit_helper_prologue(&out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+            if (option_soft_fpu == 2) {
+                FT_LA_ORI_EMIT(&out, la_t0, la_zero, 1);
+                ft_emit_store_env(&out, la_t0,
+                                 offsetof(CPUX86State, qt_helper_env_saved),
+                                 FT_LA_OPCODE_ST_B);
+            }
+#endif
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, (void *)ft_x87_helper_fistl, 1u << 0);
             ft_emit_host_stack_begin(&out);
@@ -4005,6 +4028,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             ft_emit_host_stack_end(&out);
             FT_LA_ST_W_EMIT(&out, la_a0, la_a1, 0);
             ft_emit_x87_helper_epilogue(&out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+            if (option_soft_fpu == 2) {
+                ft_emit_store_env(&out, la_zero,
+                                 offsetof(CPUX86State, qt_helper_env_saved),
+                                 FT_LA_OPCODE_ST_B);
+            }
+#endif
             break;
         }
         if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
@@ -4247,6 +4277,17 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             FT_LA_ST_D_EMIT(&out, la_a1, la_sp, 0);
             ft_emit_host_stack_end(&out);
             ft_emit_helper_prologue(&out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+            if (!is_pop && option_soft_fpu == 2) {
+                /* The following guest store can fault while host registers
+                 * still contain C helper temporaries. Preserve the complete
+                 * env snapshot through that store and signal recovery. */
+                FT_LA_ORI_EMIT(&out, la_t0, la_zero, 1);
+                ft_emit_store_env(&out, la_t0,
+                                 offsetof(CPUX86State, qt_helper_env_saved),
+                                 FT_LA_OPCODE_ST_B);
+            }
+#endif
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, is_m32 ? (void *)ft_x87_helper_fsts :
                               (void *)ft_x87_helper_fstl, 1u << 0);
@@ -4261,6 +4302,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
                 ft_emit_host_call(&out, (void *)helper_fpop, 1u << 0);
             }
             ft_emit_x87_helper_epilogue(&out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+            if (!is_pop && option_soft_fpu == 2) {
+                ft_emit_store_env(&out, la_zero,
+                                 offsetof(CPUX86State, qt_helper_env_saved),
+                                 FT_LA_OPCODE_ST_B);
+            }
+#endif
             break;
         }
 

@@ -192,9 +192,32 @@ static int ft_emit_rcl_rcr_template(const FastTemplateFields *fields, Translatio
     }
     FT_LA_X86MFFLAG_EMIT(&out, la_t1, CF_USEDEF_BIT);
     FT_LA_ANDI_EMIT(&out, la_t1, la_t1, 1);
-    FT_FLAG2(x86_op, src, count_reg);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (!is_mem)
+#endif
+        FT_FLAG2(x86_op, src, count_reg);
 
-    if (width == 64) {
+    if (width == 64 && !is_cl) {
+        int count = fields->kind == FT_SHIFT_RM_ONE ? 1 : fields->imm & 63;
+        /* A nonzero immediate count is already known while translating. */
+        if (is_rcl) {
+            FT_LA_SLLI_D_EMIT(&out, result, la_t2, count);
+            FT_LA_SLLI_D_EMIT(&out, la_t1, la_t1, count - 1);
+            FT_LA_OR_EMIT(&out, result, result, la_t1);
+            if (count != 1) {
+                FT_LA_SRLI_D_EMIT(&out, la_t4, la_t2, 65 - count);
+                FT_LA_OR_EMIT(&out, result, result, la_t4);
+            }
+        } else {
+            FT_LA_SRLI_D_EMIT(&out, result, la_t2, count);
+            FT_LA_SLLI_D_EMIT(&out, la_t1, la_t1, 64 - count);
+            FT_LA_OR_EMIT(&out, result, result, la_t1);
+            if (count != 1) {
+                FT_LA_SLLI_D_EMIT(&out, la_t4, la_t2, 65 - count);
+                FT_LA_OR_EMIT(&out, result, result, la_t4);
+            }
+        }
+    } else if (width == 64) {
         if (is_rcl) {
             FT_LA_SLL_D_EMIT(&out, result, la_t2, count_reg);
             FT_LA_ADDI_D_EMIT(&out, la_t4, count_reg, -1);
@@ -234,6 +257,14 @@ static int ft_emit_rcl_rcr_template(const FastTemplateFields *fields, Translatio
     }
 
     if (is_mem) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* Address formation may overwrite t0..t4. Keep the original value
+         * and count until the store succeeds, leaving fault-time CF intact. */
+        if (!fields->skip_flags) {
+            FT_LA_OR_EMIT(&out, la_a0, la_t2, la_zero);
+            FT_LA_OR_EMIT(&out, la_a1, count_reg, la_zero);
+        }
+#endif
         switch (width) {
         case 8:
             if (!ft_emit_store_rm8(&out, fields, pc, result)) {
@@ -258,6 +289,9 @@ static int ft_emit_rcl_rcr_template(const FastTemplateFields *fields, Translatio
         default:
             return 0;
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        FT_FLAG2(x86_op, la_a0, la_a1);
+#endif
     } else {
         ft_emit_store_shift_reg(&out, dst, result, width, high8);
     }

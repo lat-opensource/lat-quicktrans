@@ -410,8 +410,13 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
             bool last = i + 1 == icount ||
                 !ft_x87_can_share_context(&fields_buf[i + 1]);
 
-            insn_emitted = ft_emit_x87_shared_context(fields, insn_code,
-                                                     first, last);
+            if (first && last) {
+                insn_emitted = emit_template_fields(fields, tb, fields->address,
+                                                    insn_code);
+            } else {
+                insn_emitted = ft_emit_x87_shared_context(fields, insn_code,
+                                                         first, last);
+            }
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
         } else if (fields->kind == FT_AES_ROUND_XMM_XMMM &&
                    fields->modrm_mod == 3 && !debug_live && !option_vpaes &&

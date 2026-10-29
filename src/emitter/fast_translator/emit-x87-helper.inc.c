@@ -395,7 +395,14 @@ static void ft_x87_helper_fld_reg(CPUX86State *env, int st_index)
 
 static void ft_x87_trace(const char *op, CPUX86State *env)
 {
-    if (getenv("LATX_QT_X87_TRACE")) {
+    /* Host startup diagnostic setting, as in the FST wrappers. */
+    static int trace_state;
+    int trace = __atomic_load_n(&trace_state, __ATOMIC_RELAXED);
+    if (!trace) {
+        trace = getenv("LATX_QT_X87_TRACE") ? 2 : 1;
+        __atomic_store_n(&trace_state, trace, __ATOMIC_RELAXED);
+    }
+    if (trace == 2) {
         unsigned int top = env->fpstt;
         floatx80 st0 = env->fpregs[top].d;
         fprintf(stderr, "[QT-X87] %s top=%u tag0=%u tag1=%u st0=%04x:%016" PRIx64 "\n",
@@ -435,6 +442,16 @@ static void ft_x87_helper_fsincos(CPUX86State *env)
     }
 #endif
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* Existing checks above handle stack faults, infinity and range failure.
+     * Keep NaN/unsupported encodings on the established separate helpers. */
+    if (option_soft_fpu == 2 && exponent < 0x7fff &&
+        (exponent == 0 || (input.low >> 63))) {
+        helper_fsincos(env);
+        ft_x87_trace("fsincos", env);
+        return;
+    }
+#endif
     helper_fsin(env);
     helper_fpush(env);
     env->fpregs[env->fpstt].d = input;
@@ -447,7 +464,15 @@ static uint64_t ft_x87_helper_fstl(CPUX86State *env)
 {
     uint64_t value = env->fptags[env->fpstt] ? 0xfff8000000000000ULL :
                      helper_fstl_ST0(env);
-    if (getenv("LATX_QT_X87_TRACE")) {
+    /* This is a host startup diagnostic setting, not guest x87 state.
+     * Avoid scanning the process environment for every executed store. */
+    static int trace_state;
+    int trace = __atomic_load_n(&trace_state, __ATOMIC_RELAXED);
+    if (!trace) {
+        trace = getenv("LATX_QT_X87_TRACE") ? 2 : 1;
+        __atomic_store_n(&trace_state, trace, __ATOMIC_RELAXED);
+    }
+    if (trace == 2) {
         fprintf(stderr, "[QT-X87] fstl value=%016" PRIx64 "\n", value);
     }
     return value;
@@ -458,7 +483,14 @@ static uint32_t ft_x87_helper_fsts(CPUX86State *env)
     uint32_t value = env->fptags[env->fpstt] ? 0xffc00000u :
                      helper_fsts_ST0(env);
 
-    if (getenv("LATX_QT_X87_TRACE")) {
+    /* Cache the host startup diagnostic setting, as for FST m64. */
+    static int trace_state;
+    int trace = __atomic_load_n(&trace_state, __ATOMIC_RELAXED);
+    if (!trace) {
+        trace = getenv("LATX_QT_X87_TRACE") ? 2 : 1;
+        __atomic_store_n(&trace_state, trace, __ATOMIC_RELAXED);
+    }
+    if (trace == 2) {
         fprintf(stderr, "[QT-X87] fsts value=%08" PRIx32 "\n", value);
     }
     return value;
@@ -627,7 +659,35 @@ static void ft_x87_helper_##name(CPUX86State *env) \
         helper_##name(env); \
     } \
 }
-FT_X87_CHECKED_UNARY(frndint)
+/* FRNDINT needs only ST0. Keep the generic fault handling off the common
+ * nonempty path without changing the rounding or exception implementation. */
+static void ft_x87_helper_frndint(CPUX86State *env)
+{
+    if (ft_x87_latu_legacy_no_tag() || !env->fptags[env->fpstt] ||
+        ft_x87_check_stack(env, 1, 1, 0, 0)) {
+        helper_frndint(env);
+    }
+}
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Only the mode-2 shared region uses this entry. Keep the slow function
+ * separate so the nonempty path needs no host call frame. */
+static __attribute__((noinline)) void ft_x87_frndint_soft_empty(CPUX86State *env)
+{
+    if (ft_x87_check_stack(env, 1, 1, 0, 0)) {
+        helper_frndint(env);
+    }
+}
+
+static void ft_x87_frndint_soft(CPUX86State *env)
+{
+    if (!env->fptags[env->fpstt]) {
+        helper_frndint(env);
+    } else {
+        ft_x87_frndint_soft_empty(env);
+    }
+}
+#endif
+
 FT_X87_CHECKED_UNARY(fsqrt)
 FT_X87_CHECKED_UNARY(fsin)
 FT_X87_CHECKED_UNARY(fcos)
@@ -956,6 +1016,72 @@ static void ft_x87_helper_##name(CPUX86State *env) \
 FT_X87_CHECKED_BINARY(fprem, 1, 0)
 FT_X87_CHECKED_BINARY(fprem1, 1, 0)
 #undef FT_X87_CHECKED_BINARY
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Mode-2 shared regions have already selected the checked soft-FPU policy.
+ * Separate fault entries keep ordinary calls free of generic-check frames. */
+#define FT_SOFT_UNARY_ENTRY(name) \
+static __attribute__((noinline)) void ft_soft_##name##_slow(CPUX86State *env) \
+{ ft_x87_helper_##name(env); } \
+static void ft_soft_##name(CPUX86State *env) \
+{ \
+    if (!env->fptags[env->fpstt]) helper_##name(env); \
+    else ft_soft_##name##_slow(env); \
+}
+FT_SOFT_UNARY_ENTRY(fsqrt)
+FT_SOFT_UNARY_ENTRY(fsin)
+#undef FT_SOFT_UNARY_ENTRY
+
+#define FT_SOFT_BINARY_ENTRY(name) \
+static __attribute__((noinline)) void ft_soft_##name##_slow(CPUX86State *env) \
+{ ft_x87_helper_##name(env); } \
+static void ft_soft_##name(CPUX86State *env) \
+{ \
+    unsigned top = env->fpstt; \
+    if (!(env->fptags[top] | env->fptags[(top + 1) & 7])) helper_##name(env); \
+    else ft_soft_##name##_slow(env); \
+}
+FT_SOFT_BINARY_ENTRY(fprem)
+FT_SOFT_BINARY_ENTRY(fprem1)
+#undef FT_SOFT_BINARY_ENTRY
+
+static __attribute__((noinline)) void ft_soft_f2xm1_slow(CPUX86State *env)
+{ ft_x87_helper_f2xm1(env); }
+static void ft_soft_f2xm1(CPUX86State *env)
+{
+    if (env->fptags[env->fpstt]) { ft_soft_f2xm1_slow(env); return; }
+    unsigned exponent = env->fpregs[env->fpstt].d.high & 0x7fff;
+    if (exponent >= 0x4000 && exponent < 0x7fff) return;
+    helper_f2xm1(env);
+}
+static __attribute__((noinline)) void ft_soft_fscale_slow(CPUX86State *env)
+{ ft_x87_helper_fscale(env); }
+static void ft_soft_fscale(CPUX86State *env)
+{
+    unsigned top = env->fpstt;
+    if (env->fptags[top] | env->fptags[(top + 1) & 7]) {
+        ft_soft_fscale_slow(env); return;
+    }
+    if (!ft_x87_propagate_quiet_nans(env, top)) helper_fscale(env);
+}
+#define FT_SOFT_MEMORY_ENTRY(name) \
+static __attribute__((noinline)) void ft_soft_memory_##name##_slow(CPUX86State *env) \
+{ ft_x87_memory_##name(env); } \
+static void ft_soft_memory_##name(CPUX86State *env) \
+{ \
+    if (!env->fptags[env->fpstt]) { \
+        env->fpus &= ~(1 << 9); \
+        helper_##name##_ST0_FT0(env); \
+    } else ft_soft_memory_##name##_slow(env); \
+}
+FT_SOFT_MEMORY_ENTRY(fadd)
+FT_SOFT_MEMORY_ENTRY(fmul)
+FT_SOFT_MEMORY_ENTRY(fsub)
+FT_SOFT_MEMORY_ENTRY(fsubr)
+FT_SOFT_MEMORY_ENTRY(fdiv)
+FT_SOFT_MEMORY_ENTRY(fdivr)
+#undef FT_SOFT_MEMORY_ENTRY
+#endif
 
 #define FT_X87_CHECKED_NAN_POP(name) \
 static void ft_x87_helper_##name(CPUX86State *env) \

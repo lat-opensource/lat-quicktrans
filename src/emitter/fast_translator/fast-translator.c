@@ -1098,22 +1098,180 @@ static int ft_emit_helper_indirect_exit(uint32_t **out, TranslationBlock *tb,
 #include "emit-pattern-cache.inc.c"
 #include "emit-rsp-merge.inc.c"
 
-/* The extracted tree has no shared x87 context emitter; keep the generic
- * per-instruction path until that emitter is restored and verified. */
+/* Share unchanged XMM state only across consecutive soft x87 helpers.
+ * The entry snapshot remains authoritative throughout the shared region. */
 static bool ft_x87_can_share_context(const FastTemplateFields *fields)
 {
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+    if (option_soft_fpu != 2 || option_softfpu_fast) return false;
+    switch (fields->kind) {
+    case FT_X87_FRNDINT: case FT_X87_FSQRT: case FT_X87_F2XM1:
+    case FT_X87_FSCALE: case FT_X87_FSIN: case FT_X87_FPREM:
+    case FT_X87_FPREM1: case FT_X87_FTST: case FT_X87_FXAM:
+        return true;
+    case FT_X87_FCOM_REG:
+        return fields->modrm_mod == 3;
+    case FT_X87_FIST_M16: case FT_X87_FIST_M32:
+        return fields->modrm_mod != 3 && fields->modrm_reg == 2;
+    case FT_X87_FST_M32: case FT_X87_FST_M64:
+        return fields->modrm_mod != 3;
+    case FT_X87_BIN_M32: case FT_X87_BIN_M64:
+    case FT_X87_FI_BIN_M16: case FT_X87_FI_BIN_M32:
+        return fields->modrm_mod != 3 && fields->modrm_reg != 2 &&
+               fields->modrm_reg != 3;
+    case FT_X87_FCOM_M32: case FT_X87_FCOM_M64:
+        return fields->modrm_mod != 3 && fields->modrm_reg == 2;
+    case FT_X87_BIN_REG:
+        return fields->modrm_mod == 3 &&
+            (fields->id == dt_X86_INS_FADD || fields->id == dt_X86_INS_FMUL ||
+             fields->id == dt_X86_INS_FSUB || fields->id == dt_X86_INS_FSUBR ||
+             fields->id == dt_X86_INS_FDIV || fields->id == dt_X86_INS_FDIVR);
+    default:
+        return false;
+    }
+#else
     (void)fields;
     return false;
+#endif
 }
 
 static int ft_emit_x87_shared_context(const FastTemplateFields *fields,
                                       uint32_t *code, bool first, bool last)
 {
-    (void)fields;
-    (void)code;
-    (void)first;
-    (void)last;
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI) && !defined(CONFIG_SOFTMMU)
+    uint32_t *out = code;
+    if (first) {
+        /* Eligible x87 instructions preserve guest GPRs and integer flags.
+         * Keep one authoritative snapshot until the shared region ends;
+         * FST restores call-clobbered address operands when needed. */
+        ft_emit_save_gprs_to_env(&out);
+        ft_emit_save_xmms_to_env(&out);
+        ft_emit_save_condition_flags(&out);
+        FT_LA_ORI_EMIT(&out, la_t0, la_zero, 1);
+        ft_emit_store_env(&out, la_t0,
+                         offsetof(CPUX86State, qt_helper_env_saved),
+                         FT_LA_OPCODE_ST_B);
+    }
+    bool integer_store = fields->kind == FT_X87_FIST_M16 ||
+                         fields->kind == FT_X87_FIST_M32;
+    bool store = fields->kind == FT_X87_FST_M32 ||
+                 fields->kind == FT_X87_FST_M64 || integer_store;
+    bool integer = fields->kind == FT_X87_FI_BIN_M16 ||
+                   fields->kind == FT_X87_FI_BIN_M32;
+    bool compare = fields->kind == FT_X87_FCOM_M32 ||
+                   fields->kind == FT_X87_FCOM_M64;
+    bool memory = integer || compare || fields->kind == FT_X87_BIN_M32 ||
+                  fields->kind == FT_X87_BIN_M64;
+    int width = fields->kind == FT_X87_FI_BIN_M16 ? 16 :
+                fields->kind == FT_X87_BIN_M64 ||
+                fields->kind == FT_X87_FCOM_M64 ? 64 : 32;
+    if (store || memory) {
+        int base;
+        bool preserved_base = !fields->addr32 && fields->segment < 0 &&
+            ft_supported_base_disp_addr(fields->rex, fields->modrm, fields->sib) &&
+            ft_base_from_modrm_sib(fields, &base) &&
+            ft_gpr(base) >= la_s0 && ft_gpr(base) <= la_s7;
+        if (!first && !preserved_base) {
+            for (int i = 0; i < GPR_NUM; ++i) {
+                if (ft_gpr(i) < la_s0 || ft_gpr(i) > la_s7)
+                    ft_emit_load_env(&out, ft_gpr(i), lsenv_offset_of_gpr(lsenv, i),
+                                     FT_LA_OPCODE_LD_D);
+            }
+        }
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(&out, fields, fields->address, &addr)) return 0;
+        int offset = ft_mem_access_offset(fields, addr);
+        if (store) {
+            FT_LA_ADDI_D_EMIT(&out, la_a1, addr, offset);
+            ft_emit_host_stack_begin(&out);
+            FT_LA_ADDI_D_EMIT(&out, la_sp, la_sp, -16);
+            FT_LA_ST_D_EMIT(&out, la_a1, la_sp, 0);
+            ft_emit_host_stack_end(&out);
+        } else {
+            if (width == 16) FT_LA_LD_H_EMIT(&out, la_a1, addr, offset);
+            else if (integer) FT_LA_LD_W_EMIT(&out, la_a1, addr, offset);
+            else if (width == 32) FT_LA_LD_WU_EMIT(&out, la_a1, addr, offset);
+            else FT_LA_LD_D_EMIT(&out, la_a1, addr, offset);
+            if (compare && !ft_emit_x87_mark_denormal_operand(&out, la_a1, width == 64))
+                return 0;
+            ft_emit_cpu_env_ptr(&out, la_a0);
+            void *convert = integer ? (void *)helper_fildl_FT0 :
+                compare ? (width == 32 ? (void *)helper_flds_FT0 : (void *)helper_fldl_FT0) :
+                width == 32 ? (void *)ft_x87_memory_flds : (void *)ft_x87_memory_fldl;
+            ft_emit_host_call(&out, convert, 1u << 0);
+        }
+    }
+    ft_emit_cpu_env_ptr(&out, la_a0);
+    void *helper;
+    if (store) {
+        helper = integer_store ?
+            (fields->kind == FT_X87_FIST_M16 ? (void *)ft_x87_helper_fist : (void *)ft_x87_helper_fistl) :
+            (fields->kind == FT_X87_FST_M32 ? (void *)ft_x87_helper_fsts : (void *)ft_x87_helper_fstl);
+    } else if (memory) {
+        static void *const helpers[8] = {
+            (void *)ft_soft_memory_fadd, (void *)ft_soft_memory_fmul,
+            NULL, NULL, (void *)ft_soft_memory_fsub, (void *)ft_soft_memory_fsubr,
+            (void *)ft_soft_memory_fdiv, (void *)ft_soft_memory_fdivr,
+        };
+        helper = compare ? (void *)helper_fcom_ST0_FT0 : helpers[fields->modrm_reg];
+    } else if (fields->kind == FT_X87_BIN_REG) {
+        int op;
+        switch (fields->id) {
+        case dt_X86_INS_FADD: op = FT_X87_REG_ADD; break;
+        case dt_X86_INS_FMUL: op = FT_X87_REG_MUL; break;
+        case dt_X86_INS_FSUB: op = FT_X87_REG_SUB; break;
+        case dt_X86_INS_FSUBR: op = FT_X87_REG_SUBR; break;
+        case dt_X86_INS_FDIV: op = FT_X87_REG_DIV; break;
+        case dt_X86_INS_FDIVR: op = FT_X87_REG_DIVR; break;
+        default: return 0;
+        }
+        FT_LA_ADDI_D_EMIT(&out, la_a1, la_zero, fields->modrm & 7);
+        helper = (void *)ft_x87_binary_helpers[fields->opcode0 != 0xd8][op];
+    } else if (fields->kind == FT_X87_FCOM_REG) {
+        FT_LA_ADDI_D_EMIT(&out, la_a1, la_zero, fields->modrm & 7);
+        FT_LA_ADDI_D_EMIT(&out, la_a2, la_zero, fields->id == dt_X86_INS_FUCOM);
+        helper = (void *)ft_x87_helper_compare_reg;
+    } else {
+        switch (fields->kind) {
+        case FT_X87_FRNDINT: helper = (void *)ft_x87_frndint_soft; break;
+        case FT_X87_FSQRT: helper = (void *)ft_soft_fsqrt; break;
+        case FT_X87_F2XM1: helper = (void *)ft_soft_f2xm1; break;
+        case FT_X87_FSCALE: helper = (void *)ft_soft_fscale; break;
+        case FT_X87_FSIN: helper = (void *)ft_soft_fsin; break;
+        case FT_X87_FPREM: helper = (void *)ft_soft_fprem; break;
+        case FT_X87_FPREM1: helper = (void *)ft_soft_fprem1; break;
+        case FT_X87_FTST: helper = (void *)ft_x87_helper_ftst; break;
+        case FT_X87_FXAM: helper = (void *)helper_fxam_ST0_softfpu; break;
+        default: return 0;
+        }
+    }
+    ft_emit_host_call(&out, helper, 1u << 0);
+    if (store) {
+        ft_emit_host_stack_begin(&out);
+        FT_LA_LD_D_EMIT(&out, la_a1, la_sp, 0);
+        FT_LA_ADDI_D_EMIT(&out, la_sp, la_sp, 16);
+        ft_emit_host_stack_end(&out);
+        int store_width = integer_store ?
+            (fields->kind == FT_X87_FIST_M16 ? 16 : 32) :
+            (fields->kind == FT_X87_FST_M32 ? 32 : 64);
+        ft_emit_x87_soft_store(&out, la_a1, la_a0, store_width);
+    }
+    if (last) {
+        ft_emit_restore_condition_flags(&out);
+        ft_emit_load_xmms_from_env(&out);
+        int first_gpr = 0;
+        while (first_gpr < 8 && ft_gpr(first_gpr) == la_s0 + first_gpr) ++first_gpr;
+        for (int i = first_gpr; i < GPR_NUM; ++i)
+            ft_emit_load_env(&out, ft_gpr(i), lsenv_offset_of_gpr(lsenv, i), FT_LA_OPCODE_LD_D);
+        ft_emit_store_env(&out, la_zero,
+                         offsetof(CPUX86State, qt_helper_env_saved),
+                         FT_LA_OPCODE_ST_B);
+    }
+    return out - code;
+#else
+    (void)fields; (void)code; (void)first; (void)last;
     return 0;
+#endif
 }
 
 #ifdef CONFIG_LATX_DEBUG
