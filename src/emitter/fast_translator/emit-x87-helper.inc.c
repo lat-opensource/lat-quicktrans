@@ -413,7 +413,7 @@ static void ft_x87_helper_fst_reg(CPUX86State *env, int st_index, int pop)
 
 enum {
     FT_X87_REG_ADD, FT_X87_REG_MUL, FT_X87_REG_SUB,
-    FT_X87_REG_SUBR, FT_X87_REG_DIV, FT_X87_REG_DIVR,
+    FT_X87_REG_SUBR, FT_X87_REG_DIV, FT_X87_REG_DIVR, FT_X87_REG_SCALE,
     FT_X87_REG_DEST_N = 8, FT_X87_REG_POP = 16,
 };
 
