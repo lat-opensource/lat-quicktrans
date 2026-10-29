@@ -1069,9 +1069,15 @@ bool fast_template_fill_fields_from_info(const FastTemplateDesc *tmpl,
     fields->alu_width = 0;
     fields->direct_cmp_lhs_gpr = -1;
     fields->direct_cmp_rhs_gpr = -1;
+    fields->direct_bit_index_gpr = -1;
+    fields->direct_bit_index_imm = -1;
+    fields->instptn_div_kind = 0;
+    fields->instptn_skip = false;
+    fields->direct_float_result = false;
+    fields->direct_float_xx = false;
     fields->addr32 = info->x86.prefix[3] == 0x67;
     fields->skip_flags = !flags_live;
-    fields->direct_taken_if_equal = false;
+    fields->direct_branch_kind = FT_DIRECT_BRANCH_NONE;
 
     {
         FastAluOp alu_op;

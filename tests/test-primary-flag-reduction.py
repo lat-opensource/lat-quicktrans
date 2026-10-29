@@ -32,6 +32,10 @@ def main() -> int:
         print("flag liveness must control per-instruction flag emission",
               file=sys.stderr)
         return 1
+    if "option_sys_flag_reduction" in source or "ft_flag_reduction_enabled" in source:
+        print("flag reduction must use the existing unconditional analysis",
+              file=sys.stderr)
+        return 1
     if not re.search(
         r"case dt_X86_INS_RDRAND:\s*"
         r"masks\.def \|= FT_EFLAGS_ALL;",
@@ -66,22 +70,34 @@ def main() -> int:
     if not re.search(
         r"if \(count > 1\)\s*\{\s*"
         r"ft_analyze_direct_jcc_pair\(&fields\[count - 2\],\s*"
-        r"&fields\[count - 1\]\);",
+        r"&fields\[count - 1\],\s*false\);",
         source,
     ):
         print("flag analysis must also analyze direct TEST/JCC pairs",
               file=sys.stderr)
         return 1
     if not re.search(
-        r"test->alu_op != FT_ALU_TEST.*?test->alu_op != FT_ALU_CMP.*?"
-        r"ft_modrm_rm_is_high8\(test\).*?ft_modrm_reg_is_high8\(test\).*?"
-        r"direct_cmp_lhs_gpr.*?direct_cmp_width = test->alu_width",
+        r"ft_direct_alu_reg_operands.*?alu->alu_form == FT_ALU_FORM_RM_R.*?"
+        r"ft_modrm_rm_is_high8\(alu\).*?ft_modrm_reg_is_high8\(alu\).*?"
+        r"direct_cmp_lhs_gpr.*?direct_cmp_width = alu->alu_width",
         source, re.S,
     ):
         print("direct JCC must preserve width and reject high-8 registers",
               file=sys.stderr)
         return 1
     emit = (pathlib.Path(sys.argv[1]).parent / "emit-template.inc.c").read_text()
+    if not re.search(
+        r"alu->alu_op == FT_ALU_CMP && alu->imm == 0.*?"
+        r"FT_ALU_FORM_ACC_IMM.*?lhs = rax_index;.*?"
+        r"FT_ALU_FORM_RM_IMM.*?alu->modrm_mod == 3.*?"
+        r"ft_modrm_rm_is_high8\(alu\).*?"
+        r"lhs = alu->modrm_rm_index;.*?"
+        r"direct_cmp_rhs_gpr = rhs;",
+        source, re.S,
+    ):
+        print("CMP zero direct branches must reject memory and high-8 forms",
+              file=sys.stderr)
+        return 1
     if not re.search(
         r"direct_cmp_width < 64.*?FT_LA_BSTRPICK_D_EMIT.*?"
         r"direct_cmp_width - 1",

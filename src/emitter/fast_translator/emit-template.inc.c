@@ -6,12 +6,161 @@
 
 /* Main FastTemplateFields emitter dispatch. */
 
+/* Emit a boolean condition from the preserved operands of an instptn head. */
+static bool ft_emit_direct_condition(uint32_t **out,
+                                     const FastTemplateFields *fields,
+                                     int result)
+{
+    int lhs;
+    int rhs = la_zero;
+    int work_lhs;
+    int work_rhs = la_zero;
+    int width = fields->direct_cmp_width;
+#ifdef CONFIG_SOFTMMU
+    int tmp0 = la_a0;
+    int tmp1 = la_a1;
+    int tmp2 = la_a2;
+#else
+    int tmp0 = la_t0;
+    int tmp1 = la_t1;
+    int tmp2 = la_t2;
+#endif
+
+    if (fields->direct_cmp_lhs_gpr < 0 || width == 0) {
+        return false;
+    }
+    lhs = ft_gpr(fields->direct_cmp_lhs_gpr);
+    if (fields->direct_cmp_rhs_gpr >= 0) {
+        rhs = ft_gpr(fields->direct_cmp_rhs_gpr);
+    }
+    work_lhs = lhs;
+    if (fields->direct_branch_kind == FT_DIRECT_BRANCH_BIT_SET ||
+        fields->direct_branch_kind == FT_DIRECT_BRANCH_BIT_CLEAR) {
+        if (fields->direct_bit_index_gpr >= 0) {
+            FT_LA_ANDI_EMIT(out, tmp0,
+                            ft_gpr(fields->direct_bit_index_gpr), width - 1);
+            FT_LA_SRL_D_EMIT(out, tmp1, lhs, tmp0);
+        } else {
+            FT_LA_SRLI_D_EMIT(out, tmp1, lhs,
+                              fields->direct_bit_index_imm & (width - 1));
+        }
+        FT_LA_ANDI_EMIT(out, result, tmp1, 1);
+        if (fields->direct_branch_kind == FT_DIRECT_BRANCH_BIT_CLEAR) {
+            FT_LA_XORI_EMIT(out, result, result, 1);
+        }
+        return true;
+    }
+    if (width < 64) {
+        bool signed_compare =
+            fields->direct_branch_kind == FT_DIRECT_BRANCH_LT ||
+            fields->direct_branch_kind == FT_DIRECT_BRANCH_GE ||
+            fields->direct_branch_kind == FT_DIRECT_BRANCH_LE ||
+            fields->direct_branch_kind == FT_DIRECT_BRANCH_GT;
+        int shift = 64 - width;
+
+        if (signed_compare) {
+            FT_LA_SLLI_D_EMIT(out, tmp0, lhs, shift);
+            FT_LA_SRAI_D_EMIT(out, tmp0, tmp0, shift);
+        } else {
+            FT_LA_BSTRPICK_D_EMIT(out, tmp0, lhs, width - 1, 0);
+        }
+        work_lhs = tmp0;
+        if (fields->direct_cmp_rhs_gpr >= 0) {
+            if (signed_compare) {
+                FT_LA_SLLI_D_EMIT(out, tmp1, rhs, shift);
+                FT_LA_SRAI_D_EMIT(out, tmp1, tmp1, shift);
+            } else {
+                FT_LA_BSTRPICK_D_EMIT(out, tmp1, rhs, width - 1, 0);
+            }
+            work_rhs = tmp1;
+        }
+    } else {
+        work_rhs = rhs;
+    }
+    switch (fields->direct_branch_kind) {
+    case FT_DIRECT_BRANCH_EQ:
+    case FT_DIRECT_BRANCH_NE:
+        FT_LA_XOR_EMIT(out, tmp2, work_lhs, work_rhs);
+        FT_LA_SLTU_EMIT(out, result, la_zero, tmp2);
+        if (fields->direct_branch_kind == FT_DIRECT_BRANCH_EQ) {
+            FT_LA_XORI_EMIT(out, result, result, 1);
+        }
+        return true;
+    case FT_DIRECT_BRANCH_LT:
+        FT_LA_SLT_EMIT(out, result, work_lhs, work_rhs); return true;
+    case FT_DIRECT_BRANCH_GE:
+        FT_LA_SLT_EMIT(out, result, work_lhs, work_rhs);
+        FT_LA_XORI_EMIT(out, result, result, 1); return true;
+    case FT_DIRECT_BRANCH_LTU:
+        FT_LA_SLTU_EMIT(out, result, work_lhs, work_rhs); return true;
+    case FT_DIRECT_BRANCH_GEU:
+        FT_LA_SLTU_EMIT(out, result, work_lhs, work_rhs);
+        FT_LA_XORI_EMIT(out, result, result, 1); return true;
+    case FT_DIRECT_BRANCH_LE:
+        FT_LA_SLT_EMIT(out, result, work_rhs, work_lhs);
+        FT_LA_XORI_EMIT(out, result, result, 1); return true;
+    case FT_DIRECT_BRANCH_GT:
+        FT_LA_SLT_EMIT(out, result, work_rhs, work_lhs); return true;
+    case FT_DIRECT_BRANCH_LEU:
+        FT_LA_SLTU_EMIT(out, result, work_rhs, work_lhs);
+        FT_LA_XORI_EMIT(out, result, result, 1); return true;
+    case FT_DIRECT_BRANCH_GTU:
+        FT_LA_SLTU_EMIT(out, result, work_rhs, work_lhs); return true;
+    case FT_DIRECT_BRANCH_ALWAYS:
+        FT_LA_ADDI_D_EMIT(out, result, la_zero, 1); return true;
+    case FT_DIRECT_BRANCH_NEVER:
+        FT_LA_OR_EMIT(out, result, la_zero, la_zero); return true;
+    default:
+        return false;
+    }
+}
+
 static int emit_template_fields_uncached(const FastTemplateFields *fields,
                                          TranslationBlock *tb,
                                          target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
 
+    if (fields->instptn_skip) {
+        FT_LA_NOP_EMIT(&out);
+        return out - code;
+    }
+    if (fields->alu_op == FT_ALU_SBB &&
+        fields->direct_cmp_lhs_gpr >= 0) {
+        int width = fields->alu_width;
+        int dst = fields->modrm_rm_index;
+#ifdef CONFIG_SOFTMMU
+        int result = la_a3;
+        int value = la_a2;
+#else
+        int result = la_t0;
+        int value = la_t1;
+#endif
+
+        if (dst >= GPR_NUM ||
+            !ft_emit_direct_condition(&out, fields, result)) {
+            return 0;
+        }
+        if (!fields->skip_flags) {
+            ft_emit_raw(&out, ft_gpr2(ft_alu_x86_op(FT_ALU_SUB, width),
+                                      la_zero, result));
+        }
+        if (width == 64) {
+            FT_LA_SUB_D_EMIT(&out, ft_gpr(dst), la_zero, result);
+        } else if (width == 32) {
+            FT_LA_SUB_W_EMIT(&out, ft_gpr(dst), la_zero, result);
+            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+        } else if (width == 16) {
+            FT_LA_SUB_D_EMIT(&out, value, la_zero, result);
+            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), value, 15, 0);
+        } else if (width == 8 && !ft_modrm_rm_is_high8(fields)) {
+            FT_LA_SUB_D_EMIT(&out, value, la_zero, result);
+            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), value, 7, 0);
+        } else {
+            return 0;
+        }
+        return out - code;
+    }
     if (fields->alu_op != FT_ALU_NONE) {
         if (!ft_emit_alu_template(&out, fields, pc)) {
             return 0;
@@ -188,6 +337,11 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         int src;
         int cond;
         int id = 0;
+#ifdef CONFIG_SOFTMMU
+        int direct_result = la_a3;
+#else
+        int direct_result = la_t2;
+#endif
 
         if (!ft_cmov_opcode_info(fields->opcode1, &cond, &id)) {
             return 0;
@@ -213,17 +367,32 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             }
         }
         if (fields->kind == FT_CMOV_R32_RM32) {
-            ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | la_t2 | (cond << 10));
-            FT_LA_BEQ_EMIT(&out, la_t2, la_zero, 2);
+            if (fields->direct_cmp_lhs_gpr >= 0) {
+                if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
+            } else {
+                direct_result = la_t2;
+                ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | direct_result | (cond << 10));
+            }
+            FT_LA_BEQ_EMIT(&out, direct_result, la_zero, 2);
             FT_LA_OR_EMIT(&out, ft_gpr(dst), src, la_zero);
             FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
         } else if (fields->kind == FT_CMOV_R16_RM16) {
-            ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | la_t2 | (cond << 10));
-            FT_LA_BEQ_EMIT(&out, la_t2, la_zero, 2);
+            if (fields->direct_cmp_lhs_gpr >= 0) {
+                if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
+            } else {
+                direct_result = la_t2;
+                ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | direct_result | (cond << 10));
+            }
+            FT_LA_BEQ_EMIT(&out, direct_result, la_zero, 2);
             FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), src, 15, 0);
         } else {
-            ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | la_t2 | (cond << 10));
-            FT_LA_BEQ_EMIT(&out, la_t2, la_zero, 2);
+            if (fields->direct_cmp_lhs_gpr >= 0) {
+                if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
+            } else {
+                direct_result = la_t2;
+                ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | direct_result | (cond << 10));
+            }
+            FT_LA_BEQ_EMIT(&out, direct_result, la_zero, 2);
             FT_LA_OR_EMIT(&out, ft_gpr(dst), src, la_zero);
         }
         break;
@@ -232,12 +401,30 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
     {
         int cond;
         int id;
+#ifdef CONFIG_SOFTMMU
+        int direct_result = la_a3;
+#else
+        int direct_result = la_t0;
+#endif
 
         if (!ft_setcc_opcode_info(fields->opcode1, &cond, &id)) {
             return 0;
         }
-        ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | la_t0 | (cond << 10));
-        if (!ft_emit_store_rm8(&out, fields, pc, la_t0)) {
+        if (fields->direct_float_result) {
+            FT_LA_OR_EMIT(&out, direct_result,
+#ifdef CONFIG_SOFTMMU
+                          la_a4,
+#else
+                          la_t2,
+#endif
+                          la_zero);
+        } else if (fields->direct_cmp_lhs_gpr >= 0) {
+            if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
+        } else {
+            direct_result = la_t0;
+            ft_emit_raw(&out, FT_LA_OPCODE_SETX86J | direct_result | (cond << 10));
+        }
+        if (!ft_emit_store_rm8(&out, fields, pc, direct_result)) {
             return 0;
         }
         break;
@@ -2664,8 +2851,16 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
     {
         int cond_lhs;
         int cond_rhs = la_zero;
-        bool taken_if_equal = fields->direct_cmp_lhs_gpr >= 0 &&
-                              fields->direct_taken_if_equal;
+        bool taken_if_equal = false;
+#ifdef CONFIG_SOFTMMU
+        int tmp0 = la_a0;
+        int tmp1 = la_a1;
+        int tmp2 = la_a2;
+#else
+        int tmp0 = la_t0;
+        int tmp1 = la_t1;
+        int tmp2 = la_t2;
+#endif
 
 #ifdef QUICKTRANS_LATU
         tb->lazypc[0] = ft_exit_target_pc(pc + fields->size) - tb->pc;
@@ -2673,20 +2868,131 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         tb->canlink[0] = 1;
         tb->canlink[1] = 1;
 #endif
-        if (fields->direct_cmp_lhs_gpr >= 0) {
+        if (fields->direct_float_xx) {
+#ifdef CONFIG_SOFTMMU
+            cond_lhs = la_a4;
+            cond_rhs = la_zero;
+#else
+            return 0;
+#endif
+        } else if (fields->direct_float_result) {
+            cond_lhs = la_t2;
+            cond_rhs = la_zero;
+        } else if (fields->direct_cmp_lhs_gpr >= 0) {
             cond_lhs = ft_gpr(fields->direct_cmp_lhs_gpr);
             if (fields->direct_cmp_rhs_gpr >= 0) {
                 cond_rhs = ft_gpr(fields->direct_cmp_rhs_gpr);
             }
-            if (fields->direct_cmp_width < 64) {
-                FT_LA_BSTRPICK_D_EMIT(&out, la_t0, cond_lhs,
-                                      fields->direct_cmp_width - 1, 0);
-                cond_lhs = la_t0;
-                if (fields->direct_cmp_rhs_gpr >= 0) {
-                    FT_LA_BSTRPICK_D_EMIT(&out, la_t1, cond_rhs,
-                                          fields->direct_cmp_width - 1, 0);
-                    cond_rhs = la_t1;
+            if (fields->direct_branch_kind == FT_DIRECT_BRANCH_BIT_SET ||
+                fields->direct_branch_kind == FT_DIRECT_BRANCH_BIT_CLEAR) {
+                int bit_width = fields->direct_cmp_width;
+
+                if (fields->direct_bit_index_gpr >= 0) {
+                    FT_LA_ANDI_EMIT(&out, tmp1,
+                                    ft_gpr(fields->direct_bit_index_gpr),
+                                    bit_width - 1);
+                    FT_LA_SRL_D_EMIT(&out, tmp2, cond_lhs, tmp1);
+                } else {
+                    FT_LA_SRLI_D_EMIT(&out, tmp2, cond_lhs,
+                                      fields->direct_bit_index_imm &
+                                      (bit_width - 1));
                 }
+                FT_LA_ANDI_EMIT(&out, tmp2, tmp2, 1);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+            } else if (fields->direct_cmp_width < 64) {
+                bool signed_compare =
+                    fields->direct_branch_kind == FT_DIRECT_BRANCH_LT ||
+                    fields->direct_branch_kind == FT_DIRECT_BRANCH_GE ||
+                    fields->direct_branch_kind == FT_DIRECT_BRANCH_LE ||
+                    fields->direct_branch_kind == FT_DIRECT_BRANCH_GT;
+                int shift = 64 - fields->direct_cmp_width;
+
+                if (signed_compare) {
+                    FT_LA_SLLI_D_EMIT(&out, tmp0, cond_lhs, shift);
+                    FT_LA_SRAI_D_EMIT(&out, tmp0, tmp0, shift);
+                } else {
+                    FT_LA_BSTRPICK_D_EMIT(&out, tmp0, cond_lhs,
+                                          fields->direct_cmp_width - 1, 0);
+                }
+                cond_lhs = tmp0;
+                if (fields->direct_cmp_rhs_gpr >= 0) {
+                    if (signed_compare) {
+                        FT_LA_SLLI_D_EMIT(&out, tmp1, cond_rhs, shift);
+                        FT_LA_SRAI_D_EMIT(&out, tmp1, tmp1, shift);
+                    } else {
+                        FT_LA_BSTRPICK_D_EMIT(&out, tmp1, cond_rhs,
+                                              fields->direct_cmp_width - 1, 0);
+                    }
+                    cond_rhs = tmp1;
+                }
+            }
+            switch (fields->direct_branch_kind) {
+            case FT_DIRECT_BRANCH_EQ:
+                taken_if_equal = true;
+                break;
+            case FT_DIRECT_BRANCH_NE:
+                break;
+            case FT_DIRECT_BRANCH_LT:
+                FT_LA_SLT_EMIT(&out, tmp2, cond_lhs, cond_rhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                break;
+            case FT_DIRECT_BRANCH_GE:
+                FT_LA_SLT_EMIT(&out, tmp2, cond_lhs, cond_rhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                taken_if_equal = true;
+                break;
+            case FT_DIRECT_BRANCH_LTU:
+                FT_LA_SLTU_EMIT(&out, tmp2, cond_lhs, cond_rhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                break;
+            case FT_DIRECT_BRANCH_GEU:
+                FT_LA_SLTU_EMIT(&out, tmp2, cond_lhs, cond_rhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                taken_if_equal = true;
+                break;
+            case FT_DIRECT_BRANCH_LE:
+                FT_LA_SLT_EMIT(&out, tmp2, cond_rhs, cond_lhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                taken_if_equal = true;
+                break;
+            case FT_DIRECT_BRANCH_GT:
+                FT_LA_SLT_EMIT(&out, tmp2, cond_rhs, cond_lhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                break;
+            case FT_DIRECT_BRANCH_LEU:
+                FT_LA_SLTU_EMIT(&out, tmp2, cond_rhs, cond_lhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                taken_if_equal = true;
+                break;
+            case FT_DIRECT_BRANCH_GTU:
+                FT_LA_SLTU_EMIT(&out, tmp2, cond_rhs, cond_lhs);
+                cond_lhs = tmp2;
+                cond_rhs = la_zero;
+                break;
+            case FT_DIRECT_BRANCH_ALWAYS:
+                cond_lhs = la_zero;
+                cond_rhs = la_zero;
+                taken_if_equal = true;
+                break;
+            case FT_DIRECT_BRANCH_NEVER:
+                cond_lhs = la_zero;
+                cond_rhs = la_zero;
+                break;
+            case FT_DIRECT_BRANCH_BIT_SET:
+                break;
+            case FT_DIRECT_BRANCH_BIT_CLEAR:
+                taken_if_equal = true;
+                break;
+            default:
+                break;
             }
         } else {
         /* Match the legacy system translator: SETX86J writes itemp0 (a4). */
@@ -4341,7 +4647,17 @@ simd_bin_done:
         bool qnan;
         int cueq;
         int cult;
-        int eq = la_t0, lt = la_t1, unordered = la_t2, flags = la_t3;
+#ifdef CONFIG_SOFTMMU
+        int eq = la_a0;
+        int lt = la_a1;
+        int unordered = la_a2;
+        int flags = la_a3;
+#else
+        int eq = la_t0;
+        int lt = la_t1;
+        int unordered = la_t2;
+        int flags = la_t3;
+#endif
 
         if (!ft_simd_scalar_cmp_opcode_info(fields->prefix0,
                                             fields->prefix2,
@@ -4357,7 +4673,7 @@ simd_bin_done:
                                     is_double ? 8 : 4, &rhs)) {
             return 0;
         }
-        FT_LA_OR_EMIT(&out, la_t2, la_zero, la_zero);
+        FT_LA_OR_EMIT(&out, unordered, la_zero, la_zero);
         if (is_double) {
             FT_LA_FCMP_COND_D_EMIT(&out, 0, ft_xmm(lhs), rhs, cueq);
         } else {
@@ -4368,7 +4684,6 @@ simd_bin_done:
         } else {
             FT_LA_FCMP_COND_S_EMIT(&out, 2, ft_xmm(lhs), rhs, cult);
         }
-        ft_emit_lats_simd_fpe_check(&out, tb, pc);
         FT_LA_MOVCF2GR_EMIT(&out, eq, 0);
         FT_LA_MOVCF2GR_EMIT(&out, lt, 2);
         FT_LA_AND_EMIT(&out, unordered, lt, eq);
@@ -4376,7 +4691,48 @@ simd_bin_done:
         FT_LA_BSTRINS_W_EMIT(&out, flags, eq, 6, 6);
         FT_LA_BSTRINS_W_EMIT(&out, flags, unordered, 2, 2);
         FT_LA_X86MTFLAG_EMIT(&out, flags, 0x3f);
-
+        if (fields->direct_float_xx) {
+#ifdef CONFIG_SOFTMMU
+            switch (fields->direct_branch_kind) {
+            case FT_DIRECT_BRANCH_EQ: FT_LA_OR_EMIT(&out, la_a4, eq, la_zero); break;
+            case FT_DIRECT_BRANCH_NE: FT_LA_XORI_EMIT(&out, la_a4, eq, 1); break;
+            case FT_DIRECT_BRANCH_LTU: FT_LA_OR_EMIT(&out, la_a4, lt, la_zero); break;
+            case FT_DIRECT_BRANCH_GEU: FT_LA_XORI_EMIT(&out, la_a4, lt, 1); break;
+            case FT_DIRECT_BRANCH_LEU: FT_LA_OR_EMIT(&out, la_a4, lt, eq); break;
+            case FT_DIRECT_BRANCH_GTU:
+                FT_LA_OR_EMIT(&out, la_a4, lt, eq);
+                FT_LA_XORI_EMIT(&out, la_a4, la_a4, 1);
+                break;
+            case FT_DIRECT_BRANCH_BIT_SET: FT_LA_OR_EMIT(&out, la_a4, unordered, la_zero); break;
+            case FT_DIRECT_BRANCH_BIT_CLEAR: FT_LA_XORI_EMIT(&out, la_a4, unordered, 1); break;
+            default: return 0;
+            }
+#else
+            return 0;
+#endif
+        } else if (fields->direct_branch_kind != FT_DIRECT_BRANCH_NONE) {
+            switch (fields->direct_branch_kind) {
+            case FT_DIRECT_BRANCH_EQ: break;
+            case FT_DIRECT_BRANCH_NE: FT_LA_XORI_EMIT(&out, unordered, eq, 1); break;
+            case FT_DIRECT_BRANCH_LTU: FT_LA_OR_EMIT(&out, unordered, lt, la_zero); break;
+            case FT_DIRECT_BRANCH_GEU: FT_LA_XORI_EMIT(&out, unordered, lt, 1); break;
+            case FT_DIRECT_BRANCH_LEU: FT_LA_OR_EMIT(&out, unordered, lt, eq); break;
+            case FT_DIRECT_BRANCH_GTU:
+                FT_LA_OR_EMIT(&out, unordered, lt, eq);
+                FT_LA_XORI_EMIT(&out, unordered, unordered, 1);
+                break;
+            case FT_DIRECT_BRANCH_BIT_SET: break;
+            case FT_DIRECT_BRANCH_BIT_CLEAR: FT_LA_XORI_EMIT(&out, unordered, unordered, 1); break;
+            default: return 0;
+            }
+            if (fields->direct_branch_kind == FT_DIRECT_BRANCH_EQ) {
+                FT_LA_OR_EMIT(&out, unordered, eq, la_zero);
+            }
+#ifdef CONFIG_SOFTMMU
+            FT_LA_OR_EMIT(&out, la_a4, unordered, la_zero);
+#endif
+            break;
+        }
         break;
     }
     case FT_STOSQ_REP:

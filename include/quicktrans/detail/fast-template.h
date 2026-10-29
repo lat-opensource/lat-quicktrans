@@ -725,6 +725,32 @@ typedef struct FastTemplateDesc {
     uint8_t modrm_reg_ext_mask;
 } FastTemplateDesc;
 
+typedef enum FastDirectBranchKind {
+    FT_DIRECT_BRANCH_NONE,
+    FT_DIRECT_BRANCH_EQ,
+    FT_DIRECT_BRANCH_NE,
+    FT_DIRECT_BRANCH_LT,
+    FT_DIRECT_BRANCH_GE,
+    FT_DIRECT_BRANCH_LTU,
+    FT_DIRECT_BRANCH_GEU,
+    FT_DIRECT_BRANCH_LE,
+    FT_DIRECT_BRANCH_GT,
+    FT_DIRECT_BRANCH_LEU,
+    FT_DIRECT_BRANCH_GTU,
+    FT_DIRECT_BRANCH_ALWAYS,
+    FT_DIRECT_BRANCH_NEVER,
+    FT_DIRECT_BRANCH_BIT_SET,
+    FT_DIRECT_BRANCH_BIT_CLEAR,
+} FastDirectBranchKind;
+
+typedef enum FastInstptnDivKind {
+    FT_INSTPTN_DIV_NONE,
+    FT_INSTPTN_DIV_CQO_IDIV64,
+    FT_INSTPTN_DIV_CDQ_IDIV32,
+    FT_INSTPTN_DIV_XOR_DIV32,
+    FT_INSTPTN_DIV_XOR_DIV64,
+} FastInstptnDivKind;
+
 typedef struct FastTemplateFields {
     FastTemplateKind kind;
     int16_t rex;
@@ -754,10 +780,16 @@ typedef struct FastTemplateFields {
     uint8_t alu_width;
     int8_t direct_cmp_lhs_gpr;
     int8_t direct_cmp_rhs_gpr;
+    int8_t direct_bit_index_gpr;
+    int8_t direct_bit_index_imm;
     uint8_t direct_cmp_width;
+    uint8_t instptn_div_kind;
+    bool instptn_skip;
+    bool direct_float_result;
+    bool direct_float_xx;
     bool addr32;
     bool skip_flags;
-    bool direct_taken_if_equal;
+    uint8_t direct_branch_kind;
 } FastTemplateFields;
 
 _Static_assert(dt_X86_INS_ENDING <= UINT16_MAX,

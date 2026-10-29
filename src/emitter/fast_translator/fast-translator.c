@@ -744,7 +744,7 @@ typedef struct FastTemplateRuntimeInfo {
 #define FT_EMIT_PROFILE_MAX_WORDS 16
 
 typedef struct FtEmitCacheKey {
-    uint64_t word[6];
+    uint64_t word[7];
 } FtEmitCacheKey;
 
 typedef struct FtEmitProfileEntry {
@@ -804,8 +804,14 @@ static FtEmitCacheKey ft_emit_cache_key(const FastTemplateFields *fields)
                 ((uint64_t)(uint8_t)fields->direct_cmp_rhs_gpr << 24) |
                 ((uint64_t)fields->addr32 << 32) |
                 ((uint64_t)fields->skip_flags << 33) |
-                ((uint64_t)fields->direct_taken_if_equal << 34) |
-                ((uint64_t)fields->direct_cmp_width << 40),
+                ((uint64_t)fields->direct_branch_kind << 34) |
+                ((uint64_t)fields->direct_cmp_width << 40) |
+                ((uint64_t)(uint8_t)fields->direct_bit_index_gpr << 48) |
+                ((uint64_t)(uint8_t)fields->direct_bit_index_imm << 56),
+            (uint64_t)fields->instptn_div_kind |
+                ((uint64_t)fields->instptn_skip << 8) |
+                ((uint64_t)fields->direct_float_result << 9) |
+                ((uint64_t)fields->direct_float_xx << 10),
         },
     };
 
@@ -1148,8 +1154,88 @@ static bool ft_template_uses_mmx(const FastTemplateFields *fields);
 static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo **meta,
                                    int count);
+static bool ft_direct_alu_result_gpr(const FastTemplateFields *alu, int *dst)
+{
+    if (alu->alu_width == 8) {
+        if ((alu->alu_form == FT_ALU_FORM_RM_R ||
+             alu->alu_form == FT_ALU_FORM_RM_IMM) &&
+            ft_modrm_rm_is_high8(alu)) {
+            return false;
+        }
+        if (alu->alu_form == FT_ALU_FORM_R_RM &&
+            ft_modrm_reg_is_high8(alu)) {
+            return false;
+        }
+    }
+    switch (alu->alu_form) {
+    case FT_ALU_FORM_RM_R:
+    case FT_ALU_FORM_RM_IMM:
+        if (alu->modrm_mod != 3 || alu->modrm_rm_index >= GPR_NUM) {
+            return false;
+        }
+        *dst = alu->modrm_rm_index;
+        return true;
+    case FT_ALU_FORM_R_RM:
+        if (alu->modrm_reg_index >= GPR_NUM) {
+            return false;
+        }
+        *dst = alu->modrm_reg_index;
+        return true;
+    case FT_ALU_FORM_ACC_IMM:
+        *dst = rax_index;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ft_direct_result_jcc_kind(FastAluOp op, int jcc_id,
+                                      FastDirectBranchKind *kind)
+{
+    if (jcc_id == dt_X86_INS_JE || jcc_id == dt_X86_INS_JNE) {
+        *kind = jcc_id == dt_X86_INS_JE ? FT_DIRECT_BRANCH_EQ :
+                                          FT_DIRECT_BRANCH_NE;
+        return true;
+    }
+    switch (op) {
+    case FT_ALU_ADD:
+        if (jcc_id == dt_X86_INS_JNS) {
+            *kind = FT_DIRECT_BRANCH_GE;
+            return true;
+        }
+        break;
+    case FT_ALU_SUB:
+        if (jcc_id == dt_X86_INS_JS || jcc_id == dt_X86_INS_JNS) {
+            *kind = jcc_id == dt_X86_INS_JS ? FT_DIRECT_BRANCH_LT :
+                                              FT_DIRECT_BRANCH_GE;
+            return true;
+        }
+        break;
+    case FT_ALU_AND:
+    case FT_ALU_OR:
+    case FT_ALU_XOR:
+        switch (jcc_id) {
+        case dt_X86_INS_JS:  *kind = FT_DIRECT_BRANCH_LT; return true;
+        case dt_X86_INS_JNS: *kind = FT_DIRECT_BRANCH_GE; return true;
+        case dt_X86_INS_JLE: *kind = FT_DIRECT_BRANCH_LE; return true;
+        case dt_X86_INS_JG:  *kind = FT_DIRECT_BRANCH_GT; return true;
+        case dt_X86_INS_JO:
+        case dt_X86_INS_JB:  *kind = FT_DIRECT_BRANCH_NEVER; return true;
+        case dt_X86_INS_JNO:
+        case dt_X86_INS_JAE: *kind = FT_DIRECT_BRANCH_ALWAYS; return true;
+        case dt_X86_INS_JBE: *kind = FT_DIRECT_BRANCH_EQ; return true;
+        case dt_X86_INS_JA:  *kind = FT_DIRECT_BRANCH_NE; return true;
+        default: break;
+        }
+        break;
+    default:
+        break;
+    }
+    return false;
+}
+
 static void ft_analyze_direct_jcc_pair(FastTemplateFields *test,
-                                       FastTemplateFields *jcc);
+                                       FastTemplateFields *jcc, bool gap);
 static bool ft_primary_debug_live_enabled(void);
 static void ft_primary_debug_emit_live_regs(uint32_t **out, target_ulong pc);
 static void ft_primary_debug_dump_code(target_ulong pc,
@@ -1643,7 +1729,17 @@ static FastTemplateEflagMasks ft_template_eflag_masks(
         break;
     }
 
-    if (fields->kind == FT_JCC_REL && fields->direct_cmp_lhs_gpr >= 0) {
+    if ((fields->kind == FT_JCC_REL || fields->kind == FT_SETCC_RM8) &&
+        fields->direct_float_result) {
+        masks.use = 0;
+        return masks;
+    }
+    if ((fields->kind == FT_JCC_REL || fields->kind == FT_SETCC_RM8 ||
+         fields->kind == FT_CMOV_R64_RM64 ||
+         fields->kind == FT_CMOV_R32_RM32 ||
+         fields->kind == FT_CMOV_R16_RM16) &&
+        fields->direct_cmp_lhs_gpr >= 0) {
+        masks.use = 0;
         return masks;
     }
 
@@ -1835,6 +1931,66 @@ static FastTemplateEflagMasks ft_template_eflag_masks(
     return masks;
 }
 
+/* Match the legacy option_instptn bit assignment (INSTPTN_OPC_* >> 4). */
+#define FT_INSTPTN_CMP_JCC          (1ULL << 0)
+#define FT_INSTPTN_TEST_JCC         (1ULL << 1)
+#define FT_INSTPTN_BT_JCC           (1ULL << 2)
+#define FT_INSTPTN_CQO_IDIV         (1ULL << 3)
+#define FT_INSTPTN_CMP_SBB          (1ULL << 4)
+#define FT_INSTPTN_COMISD_JCC       (1ULL << 5)
+#define FT_INSTPTN_COMISS_JCC       (1ULL << 6)
+#define FT_INSTPTN_UCOMISD_JCC      (1ULL << 7)
+#define FT_INSTPTN_UCOMISS_JCC      (1ULL << 8)
+#define FT_INSTPTN_XOR_DIV          (1ULL << 9)
+#define FT_INSTPTN_CDQ_IDIV         (1ULL << 10)
+#define FT_INSTPTN_CMP_XX_JCC       (1ULL << 11)
+#define FT_INSTPTN_TEST_XX_JCC      (1ULL << 12)
+#define FT_INSTPTN_BT_XX_JCC        (1ULL << 13)
+#define FT_INSTPTN_COMISD_XX_JCC    (1ULL << 14)
+#define FT_INSTPTN_COMISS_XX_JCC    (1ULL << 15)
+#define FT_INSTPTN_UCOMISD_XX_JCC   (1ULL << 16)
+#define FT_INSTPTN_UCOMISS_XX_JCC   (1ULL << 17)
+#define FT_INSTPTN_CMP_XXCC_CON     (1ULL << 18)
+#define FT_INSTPTN_TEST_XXCC_CON    (1ULL << 19)
+#define FT_INSTPTN_UCOMISD_SETA     (1ULL << 20)
+#define FT_INSTPTN_ADD_JCC          (1ULL << 21)
+#define FT_INSTPTN_SUB_JCC          (1ULL << 22)
+#define FT_INSTPTN_AND_JCC          (1ULL << 23)
+#define FT_INSTPTN_OR_JCC           (1ULL << 24)
+#define FT_INSTPTN_OR_XX_JCC        (1ULL << 25)
+#define FT_INSTPTN_XOR_JCC          (1ULL << 26)
+#define FT_INSTPTN_XOR_XX_JCC       (1ULL << 27)
+#define FT_INSTPTN_SAR_JCC          (1ULL << 28)
+#define FT_INSTPTN_AND_XX_JCC       (1ULL << 29)
+#define FT_INSTPTN_SHR_JCC          (1ULL << 30)
+#define FT_INSTPTN_SUB_XX_JCC       (1ULL << 31)
+#define FT_INSTPTN_SHR_XX_JCC       (1ULL << 32)
+#define FT_INSTPTN_DEC_JCC          (1ULL << 33)
+
+static bool ft_instptn_enabled(uint64_t bit)
+{
+#ifdef QUICKTRANS_LATU
+    (void)bit;
+    return true;
+#else
+    return (option_instptn & bit) != 0;
+#endif
+}
+
+static void ft_analyze_direct_jcc_gap(
+    FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
+    int count);
+static void ft_analyze_direct_xxcc(
+    FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
+    int count);
+static void ft_analyze_div_patterns(FastTemplateFields *fields, int count);
+static void ft_analyze_float_jcc(FastTemplateFields *fields, int count);
+static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
+                                    const FastTemplateRuntimeInfo **meta,
+                                    int count);
+static void ft_analyze_ucomisd_seta(FastTemplateFields *fields, int count);
+static void ft_analyze_cmp_sbb(FastTemplateFields *fields, int count);
+
 static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo **meta,
                                    int count)
@@ -1843,8 +1999,18 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
     bool trace_opt = ft_primary_trace_opt_enabled();
 
     if (count > 1) {
-        ft_analyze_direct_jcc_pair(&fields[count - 2], &fields[count - 1]);
+        ft_analyze_direct_jcc_pair(&fields[count - 2], &fields[count - 1],
+                                   false);
+        if (fields[count - 1].direct_cmp_lhs_gpr < 0) {
+            ft_analyze_direct_jcc_gap(fields, meta, count);
+        }
     }
+    ft_analyze_direct_xxcc(fields, meta, count);
+    ft_analyze_div_patterns(fields, count);
+    ft_analyze_float_jcc(fields, count);
+    ft_analyze_float_xx_jcc(fields, meta, count);
+    ft_analyze_ucomisd_seta(fields, count);
+    ft_analyze_cmp_sbb(fields, count);
     for (int i = count - 1; i >= 0; --i) {
         FastTemplateEflagMasks masks;
         uint8_t live_def;
@@ -1856,16 +2022,28 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
             fprintf(stderr,
                     "[FT-OPT] pc=0x%lx id=%d kind=%d alu=%u form=%u "
                     "width=%u mod=%u rm=%u reg=%u imm=%d direct_lhs=%d "
-                    "direct_rhs=%d "
-                    "use=0x%x def=0x%x pending_before=0x%x "
+                    "direct_rhs=%d direct_kind=%u bit_reg=%d bit_imm=%d "
+                    "instptn=0x%llx use=0x%x def=0x%x pending_before=0x%x "
+                    "float_result=%d float_xx=%d "
                     "live_def=0x%x skip=%d\n",
                     (unsigned long)fields[i].address, fields[i].id,
                     fields[i].kind, fields[i].alu_op, fields[i].alu_form,
                     fields[i].alu_width, fields[i].modrm_mod,
                     fields[i].modrm_rm_index, fields[i].modrm_reg_index,
                     fields[i].imm, fields[i].direct_cmp_lhs_gpr,
-                    fields[i].direct_cmp_rhs_gpr, masks.use, masks.def,
-                    pending, live_def, fields[i].skip_flags);
+                    fields[i].direct_cmp_rhs_gpr,
+                    fields[i].direct_branch_kind,
+                    fields[i].direct_bit_index_gpr,
+                    fields[i].direct_bit_index_imm,
+#ifdef QUICKTRANS_LATU
+                    0xffffffffffffffffULL,
+#else
+                    (unsigned long long)option_instptn,
+#endif
+                    masks.use, masks.def, pending,
+                    fields[i].direct_float_result,
+                    fields[i].direct_float_xx, live_def,
+                    fields[i].skip_flags);
         }
         pending &= ~masks.def;
         pending |= masks.use;
@@ -1873,28 +2051,592 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
     return pending;
 }
 
-static void ft_analyze_direct_jcc_pair(FastTemplateFields *test,
-                                       FastTemplateFields *jcc)
+static bool ft_direct_jcc_kind(int id, FastDirectBranchKind *kind)
 {
-    if (jcc->kind != FT_JCC_REL ||
-        (jcc->id != dt_X86_INS_JE && jcc->id != dt_X86_INS_JNE) ||
-        (test->alu_op != FT_ALU_TEST && test->alu_op != FT_ALU_CMP) ||
-        test->alu_form != FT_ALU_FORM_RM_R ||
-        test->modrm_mod != 3 ||
-        test->modrm_rm_index >= GPR_NUM ||
-        test->modrm_reg_index >= GPR_NUM ||
-        (test->alu_width == 8 &&
-         (ft_modrm_rm_is_high8(test) || ft_modrm_reg_is_high8(test))) ||
-        (test->alu_op == FT_ALU_TEST &&
-         test->modrm_reg_index != test->modrm_rm_index)) {
+    switch (id) {
+    case dt_X86_INS_JE:  *kind = FT_DIRECT_BRANCH_EQ; return true;
+    case dt_X86_INS_JNE: *kind = FT_DIRECT_BRANCH_NE; return true;
+    case dt_X86_INS_JL:  *kind = FT_DIRECT_BRANCH_LT; return true;
+    case dt_X86_INS_JGE: *kind = FT_DIRECT_BRANCH_GE; return true;
+    case dt_X86_INS_JB:  *kind = FT_DIRECT_BRANCH_LTU; return true;
+    case dt_X86_INS_JAE: *kind = FT_DIRECT_BRANCH_GEU; return true;
+    case dt_X86_INS_JLE: *kind = FT_DIRECT_BRANCH_LE; return true;
+    case dt_X86_INS_JG:  *kind = FT_DIRECT_BRANCH_GT; return true;
+    case dt_X86_INS_JBE: *kind = FT_DIRECT_BRANCH_LEU; return true;
+    case dt_X86_INS_JA:  *kind = FT_DIRECT_BRANCH_GTU; return true;
+    default: return false;
+    }
+}
+
+static bool ft_direct_alu_reg_operands(const FastTemplateFields *alu,
+                                       int *lhs, int *rhs)
+{
+    if (alu->alu_form == FT_ALU_FORM_RM_R && alu->modrm_mod == 3 &&
+        alu->modrm_rm_index < GPR_NUM && alu->modrm_reg_index < GPR_NUM &&
+        !(alu->alu_width == 8 &&
+          (ft_modrm_rm_is_high8(alu) || ft_modrm_reg_is_high8(alu)))) {
+        *lhs = alu->modrm_rm_index;
+        *rhs = alu->modrm_reg_index;
+        return true;
+    }
+    return false;
+}
+
+static void ft_analyze_cmp_sbb(FastTemplateFields *fields, int count)
+{
+    for (int i = 0; i + 1 < count; ++i) {
+        FastTemplateFields *cmp = &fields[i];
+        FastTemplateFields *sbb = &fields[i + 1];
+        int lhs;
+        int rhs;
+
+        if (cmp->alu_op != FT_ALU_CMP || sbb->alu_op != FT_ALU_SBB ||
+            sbb->alu_form != FT_ALU_FORM_RM_R || sbb->modrm_mod != 3 ||
+            sbb->modrm_rm_index != sbb->modrm_reg_index ||
+            sbb->modrm_rm_index >= GPR_NUM ||
+            !ft_direct_alu_reg_operands(cmp, &lhs, &rhs) ||
+            !ft_instptn_enabled(FT_INSTPTN_CMP_SBB)) {
+            continue;
+        }
+        cmp->instptn_skip = true;
+        sbb->direct_cmp_lhs_gpr = lhs;
+        sbb->direct_cmp_rhs_gpr = rhs;
+        sbb->direct_cmp_width = cmp->alu_width;
+        sbb->direct_branch_kind = FT_DIRECT_BRANCH_LTU;
+    }
+}
+
+static void ft_analyze_ucomisd_seta(FastTemplateFields *fields, int count)
+{
+    for (int i = 0; i + 1 < count; ++i) {
+        FastTemplateFields *head = &fields[i];
+        FastTemplateFields *tail = &fields[i + 1];
+        int cond;
+        int id;
+
+        if (head->kind != FT_SIMD_SCALAR_CMP_XMM_XMMM ||
+            head->id != dt_X86_INS_UCOMISD ||
+            tail->kind != FT_SETCC_RM8 ||
+            !ft_setcc_opcode_info(tail->opcode1, &cond, &id) ||
+            id != dt_X86_INS_SETA ||
+            !ft_instptn_enabled(FT_INSTPTN_UCOMISD_SETA)) {
+            continue;
+        }
+        head->direct_branch_kind = FT_DIRECT_BRANCH_GTU;
+        tail->direct_float_result = true;
+    }
+}
+
+static bool ft_float_jcc_kind(int id, FastDirectBranchKind *kind)
+{
+    switch (id) {
+    case dt_X86_INS_JE:  *kind = FT_DIRECT_BRANCH_EQ; return true;
+    case dt_X86_INS_JNE: *kind = FT_DIRECT_BRANCH_NE; return true;
+    case dt_X86_INS_JB:  *kind = FT_DIRECT_BRANCH_LTU; return true;
+    case dt_X86_INS_JAE: *kind = FT_DIRECT_BRANCH_GEU; return true;
+    case dt_X86_INS_JBE: *kind = FT_DIRECT_BRANCH_LEU; return true;
+    case dt_X86_INS_JA:  *kind = FT_DIRECT_BRANCH_GTU; return true;
+    case dt_X86_INS_JP:  *kind = FT_DIRECT_BRANCH_BIT_SET; return true;
+    case dt_X86_INS_JNP: *kind = FT_DIRECT_BRANCH_BIT_CLEAR; return true;
+    default: return false;
+    }
+}
+
+static void ft_analyze_float_jcc(FastTemplateFields *fields, int count)
+{
+    if (count < 2) return;
+    FastTemplateFields *head = &fields[count - 2];
+    FastTemplateFields *tail = &fields[count - 1];
+    FastDirectBranchKind kind;
+    uint64_t bit;
+
+    if (head->kind != FT_SIMD_SCALAR_CMP_XMM_XMMM ||
+        tail->kind != FT_JCC_REL || !ft_float_jcc_kind(tail->id, &kind)) {
+        return;
+    }
+    switch (head->id) {
+    case dt_X86_INS_COMISD: bit = FT_INSTPTN_COMISD_JCC; break;
+    case dt_X86_INS_COMISS: bit = FT_INSTPTN_COMISS_JCC; break;
+    case dt_X86_INS_UCOMISD: bit = FT_INSTPTN_UCOMISD_JCC; break;
+    case dt_X86_INS_UCOMISS: bit = FT_INSTPTN_UCOMISS_JCC; break;
+    default: return;
+    }
+    if (!ft_instptn_enabled(bit)) return;
+    head->direct_branch_kind = kind;
+    tail->direct_float_result = true;
+}
+
+static bool ft_float_gap_preserves_xmm(const FastTemplateFields *f)
+{
+    switch (f->kind) {
+    case FT_NOP_MULTI:
+    case FT_MOV_RM64_R64:
+    case FT_MOV_RM32_R32:
+    case FT_MOV_R64_RM64:
+    case FT_MOV_R32_RM32:
+    case FT_MOV_R32_IMM32:
+    case FT_LEA_R64_M:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
+                                    const FastTemplateRuntimeInfo **meta,
+                                    int count)
+{
+#ifndef CONFIG_SOFTMMU
+    (void)fields;
+    (void)meta;
+    (void)count;
+    return;
+#else
+    for (int tail = 1; tail < count; ++tail) {
+        FastTemplateFields *jcc = &fields[tail];
+        FastDirectBranchKind kind;
+        if (jcc->kind != FT_JCC_REL || !ft_float_jcc_kind(jcc->id, &kind))
+            continue;
+        int first = tail > 4 ? tail - 4 : 0;
+        for (int head = tail - 1; head >= first; --head) {
+            FastTemplateFields *cmp = &fields[head];
+            bool is_double, qnan;
+            int id;
+            uint64_t bit;
+            if (cmp->kind != FT_SIMD_SCALAR_CMP_XMM_XMMM ||
+                !ft_simd_scalar_cmp_opcode_info(cmp->prefix0, cmp->prefix2,
+                                                 cmp->opcode1, &is_double,
+                                                 &qnan, &id))
+                continue;
+            switch (id) {
+            case dt_X86_INS_COMISD: bit = FT_INSTPTN_COMISD_XX_JCC; break;
+            case dt_X86_INS_COMISS: bit = FT_INSTPTN_COMISS_XX_JCC; break;
+            case dt_X86_INS_UCOMISD: bit = FT_INSTPTN_UCOMISD_XX_JCC; break;
+            case dt_X86_INS_UCOMISS: bit = FT_INSTPTN_UCOMISS_XX_JCC; break;
+            default: continue;
+            }
+            if (!ft_instptn_enabled(bit))
+                continue;
+            (void)is_double;
+            (void)qnan;
+            bool safe = true;
+            for (int gap = head + 1; gap < tail; ++gap) {
+                FastTemplateEflagMasks masks = ft_template_eflag_masks(&fields[gap], meta[gap]);
+                if (masks.use || masks.def || (meta[gap] && meta[gap]->terminal_exit) ||
+                    !ft_float_gap_preserves_xmm(&fields[gap])) {
+                    safe = false;
+                    break;
+                }
+            }
+            if (!safe)
+                continue;
+            /*
+             * The comparison still runs here, including its exception check.
+             * System-mode a4 is a legacy pattern temporary, not a guest GPR.
+             * The restricted gap above contains no emitter that clobbers it.
+             */
+            cmp->direct_float_xx = true;
+            cmp->direct_branch_kind = kind;
+            jcc->direct_float_xx = true;
+            jcc->direct_branch_kind = kind;
+            break;
+        }
+    }
+#endif
+}
+
+static void ft_analyze_div_patterns(FastTemplateFields *fields, int count)
+{
+    for (int i = 0; i + 1 < count; ++i) {
+        FastTemplateFields *head = &fields[i];
+        FastTemplateFields *tail = &fields[i + 1];
+        uint8_t kind = FT_INSTPTN_DIV_NONE;
+        uint64_t bit = 0;
+
+        if (head->kind == FT_CQO && tail->kind == FT_IDIV_RM64) {
+            kind = FT_INSTPTN_DIV_CQO_IDIV64;
+            bit = FT_INSTPTN_CQO_IDIV;
+        } else if (head->kind == FT_CDQ && tail->kind == FT_IDIV_RM32) {
+            kind = FT_INSTPTN_DIV_CDQ_IDIV32;
+            bit = FT_INSTPTN_CDQ_IDIV;
+        } else if (head->alu_op == FT_ALU_XOR &&
+                   head->alu_form == FT_ALU_FORM_RM_R &&
+                   head->modrm_mod == 3 &&
+                   head->modrm_rm_index == rdx_index &&
+                   head->modrm_reg_index == rdx_index) {
+            if (head->alu_width == 32 && tail->kind == FT_DIV_RM32) {
+                kind = FT_INSTPTN_DIV_XOR_DIV32;
+            } else if (head->alu_width == 64 && tail->kind == FT_DIV_RM64) {
+                kind = FT_INSTPTN_DIV_XOR_DIV64;
+            }
+            bit = FT_INSTPTN_XOR_DIV;
+        }
+        if (kind && ft_instptn_enabled(bit)) {
+            head->instptn_skip = true;
+            tail->instptn_div_kind = kind;
+        }
+    }
+}
+
+static bool ft_direct_xxcc_kind(const FastTemplateFields *fields,
+                                 FastDirectBranchKind *kind)
+{
+    int id = fields->id;
+
+    if (fields->kind == FT_SETCC_RM8) {
+        int cond;
+
+        if (!ft_setcc_opcode_info(fields->opcode1, &cond, &id)) {
+            return false;
+        }
+    }
+    switch (id) {
+    case dt_X86_INS_SETE: case dt_X86_INS_CMOVE:
+        *kind = FT_DIRECT_BRANCH_EQ; return true;
+    case dt_X86_INS_SETNE: case dt_X86_INS_CMOVNE:
+        *kind = FT_DIRECT_BRANCH_NE; return true;
+    case dt_X86_INS_SETL: case dt_X86_INS_CMOVL:
+        *kind = FT_DIRECT_BRANCH_LT; return true;
+    case dt_X86_INS_SETGE: case dt_X86_INS_CMOVGE:
+        *kind = FT_DIRECT_BRANCH_GE; return true;
+    case dt_X86_INS_SETB: case dt_X86_INS_CMOVB:
+        *kind = FT_DIRECT_BRANCH_LTU; return true;
+    case dt_X86_INS_SETAE: case dt_X86_INS_CMOVAE:
+        *kind = FT_DIRECT_BRANCH_GEU; return true;
+    case dt_X86_INS_SETLE: case dt_X86_INS_CMOVLE:
+        *kind = FT_DIRECT_BRANCH_LE; return true;
+    case dt_X86_INS_SETG: case dt_X86_INS_CMOVG:
+        *kind = FT_DIRECT_BRANCH_GT; return true;
+    case dt_X86_INS_SETBE: case dt_X86_INS_CMOVBE:
+        *kind = FT_DIRECT_BRANCH_LEU; return true;
+    case dt_X86_INS_SETA: case dt_X86_INS_CMOVA:
+        *kind = FT_DIRECT_BRANCH_GTU; return true;
+    case dt_X86_INS_SETS: case dt_X86_INS_CMOVS:
+        *kind = FT_DIRECT_BRANCH_LT; return true;
+    case dt_X86_INS_SETNS: case dt_X86_INS_CMOVNS:
+        *kind = FT_DIRECT_BRANCH_GE; return true;
+    case dt_X86_INS_SETO: case dt_X86_INS_CMOVO:
+        *kind = FT_DIRECT_BRANCH_NEVER; return true;
+    case dt_X86_INS_SETNO: case dt_X86_INS_CMOVNO:
+        *kind = FT_DIRECT_BRANCH_ALWAYS; return true;
+    default:
+        return false;
+    }
+}
+
+static bool ft_is_xxcc_consumer(const FastTemplateFields *fields)
+{
+    return fields->kind == FT_SETCC_RM8 ||
+           fields->kind == FT_CMOV_R64_RM64 ||
+           fields->kind == FT_CMOV_R32_RM32 ||
+           fields->kind == FT_CMOV_R16_RM16;
+}
+
+static bool ft_direct_gap_is_safe(
+    const FastTemplateFields *fields, const FastTemplateRuntimeInfo *meta,
+    int lhs, int rhs);
+
+static void ft_analyze_direct_xxcc(
+    FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
+    int count)
+{
+    for (int tail = 1; tail < count; ++tail) {
+        FastDirectBranchKind kind;
+        int first;
+
+        if (!ft_is_xxcc_consumer(&fields[tail]) ||
+            !ft_direct_xxcc_kind(&fields[tail], &kind)) {
+            continue;
+        }
+        first = tail > 4 ? tail - 4 : 0;
+        for (int head = tail - 1; head >= first; --head) {
+            FastTemplateFields *alu = &fields[head];
+            int tail_id = fields[tail].id;
+            int unused_cond;
+
+            if (fields[tail].kind == FT_SETCC_RM8 &&
+                !ft_setcc_opcode_info(fields[tail].opcode1,
+                                      &unused_cond, &tail_id)) {
+                continue;
+            }
+            uint64_t option_bit;
+            int lhs = -1;
+            int rhs = -1;
+            bool safe = true;
+
+            if (alu->alu_op == FT_ALU_CMP) {
+                option_bit = FT_INSTPTN_CMP_XXCC_CON;
+                if (!ft_direct_alu_reg_operands(alu, &lhs, &rhs)) {
+                    continue;
+                }
+                switch (tail_id) {
+                case dt_X86_INS_SETE: case dt_X86_INS_SETNE:
+                case dt_X86_INS_SETL: case dt_X86_INS_SETGE:
+                case dt_X86_INS_SETB: case dt_X86_INS_SETAE:
+                case dt_X86_INS_SETLE: case dt_X86_INS_SETG:
+                case dt_X86_INS_SETBE: case dt_X86_INS_SETA:
+                case dt_X86_INS_CMOVE: case dt_X86_INS_CMOVNE:
+                case dt_X86_INS_CMOVL: case dt_X86_INS_CMOVGE:
+                case dt_X86_INS_CMOVB: case dt_X86_INS_CMOVAE:
+                case dt_X86_INS_CMOVLE: case dt_X86_INS_CMOVG:
+                case dt_X86_INS_CMOVBE: case dt_X86_INS_CMOVA:
+                    break;
+                default:
+                    continue;
+                }
+            } else if (alu->alu_op == FT_ALU_TEST) {
+                option_bit = FT_INSTPTN_TEST_XXCC_CON;
+                if (!ft_direct_alu_reg_operands(alu, &lhs, &rhs) ||
+                    lhs != rhs) {
+                    continue;
+                }
+                rhs = -1;
+                switch (tail_id) {
+                case dt_X86_INS_SETE: case dt_X86_INS_SETNE:
+                case dt_X86_INS_SETS: case dt_X86_INS_SETNS:
+                case dt_X86_INS_SETLE: case dt_X86_INS_SETG:
+                case dt_X86_INS_SETO: case dt_X86_INS_SETNO:
+                case dt_X86_INS_SETB: case dt_X86_INS_SETAE:
+                case dt_X86_INS_SETBE: case dt_X86_INS_SETA:
+                case dt_X86_INS_CMOVE: case dt_X86_INS_CMOVNE:
+                case dt_X86_INS_CMOVS: case dt_X86_INS_CMOVNS:
+                case dt_X86_INS_CMOVLE: case dt_X86_INS_CMOVG:
+                case dt_X86_INS_CMOVO: case dt_X86_INS_CMOVNO:
+                case dt_X86_INS_CMOVB: case dt_X86_INS_CMOVAE:
+                case dt_X86_INS_CMOVBE: case dt_X86_INS_CMOVA:
+                    break;
+                default:
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            if (!ft_instptn_enabled(option_bit)) {
+                break;
+            }
+            for (int gap = head + 1; gap < tail; ++gap) {
+                if (!ft_direct_gap_is_safe(&fields[gap], meta[gap],
+                                           lhs, rhs)) {
+                    safe = false;
+                    break;
+                }
+            }
+            if (safe) {
+                fields[tail].direct_cmp_lhs_gpr = lhs;
+                fields[tail].direct_cmp_rhs_gpr = rhs;
+                fields[tail].direct_cmp_width = alu->alu_width;
+                fields[tail].direct_branch_kind = kind;
+                break;
+            }
+        }
+    }
+}
+
+static bool ft_gap_writes_gpr(const FastTemplateFields *fields, int reg)
+{
+    int dst = -1;
+
+    switch (fields->kind) {
+    case FT_MOV_R32_IMM32:
+        dst = fields->reg;
+        break;
+    case FT_MOV_R64_RM64:
+    case FT_MOV_R32_RM32:
+    case FT_LEA_R64_M:
+        dst = fields->modrm_reg_index;
+        break;
+    case FT_MOV_RM64_R64:
+    case FT_MOV_RM32_R32:
+        if (fields->modrm_mod != 3) {
+            return false;
+        }
+        dst = fields->modrm_rm_index;
+        break;
+    default:
+        return true;
+    }
+    return dst == reg;
+}
+
+static bool ft_direct_gap_is_safe(
+    const FastTemplateFields *fields, const FastTemplateRuntimeInfo *meta,
+    int lhs, int rhs)
+{
+    FastTemplateEflagMasks masks = ft_template_eflag_masks(fields, meta);
+
+    if (masks.use || masks.def || (meta && meta->terminal_exit)) {
+        return false;
+    }
+    return !ft_gap_writes_gpr(fields, lhs) &&
+           (rhs < 0 || !ft_gap_writes_gpr(fields, rhs));
+}
+
+static void ft_analyze_direct_jcc_gap(
+    FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
+    int count)
+{
+    FastTemplateFields *jcc = &fields[count - 1];
+    int first = count > 5 ? count - 5 : 0;
+
+    if (jcc->kind != FT_JCC_REL) {
+        return;
+    }
+    for (int head = count - 3; head >= first; --head) {
+        FastTemplateFields trial = *jcc;
+        bool safe = true;
+
+        ft_analyze_direct_jcc_pair(&fields[head], &trial, true);
+        if (trial.direct_cmp_lhs_gpr < 0) {
+            continue;
+        }
+        for (int gap = head + 1; gap < count - 1; ++gap) {
+            if (!ft_direct_gap_is_safe(&fields[gap], meta[gap],
+                                       trial.direct_cmp_lhs_gpr,
+                                       trial.direct_cmp_rhs_gpr)) {
+                safe = false;
+                break;
+            }
+        }
+        if (safe) {
+            *jcc = trial;
+            return;
+        }
+    }
+}
+
+static void ft_analyze_direct_jcc_pair(FastTemplateFields *alu,
+                                       FastTemplateFields *jcc, bool gap)
+{
+    FastDirectBranchKind kind = FT_DIRECT_BRANCH_NONE;
+    uint64_t option_bit = 0;
+    int lhs = -1;
+    int rhs = -1;
+
+    if (jcc->kind != FT_JCC_REL) {
         return;
     }
 
-    jcc->direct_cmp_lhs_gpr = test->modrm_rm_index;
-    jcc->direct_cmp_rhs_gpr = test->alu_op == FT_ALU_CMP ?
-                              test->modrm_reg_index : -1;
-    jcc->direct_cmp_width = test->alu_width;
-    jcc->direct_taken_if_equal = jcc->id == dt_X86_INS_JE;
+    if (ft_alu_writes_dst(alu->alu_op) &&
+        ft_direct_result_jcc_kind(alu->alu_op, jcc->id, &kind) &&
+        ft_direct_alu_result_gpr(alu, &lhs)) {
+        switch (alu->alu_op) {
+        case FT_ALU_ADD: option_bit = FT_INSTPTN_ADD_JCC; break;
+        case FT_ALU_SUB: option_bit = FT_INSTPTN_SUB_JCC; break;
+        case FT_ALU_AND: option_bit = FT_INSTPTN_AND_JCC; break;
+        case FT_ALU_OR:  option_bit = FT_INSTPTN_OR_JCC; break;
+        case FT_ALU_XOR: option_bit = FT_INSTPTN_XOR_JCC; break;
+        default: return;
+        }
+        rhs = -1;
+    } else if ((alu->kind == FT_DEC_RM8 || alu->kind == FT_DEC_RM16 ||
+                alu->kind == FT_DEC_RM32 || alu->kind == FT_DEC_RM64) &&
+               alu->modrm_mod == 3 && alu->modrm_rm_index < GPR_NUM &&
+               !(alu->kind == FT_DEC_RM8 && ft_modrm_rm_is_high8(alu)) &&
+               (jcc->id == dt_X86_INS_JE || jcc->id == dt_X86_INS_JNE)) {
+        lhs = alu->modrm_rm_index;
+        rhs = -1;
+        kind = jcc->id == dt_X86_INS_JE ? FT_DIRECT_BRANCH_EQ :
+                                          FT_DIRECT_BRANCH_NE;
+        option_bit = FT_INSTPTN_DEC_JCC;
+    } else if ((alu->kind == FT_SHIFT_RM_ONE ||
+                alu->kind == FT_SHIFT_RM_IMM8) &&
+               alu->modrm_mod == 3 && alu->modrm_rm_index < GPR_NUM &&
+               alu->modrm_reg != 6 &&
+               (alu->modrm_reg == 5 || alu->modrm_reg == 7) &&
+               (alu->kind == FT_SHIFT_RM_ONE ||
+                (alu->imm & (ft_rex_w(alu) ? 63 : 31)) != 0) &&
+               !(ft_shift_width(alu) == 8 && ft_modrm_rm_is_high8(alu))) {
+        bool zero_branch = jcc->id == dt_X86_INS_JE ||
+                           jcc->id == dt_X86_INS_JNE;
+        bool sign_branch = alu->modrm_reg == 7 &&
+                           (jcc->id == dt_X86_INS_JS ||
+                            jcc->id == dt_X86_INS_JNS);
+
+        if (!zero_branch && !sign_branch) {
+            return;
+        }
+        lhs = alu->modrm_rm_index;
+        rhs = -1;
+        if (jcc->id == dt_X86_INS_JE) kind = FT_DIRECT_BRANCH_EQ;
+        if (jcc->id == dt_X86_INS_JNE) kind = FT_DIRECT_BRANCH_NE;
+        if (jcc->id == dt_X86_INS_JS) kind = FT_DIRECT_BRANCH_LT;
+        if (jcc->id == dt_X86_INS_JNS) kind = FT_DIRECT_BRANCH_GE;
+        option_bit = alu->modrm_reg == 7 ? FT_INSTPTN_SAR_JCC :
+                                           FT_INSTPTN_SHR_JCC;
+    } else if (alu->id == dt_X86_INS_BT &&
+               (jcc->id == dt_X86_INS_JB || jcc->id == dt_X86_INS_JAE) &&
+               alu->modrm_mod == 3 && alu->modrm_rm_index < GPR_NUM) {
+        lhs = alu->modrm_rm_index;
+        rhs = -1;
+        if (alu->kind == FT_BTX_RM_R && alu->modrm_reg_index < GPR_NUM) {
+            jcc->direct_bit_index_gpr = alu->modrm_reg_index;
+        } else if (alu->kind == FT_BTX_RM32_IMM8) {
+            jcc->direct_bit_index_imm = alu->imm;
+        } else {
+            return;
+        }
+        kind = jcc->id == dt_X86_INS_JB ? FT_DIRECT_BRANCH_BIT_SET :
+                                          FT_DIRECT_BRANCH_BIT_CLEAR;
+        option_bit = FT_INSTPTN_BT_JCC;
+    } else if (!ft_direct_jcc_kind(jcc->id, &kind)) {
+        return;
+    } else if (alu->alu_op == FT_ALU_CMP && ft_direct_alu_reg_operands(alu, &lhs, &rhs)) {
+        /* CMP lhs, rhs maps directly to signed/unsigned LA comparisons. */
+        option_bit = FT_INSTPTN_CMP_JCC;
+    } else if (alu->alu_op == FT_ALU_CMP && alu->imm == 0 &&
+               (kind == FT_DIRECT_BRANCH_EQ || kind == FT_DIRECT_BRANCH_NE)) {
+        if (alu->alu_form == FT_ALU_FORM_ACC_IMM) {
+            lhs = rax_index;
+        } else if (alu->alu_form == FT_ALU_FORM_RM_IMM &&
+                   alu->modrm_mod == 3 && alu->modrm_rm_index < GPR_NUM &&
+                   !(alu->alu_width == 8 && ft_modrm_rm_is_high8(alu))) {
+            lhs = alu->modrm_rm_index;
+        }
+        option_bit = FT_INSTPTN_CMP_JCC;
+    } else if (alu->alu_op == FT_ALU_TEST &&
+               (kind == FT_DIRECT_BRANCH_EQ || kind == FT_DIRECT_BRANCH_NE) &&
+               ft_direct_alu_reg_operands(alu, &lhs, &rhs) && lhs == rhs) {
+        rhs = -1;
+        option_bit = FT_INSTPTN_TEST_JCC;
+    } else {
+        return;
+    }
+
+    if (gap) {
+        switch (option_bit) {
+        case FT_INSTPTN_CMP_JCC: option_bit = FT_INSTPTN_CMP_XX_JCC; break;
+        case FT_INSTPTN_TEST_JCC: option_bit = FT_INSTPTN_TEST_XX_JCC; break;
+        case FT_INSTPTN_BT_JCC: option_bit = FT_INSTPTN_BT_XX_JCC; break;
+        case FT_INSTPTN_OR_JCC: option_bit = FT_INSTPTN_OR_XX_JCC; break;
+        case FT_INSTPTN_XOR_JCC: option_bit = FT_INSTPTN_XOR_XX_JCC; break;
+        case FT_INSTPTN_AND_JCC: option_bit = FT_INSTPTN_AND_XX_JCC; break;
+        case FT_INSTPTN_SUB_JCC: option_bit = FT_INSTPTN_SUB_XX_JCC; break;
+        case FT_INSTPTN_SHR_JCC: option_bit = FT_INSTPTN_SHR_XX_JCC; break;
+        default: option_bit = 0; break;
+        }
+    }
+    if (lhs < 0 || option_bit == 0 || !ft_instptn_enabled(option_bit)) {
+        return;
+    }
+    jcc->direct_cmp_lhs_gpr = lhs;
+    jcc->direct_cmp_rhs_gpr = rhs;
+    if (alu->alu_width) {
+        jcc->direct_cmp_width = alu->alu_width;
+    } else if (alu->id == dt_X86_INS_BT) {
+        jcc->direct_cmp_width = ft_rex_w(alu) ? 64 :
+                                alu->prefix2 == dt_X86_PREFIX_OPSIZE ? 16 : 32;
+    } else if (alu->kind == FT_DEC_RM8) {
+        jcc->direct_cmp_width = 8;
+    } else if (alu->kind == FT_DEC_RM16) {
+        jcc->direct_cmp_width = 16;
+    } else if (alu->kind == FT_DEC_RM32) {
+        jcc->direct_cmp_width = 32;
+    } else if (alu->kind == FT_DEC_RM64) {
+        jcc->direct_cmp_width = 64;
+    } else {
+        jcc->direct_cmp_width = ft_shift_width(alu);
+    }
+    jcc->direct_branch_kind = kind;
 }
 
 static bool ft_template_uses_x87_top(FastTemplateKind kind)
@@ -2520,7 +3262,6 @@ uint8_t latx_fast_analyze_tu_tb_flags(FastTranslatorTuTbMeta *tu_meta,
     if (!tu_meta) {
         return FT_EFLAGS_ALL;
     }
-
     count = tu_meta->icount;
     if (count > TCG_MAX_INSNS) {
         count = TCG_MAX_INSNS;

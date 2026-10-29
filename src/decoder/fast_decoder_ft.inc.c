@@ -154,9 +154,15 @@ static void fd_ft_init_fields(FastTemplateFields *fields,
     fields->alu_width = 0;
     fields->direct_cmp_lhs_gpr = -1;
     fields->direct_cmp_rhs_gpr = -1;
-    fields->addr32 = s->prefix[3] == dt_X86_PREFIX_ADDRSIZE;
+    fields->direct_bit_index_gpr = -1;
+    fields->direct_bit_index_imm = -1;
+    fields->instptn_div_kind = 0;
+    fields->instptn_skip = false;
+    fields->direct_float_result = false;
+    fields->direct_float_xx = false;
+    fields->addr32 = s->aflag == 32;
     fields->skip_flags = false;
-    fields->direct_taken_if_equal = false;
+    fields->direct_branch_kind = FT_DIRECT_BRANCH_NONE;
 }
 
 static void fd_ft_set_alu(FastTemplateFields *fields, FastAluOp op,

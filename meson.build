@@ -195,6 +195,15 @@ test(
 )
 
 test(
+  'quicktrans_option_instptn',
+  python,
+  args: [
+    files('tests/test-option-instptn.py'),
+    files('src/emitter/fast_translator/fast-translator.c'),
+  ],
+)
+
+test(
   'quicktrans_inst_pattern_cache',
   python,
   args: [

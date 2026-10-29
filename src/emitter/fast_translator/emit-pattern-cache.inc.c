@@ -12,6 +12,7 @@
 
 typedef struct FtInstPatternTable {
     uint64_t keys[FT_INST_PATTERN_TABLE_SIZE];
+    uint64_t extra_keys[FT_INST_PATTERN_TABLE_SIZE];
     uint8_t words[FT_INST_PATTERN_TABLE_SIZE];
     uint32_t code[FT_INST_PATTERN_TABLE_SIZE][FT_INST_PATTERN_MAX_WORDS];
 } FtInstPatternTable;
@@ -58,7 +59,7 @@ static inline void ft_inst_pattern_stats_start(void)
 #endif
 
 static bool ft_inst_pattern_key(const FastTemplateFields *fields,
-                                uint64_t *key)
+                                uint64_t *key, uint64_t *extra_key)
 {
     uint64_t meta;
 
@@ -77,11 +78,20 @@ static bool ft_inst_pattern_key(const FastTemplateFields *fields,
            ((uint64_t)(uint8_t)fields->rex << 22) |
            ((uint64_t)fields->skip_flags << 30);
     *key = meta | ((uint64_t)(uint32_t)fields->imm << 32);
+    *extra_key = (uint64_t)(uint8_t)fields->direct_cmp_lhs_gpr |
+        ((uint64_t)(uint8_t)fields->direct_cmp_rhs_gpr << 8) |
+        ((uint64_t)fields->direct_cmp_width << 16) |
+        ((uint64_t)fields->direct_branch_kind << 24) |
+        ((uint64_t)(uint8_t)fields->direct_bit_index_gpr << 32) |
+        ((uint64_t)(uint8_t)fields->direct_bit_index_imm << 40) |
+        ((uint64_t)fields->instptn_div_kind << 48) |
+        ((uint64_t)fields->instptn_skip << 56);
     return true;
 }
 
-static unsigned ft_inst_pattern_index(uint64_t key)
+static unsigned ft_inst_pattern_index(uint64_t key, uint64_t extra_key)
 {
+    key ^= extra_key * UINT64_C(0xd6e8feb86659fd93);
     key ^= key >> 32;
     key *= UINT64_C(0x9e3779b97f4a7c15);
     return key >> (64 - FT_INST_PATTERN_TABLE_BITS);
@@ -116,18 +126,20 @@ static int emit_template_fields(const FastTemplateFields *fields,
                                 uint32_t *code)
 {
     uint64_t key;
+    uint64_t extra_key;
     unsigned index;
     int words;
 
-    if (!ft_inst_pattern_key(fields, &key)) {
+    if (!ft_inst_pattern_key(fields, &key, &extra_key)) {
         return emit_template_fields_uncached(fields, tb, pc, code);
     }
 
-    index = ft_inst_pattern_index(key);
+    index = ft_inst_pattern_index(key, extra_key);
 #ifdef QUICKTRANS_INST_PATTERN_STATS
     ft_inst_pattern_stats_start();
 #endif
-    if (ft_inst_pattern_table.keys[index] == key) {
+    if (ft_inst_pattern_table.keys[index] == key &&
+        ft_inst_pattern_table.extra_keys[index] == extra_key) {
 #ifdef QUICKTRANS_INST_PATTERN_STATS
         ft_inst_pattern_stats.hits++;
 #endif
@@ -146,6 +158,7 @@ static int emit_template_fields(const FastTemplateFields *fields,
         }
 #endif
         ft_inst_pattern_table.keys[index] = key;
+        ft_inst_pattern_table.extra_keys[index] = extra_key;
         ft_inst_pattern_table.words[index] = words;
         ft_inst_pattern_copy(ft_inst_pattern_table.code[index], code, words);
 #ifdef QUICKTRANS_INST_PATTERN_STATS

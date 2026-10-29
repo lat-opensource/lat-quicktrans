@@ -757,6 +757,10 @@ static bool ft_emit_div_rm32(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+    if (fields->instptn_div_kind == FT_INSTPTN_DIV_XOR_DIV32) {
+    FT_LA_OR_EMIT(out, ft_gpr(rdx_index), la_zero, la_zero);
+    }
+
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     FT_LA_BSTRPICK_D_EMIT(out, la_t0, la_t0, 31, 0);
     {
@@ -964,6 +968,11 @@ static bool ft_emit_idiv_rm32(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+    if (fields->instptn_div_kind == FT_INSTPTN_DIV_CDQ_IDIV32) {
+    FT_LA_SRAI_W_EMIT(out, ft_gpr(rdx_index), ft_gpr(rax_index), 31);
+    FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rdx_index), ft_gpr(rdx_index), 31, 0);
+    }
+
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 32);
     FT_LA_SRAI_D_EMIT(out, la_t0, la_t0, 32);
@@ -1053,6 +1062,10 @@ static bool ft_emit_div_rm64(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+    if (fields->instptn_div_kind == FT_INSTPTN_DIV_XOR_DIV64) {
+    FT_LA_OR_EMIT(out, ft_gpr(rdx_index), la_zero, la_zero);
+    }
+
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     {
         FastBranchLabel nonzero = { 0 };
@@ -1076,6 +1089,10 @@ static bool ft_emit_idiv_rm64(uint32_t **out, const FastTemplateFields *fields,
     if (!ft_rex_w(fields) || fields->modrm_reg != 7 ||
         !ft_emit_load_rm64(out, fields, pc, &src)) {
         return false;
+    }
+
+    if (fields->instptn_div_kind == FT_INSTPTN_DIV_CQO_IDIV64) {
+    FT_LA_SRAI_D_EMIT(out, ft_gpr(rdx_index), ft_gpr(rax_index), 63);
     }
 
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
