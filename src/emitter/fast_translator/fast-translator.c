@@ -2501,6 +2501,49 @@ static void ft_analyze_direct_xxcc(
             !ft_direct_xxcc_kind(&fields[tail], &kind)) {
             continue;
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* This QT extension uses the default full pattern mask only. Reuse
+         * an adjacent 64-bit integer result, never a scratch register or a
+         * deferred RSP value. No new TB scan or memory dependency is needed.
+         */
+        if (tail + 1 < count && fields[tail].kind == FT_SETCC_RM8 &&
+            fields[tail].modrm_mod == 3 && fields[tail].prefix0 == 0 &&
+            (kind == FT_DIRECT_BRANCH_EQ || kind == FT_DIRECT_BRANCH_NE) &&
+            (uint32_t)option_instptn == 0x3ffffffu) {
+            const FastTemplateFields *producer = &fields[tail - 1];
+            const FastTemplateFields *kill = &fields[tail + 1];
+            int result = -1;
+
+            /* Bound newly dead flags to three non-faulting instructions.
+             * A memory/helper gap must not expose omitted flags to a signal.
+             */
+            bool kills_flags = kill->prefix0 == 0 &&
+                (kill->alu_width == 32 || kill->alu_width == 64) &&
+                (kill->alu_form == FT_ALU_FORM_ACC_IMM ||
+                 kill->modrm_mod == 3) &&
+                (kill->alu_op == FT_ALU_ADD || kill->alu_op == FT_ALU_SUB ||
+                 kill->alu_op == FT_ALU_AND || kill->alu_op == FT_ALU_OR ||
+                 kill->alu_op == FT_ALU_XOR || kill->alu_op == FT_ALU_CMP ||
+                 kill->alu_op == FT_ALU_TEST);
+            if (kills_flags && producer->prefix0 == 0 &&
+                producer->alu_width == 64 &&
+                (producer->alu_form == FT_ALU_FORM_ACC_IMM ||
+                 producer->modrm_mod == 3) &&
+                (producer->alu_op == FT_ALU_ADD ||
+                 producer->alu_op == FT_ALU_SUB ||
+                 producer->alu_op == FT_ALU_AND ||
+                 producer->alu_op == FT_ALU_OR ||
+                 producer->alu_op == FT_ALU_XOR) &&
+                ft_direct_alu_result_gpr(producer, &result) &&
+                result != rsp_index) {
+                fields[tail].direct_cmp_lhs_gpr = result;
+                fields[tail].direct_cmp_rhs_gpr = -1;
+                fields[tail].direct_cmp_width = 64;
+                fields[tail].direct_branch_kind = kind;
+                continue;
+            }
+        }
+#endif
         first = tail > 4 ? tail - 4 : 0;
         for (int head = tail - 1; head >= first; --head) {
             FastTemplateFields *alu = &fields[head];

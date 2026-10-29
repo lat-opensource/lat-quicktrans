@@ -105,6 +105,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
 
     for (;;) {
         uint8_t inst_cache[15];
+        const uint8_t *insn_bytes = inst_cache;
         FastDecodedFT decoded;
         const FastTemplateDesc *tmpl;
         const FastTemplateRuntimeInfo *meta;
@@ -128,7 +129,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
             decode_ok = fast_decoder_get_ft(fetch_cache + offset, available,
                                              pc, &decoded, decode_mode);
             if (decode_ok) {
-                memcpy(inst_cache, fetch_cache + offset, available);
+                insn_bytes = fetch_cache + offset;
                 max_insn_len = available;
                 page_boundary = false;
             }
@@ -163,21 +164,22 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
             if (debug_trace) {
                 fprintf(stderr, "[FT] fd-primary bytes=");
                 for (int j = 0; j < max_insn_len; ++j) {
-                    fprintf(stderr, "%02x", inst_cache[j]);
+                    fprintf(stderr, "%02x", insn_bytes[j]);
                 }
                 fprintf(stderr, "\n");
             }
             return ft_primary_fail(
                 failure, QUICKTRANS_FAILURE_STAGE_DECODE,
-                QUICKTRANS_FAILURE_REASON_DECODE_FAILED, pc, inst_cache,
+                QUICKTRANS_FAILURE_REASON_DECODE_FAILED, pc, insn_bytes,
                 max_insn_len, 0, FT_UNSUPPORTED, icount);
         }
 
         ft_apply_latu_legacy_policy(&decoded);
         tmpl = decoded.tmpl;
         meta = ft_template_runtime_info(tmpl ? tmpl->kind : FT_UNSUPPORTED);
-        if (!tmpl || (ft_template_is_helper(tmpl->kind) &&
-                      !ft_template_primary_helper_allowed(tmpl->kind))) {
+        /* All classified helpers are primary-allowed; checked by
+         * test-primary-helper-policy.py. Keep missing-template failure. */
+        if (!tmpl) {
             fprintf(stderr,
                     "[FT] fd-primary miss-insn index=%d pc=0x%lx id=%d "
                     "size=%u kind=%d helper=%d\n",
@@ -189,7 +191,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
                 failure, QUICKTRANS_FAILURE_STAGE_TEMPLATE,
                 tmpl ? QUICKTRANS_FAILURE_REASON_HELPER_UNSUPPORTED
                      : QUICKTRANS_FAILURE_REASON_TEMPLATE_MISSING,
-                pc, inst_cache,
+                pc, insn_bytes,
                 MIN((size_t)decoded.fields.size, sizeof(inst_cache)),
                 decoded.fields.id, tmpl ? tmpl->kind : FT_UNSUPPORTED,
                 icount);
@@ -199,7 +201,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
                                    decoded.fields.address)) {
             return ft_primary_fail(
                 failure, QUICKTRANS_FAILURE_STAGE_TEMPLATE,
-                QUICKTRANS_FAILURE_REASON_DEBUG_SKIP, pc, inst_cache,
+                QUICKTRANS_FAILURE_REASON_DEBUG_SKIP, pc, insn_bytes,
                 MIN((size_t)decoded.fields.size, sizeof(inst_cache)),
                 decoded.fields.id, tmpl->kind, icount);
         }
@@ -216,7 +218,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
                     decoded.fields.id, decoded.fields.size, tmpl->kind);
             return ft_primary_fail(
                 failure, QUICKTRANS_FAILURE_STAGE_TEMPLATE,
-                QUICKTRANS_FAILURE_REASON_FIELDS_INVALID, pc, inst_cache,
+                QUICKTRANS_FAILURE_REASON_FIELDS_INVALID, pc, insn_bytes,
                 MIN((size_t)decoded.fields.size, sizeof(inst_cache)),
                 decoded.fields.id, tmpl->kind, icount);
         }
@@ -224,7 +226,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
         if (!ft_system_primary_insn_supported(fields)) {
             return ft_primary_fail(
                 failure, QUICKTRANS_FAILURE_STAGE_CONSTRAINT,
-                QUICKTRANS_FAILURE_REASON_MODE_UNSUPPORTED, pc, inst_cache,
+                QUICKTRANS_FAILURE_REASON_MODE_UNSUPPORTED, pc, insn_bytes,
                 MIN((size_t)fields->size, sizeof(inst_cache)), fields->id,
                 tmpl->kind, icount);
         }
@@ -253,7 +255,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
             return ft_primary_fail(
                 failure, QUICKTRANS_FAILURE_STAGE_CONSTRAINT,
                 QUICKTRANS_FAILURE_REASON_CONSTRAINT_REJECTED, pc,
-                inst_cache, MIN((size_t)fields->size, sizeof(inst_cache)),
+                insn_bytes, MIN((size_t)fields->size, sizeof(inst_cache)),
                 fields->id, tmpl->kind, icount);
         }
 #endif

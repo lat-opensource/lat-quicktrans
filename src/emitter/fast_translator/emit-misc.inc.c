@@ -48,7 +48,21 @@ static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
                ft_modrm_rm_index(fields) < XMM_NUM &&
                (fields->imm & 0xff) == 0;
     case FT_NOP_MULTI:
-        return fields->id == dt_X86_INS_FNOP && !option_soft_fpu;
+        return (fields->id == dt_X86_INS_NOP &&
+                fields->prefix0 != dt_X86_PREFIX_LOCK) ||
+               (fields->id == dt_X86_INS_FNOP && !option_soft_fpu);
+    case FT_BNDMOV:
+        /* LATU does not enable MPX state. Keep the decoder constraints:
+         * unrelated/invalid encodings must not become zero-code success.
+         */
+        return fields->id == dt_X86_INS_BNDMOV &&
+               fields->opcode0 == 0x0f &&
+               (fields->opcode1 == 0x1a || fields->opcode1 == 0x1b) &&
+               fields->prefix0 == 0 &&
+               fields->prefix2 == dt_X86_PREFIX_OPSIZE &&
+               !ft_rex_r(fields) && fields->modrm_reg <= 3 &&
+               (fields->modrm_mod != 3 ||
+                (!ft_rex_b(fields) && fields->modrm_rm <= 3));
     case FT_MOV128_XMM_XMMM:
     case FT_MOV128_XMMM_XMM:
     case FT_MOVSD_XMM_M64:

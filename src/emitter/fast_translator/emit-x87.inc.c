@@ -519,9 +519,21 @@ static void ft_emit_x87_empty_qnan(uint32_t **out, int freg)
 static void ft_emit_x87_st_tag_addr(uint32_t **out, int addr, int top,
                                     unsigned int st_index)
 {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    int offset = lsenv_offset_of_tag_word(lsenv);
+
+    /* As in load/store_env, the LATU ABI already keeps CPU state in s8. */
+    if (ft_offset_fits_imm12(offset)) {
+        FT_LA_ADDI_D_EMIT(out, addr, la_s8, offset);
+    } else {
+        ft_emit_li64(out, top, (uint64_t)(int64_t)offset);
+        FT_LA_ADD_D_EMIT(out, addr, la_s8, top);
+    }
+#else
     ft_emit_cpu_env_ptr(out, addr);
     ft_emit_li64(out, top, (uint64_t)(int64_t)lsenv_offset_of_tag_word(lsenv));
     FT_LA_ADD_D_EMIT(out, addr, addr, top);
+#endif
     FT_LA_X86MFTOP_EMIT(out, top);
     if (st_index) {
         FT_LA_ADDI_D_EMIT(out, top, top, st_index);

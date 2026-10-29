@@ -207,6 +207,15 @@ test(
 )
 
 test(
+  'quicktrans_primary_helper_policy',
+  python,
+  args: [
+    files('tests/test-primary-helper-policy.py'),
+    files('src/emitter/fast_translator/template-class.inc.c'),
+  ],
+)
+
+test(
   'quicktrans_inst_pattern_cache',
   python,
   args: [

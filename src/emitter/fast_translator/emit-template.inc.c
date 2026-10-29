@@ -77,6 +77,19 @@ static bool ft_emit_direct_condition(uint32_t **out,
     } else {
         work_rhs = rhs;
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* Comparing with zero needs no temporary XOR result. */
+    if (fields->direct_cmp_rhs_gpr < 0) {
+        if (fields->direct_branch_kind == FT_DIRECT_BRANCH_EQ) {
+            FT_LA_SLTUI_EMIT(out, result, work_lhs, 1);
+            return true;
+        }
+        if (fields->direct_branch_kind == FT_DIRECT_BRANCH_NE) {
+            FT_LA_SLTU_EMIT(out, result, la_zero, work_lhs);
+            return true;
+        }
+    }
+#endif
     switch (fields->direct_branch_kind) {
     case FT_DIRECT_BRANCH_EQ:
     case FT_DIRECT_BRANCH_NE:
