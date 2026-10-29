@@ -115,14 +115,22 @@ static void ft_emit_soft_memory_call(uint32_t **out, const FastTemplateFields *f
     s->active = true;
 }
 
+#endif
+
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
 /* Full tag word for FNSTENV/FNSAVE, compressed tag byte for FXSAVE.
  * t4 is the guest address and must survive all state operations. */
 static void ft_soft_env_tags(uint32_t **out, bool compressed)
 {
+#ifdef QUICKTRANS_LATU
+    const int env_reg = la_s8;
+#else
+    const int env_reg = la_s0;
+#endif
     FT_LA_OR_EMIT(out, la_t0, la_zero, la_zero);
     for (int i = 7; i >= 0; --i) {
         FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, compressed ? 1 : 2);
-        FT_LA_LD_BU_EMIT(out, la_t1, la_s0,
+        FT_LA_LD_BU_EMIT(out, la_t1, env_reg,
                          lsenv_offset_of_tag_word(lsenv) + i);
         if (compressed) {
             FT_LA_XORI_EMIT(out, la_t1, la_t1, 1);
@@ -133,8 +141,8 @@ static void ft_soft_env_tags(uint32_t **out, bool compressed)
         FastBranchFixup f[7];
         ft_emit_branch_placeholder(out, &f[0], FT_BRANCH_BNE,
                                    la_t1, la_zero, &empty);
-        FT_LA_LD_D_EMIT(out, la_t2, la_s0, lsenv_offset_of_fpr(lsenv, i));
-        FT_LA_LD_HU_EMIT(out, la_t1, la_s0, lsenv_offset_of_fpr(lsenv, i) + 8);
+        FT_LA_LD_D_EMIT(out, la_t2, env_reg, lsenv_offset_of_fpr(lsenv, i));
+        FT_LA_LD_HU_EMIT(out, la_t1, env_reg, lsenv_offset_of_fpr(lsenv, i) + 8);
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t1, 14, 0);
         ft_emit_branch_placeholder(out, &f[1], FT_BRANCH_BNE,
                                    la_t1, la_zero, &valid);
@@ -158,6 +166,9 @@ static void ft_soft_env_tags(uint32_t **out, bool compressed)
     }
 }
 
+#endif
+
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
 static void ft_soft_env_status(uint32_t **out, int sw, int cw)
 {
     FT_LA_BSTRPICK_W_EMIT(out, la_t3, sw, 13, 11);

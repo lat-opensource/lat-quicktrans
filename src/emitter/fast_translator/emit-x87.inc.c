@@ -1143,6 +1143,14 @@ static bool ft_emit_x87_environment_fallback(uint32_t **out,
 }
 #endif
 
+static bool ft_emit_x87_latu_fldenv(uint32_t **out,
+                                   const FastTemplateFields *f,
+                                   target_ulong pc, FtSoftEnv *s, bool regs);
+
+static bool ft_emit_x87_latu_fstenv(uint32_t **out,
+                                   const FastTemplateFields *f,
+                                   target_ulong pc, FtSoftEnv *s, bool regs);
+
 static int ft_emit_fsave_restore_helper(uint32_t **out,
                                         const FastTemplateFields *fields,
                                         target_ulong pc, bool restore)
@@ -1158,7 +1166,11 @@ static int ft_emit_fsave_restore_helper(uint32_t **out,
     }
 
     FtSoftEnv fast = {0};
-    ft_emit_soft_environment(out, fields, pc, restore, 1, &fast);
+    bool latu_direct = restore ? ft_emit_x87_latu_fldenv(out, fields, pc, &fast, true) :
+                                 ft_emit_x87_latu_fstenv(out, fields, pc, &fast, true);
+    if (!latu_direct) {
+        ft_emit_soft_environment(out, fields, pc, restore, 1, &fast);
+    }
 #if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
     if (fast.active &&
         ft_emit_x87_environment_fallback(out, fields, pc, data32,
@@ -1208,6 +1220,14 @@ static int ft_emit_fsave_restore_helper(uint32_t **out,
                                    : (void *)helper_fsave,
                       (1u << 0) | (1u << 1));
 
+#ifdef QUICKTRANS_LATU
+    if (option_soft_fpu == 2) {
+        ft_emit_load_env(out, la_t0, lsenv_offset_of_control_word(lsenv),
+                         FT_LA_OPCODE_LD_HU);
+        ft_emit_x87_soft_control(out, true);
+    }
+#endif
+
     if (!option_soft_fpu) {
         ft_emit_cpu_env_ptr(out, la_a0);
         ft_emit_host_call(out, (void *)ft_convert_fpregs_x80_to_64,
@@ -1220,6 +1240,155 @@ static int ft_emit_fsave_restore_helper(uint32_t **out,
     ft_emit_helper_epilogue(out);
     ft_soft_environment_end(out, &fast);
     return *out - start;
+}
+
+/* Export the same fields and zero pointer slots as the LATU soft helper. */
+static bool ft_emit_x87_latu_fstenv(uint32_t **out,
+                                   const FastTemplateFields *f,
+                                   target_ulong pc, FtSoftEnv *s, bool regs)
+{
+#ifdef QUICKTRANS_LATU
+    int addr;
+    bool data32 = f->prefix2 != dt_X86_PREFIX_OPSIZE;
+    uint32_t *start = *out;
+    if (option_soft_fpu != 2) return false;
+    if (regs && lsenv_offset_of_fpr(lsenv, 1) -
+                lsenv_offset_of_fpr(lsenv, 0) != 16) return false;
+    if (!ft_emit_rip_or_mem_addr(out, f, pc, &addr)) {
+        *out = start;
+        return false;
+    }
+    FT_LA_ADDI_D_EMIT(out, la_t4, addr, ft_mem_access_offset(f, addr));
+    FT_LA_ANDI_EMIT(out, la_t0, la_t4, 4095);
+    ft_emit_li32(out, la_t1, 4096 - (data32 ? 28 : 14) - (regs ? 80 : 0));
+    ft_emit_branch_placeholder(out, &s->guard[s->count++], FT_BRANCH_BLTU,
+                               la_t1, la_t0, &s->slow);
+    FT_LA_LD_HU_EMIT(out, la_a0, la_s8, lsenv_offset_of_control_word(lsenv));
+    FT_LA_LD_HU_EMIT(out, la_a1, la_s8, lsenv_offset_of_status_word(lsenv));
+    FT_LA_LD_WU_EMIT(out, la_t0, la_s8, lsenv_offset_of_top(lsenv));
+    FT_LA_BSTRINS_W_EMIT(out, la_a1, la_t0, 13, 11);
+    ft_soft_env_tags(out, false);
+    if (data32) {
+        FT_LA_ST_W_EMIT(out, la_a0, la_t4, 0);
+        FT_LA_ST_W_EMIT(out, la_a1, la_t4, 4);
+        FT_LA_ST_W_EMIT(out, la_t0, la_t4, 8);
+        for (int i = 12; i < 28; i += 4) FT_LA_ST_W_EMIT(out, la_zero, la_t4, i);
+    } else {
+        FT_LA_ST_H_EMIT(out, la_a0, la_t4, 0);
+        FT_LA_ST_H_EMIT(out, la_a1, la_t4, 2);
+        FT_LA_ST_H_EMIT(out, la_t0, la_t4, 4);
+        for (int i = 6; i < 14; i += 2) FT_LA_ST_H_EMIT(out, la_zero, la_t4, i);
+    }
+    if (regs) {
+        /* The image contains logical ST0..ST7, not physical slot order. */
+        FT_LA_LD_WU_EMIT(out, la_t2, la_s8, lsenv_offset_of_top(lsenv));
+        for (int i = 0; i < 8; ++i) {
+            FT_LA_ANDI_EMIT(out, la_t2, la_t2, 7);
+            FT_LA_SLLI_D_EMIT(out, la_t3, la_t2, 4);
+            FT_LA_ADD_D_EMIT(out, la_t3, la_s8, la_t3);
+            FT_LA_LD_D_EMIT(out, la_t0, la_t3, lsenv_offset_of_fpr(lsenv, 0));
+            FT_LA_LD_HU_EMIT(out, la_t1, la_t3, lsenv_offset_of_fpr(lsenv, 0) + 8);
+            FT_LA_ST_D_EMIT(out, la_t0, la_t4, (data32 ? 28 : 14) + i * 10);
+            FT_LA_ST_H_EMIT(out, la_t1, la_t4, (data32 ? 28 : 14) + i * 10 + 8);
+            FT_LA_ADDI_W_EMIT(out, la_t2, la_t2, 1);
+        }
+        /* Reset only after the complete image has been written. */
+        FT_LA_ORI_EMIT(out, la_t0, la_zero, 0x37f);
+        ft_emit_store_env(out, la_t0, lsenv_offset_of_control_word(lsenv), FT_LA_OPCODE_ST_H);
+        ft_emit_x87_soft_control(out, true);
+        ft_emit_store_env(out, la_zero, lsenv_offset_of_status_word(lsenv), FT_LA_OPCODE_ST_H);
+        ft_emit_store_env(out, la_zero, lsenv_offset_of_top(lsenv), FT_LA_OPCODE_ST_W);
+        ft_emit_li64(out, la_t0, 0x0101010101010101ULL);
+        ft_emit_store_env(out, la_t0, lsenv_offset_of_tag_word(lsenv), FT_LA_OPCODE_ST_D);
+    }
+    ft_emit_branch_placeholder(out, &s->finish, FT_BRANCH_B, 0, 0, &s->done);
+    ft_bind_branch_label(&s->slow, *out);
+    ft_resolve_branch_fixup(&s->guard[0]);
+    s->active = true;
+    return true;
+#else
+    (void)out; (void)f; (void)pc; (void)s; (void)regs;
+    return false;
+#endif
+}
+
+/* Same-page mode-2 FLDENV: preserve the helper for partial-access faults. */
+static bool ft_emit_x87_latu_fldenv(uint32_t **out,
+                                   const FastTemplateFields *f,
+                                   target_ulong pc, FtSoftEnv *s, bool regs)
+{
+#ifdef QUICKTRANS_LATU
+    int addr;
+    bool data32 = f->prefix2 != dt_X86_PREFIX_OPSIZE;
+    uint32_t *start = *out;
+    if (option_soft_fpu != 2) return false;
+    if (regs && lsenv_offset_of_fpr(lsenv, 1) -
+                lsenv_offset_of_fpr(lsenv, 0) != 16) return false;
+    if (!ft_emit_rip_or_mem_addr(out, f, pc, &addr)) {
+        *out = start;
+        return false;
+    }
+    FT_LA_ADDI_D_EMIT(out, la_t4, addr, ft_mem_access_offset(f, addr));
+    FT_LA_ANDI_EMIT(out, la_t0, la_t4, 4095);
+    int bytes = regs ? (data32 ? 108 : 94) : (data32 ? 10 : 6);
+    ft_emit_li32(out, la_t1, 4096 - bytes);
+    ft_emit_branch_placeholder(out, &s->guard[s->count++], FT_BRANCH_BLTU,
+                               la_t1, la_t0, &s->slow);
+    /* These three reads cover exactly the fields consumed by do_fldenv. */
+    FT_LA_LD_HU_EMIT(out, la_t0, la_t4, 0);
+    FT_LA_LD_HU_EMIT(out, la_a1, la_t4, data32 ? 4 : 2);
+    FT_LA_LD_HU_EMIT(out, la_a0, la_t4, data32 ? 8 : 4);
+    ft_emit_store_env(out, la_t0, lsenv_offset_of_control_word(lsenv),
+                      FT_LA_OPCODE_ST_H);
+    ft_emit_x87_soft_control(out, true);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t1, la_a1, 13, 11);
+    ft_emit_store_env(out, la_t1, lsenv_offset_of_top(lsenv), FT_LA_OPCODE_ST_W);
+    ft_emit_li32(out, la_t1, 0x47ff);
+    FT_LA_AND_EMIT(out, la_a1, la_a1, la_t1);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t1, la_a1, 7, 7);
+    FT_LA_BSTRINS_W_EMIT(out, la_a1, la_t1, 15, 15);
+    FT_LA_ANDN_EMIT(out, la_t1, la_a1, la_t0);
+    FT_LA_ANDI_EMIT(out, la_t1, la_t1, 0x3f);
+    FT_LA_SLTU_EMIT(out, la_t1, la_zero, la_t1);
+    FT_LA_SLLI_W_EMIT(out, la_t2, la_t1, 8);
+    FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
+    FT_LA_SLLI_W_EMIT(out, la_t1, la_t1, 7);
+    FT_LA_OR_EMIT(out, la_a1, la_a1, la_t1);
+    ft_emit_store_env(out, la_a1, lsenv_offset_of_status_word(lsenv),
+                      FT_LA_OPCODE_ST_H);
+    FT_LA_OR_EMIT(out, la_t3, la_zero, la_zero);
+    for (int i = 0; i < 8; ++i) {
+        FT_LA_BSTRPICK_W_EMIT(out, la_t1, la_a0, i * 2 + 1, i * 2);
+        FT_LA_XORI_EMIT(out, la_t1, la_t1, 3);
+        FT_LA_SLTUI_EMIT(out, la_t1, la_t1, 1);
+        if (i) FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, i * 8);
+        FT_LA_OR_EMIT(out, la_t3, la_t3, la_t1);
+    }
+    ft_emit_store_env(out, la_t3, lsenv_offset_of_tag_word(lsenv),
+                      FT_LA_OPCODE_ST_D);
+    if (regs) {
+        /* FRSTOR stores logical ST(i) in (TOP + i) & 7, like its helper. */
+        FT_LA_LD_WU_EMIT(out, la_t2, la_s8, lsenv_offset_of_top(lsenv));
+        for (int i = 0; i < 8; ++i) {
+            FT_LA_ANDI_EMIT(out, la_t2, la_t2, 7);
+            FT_LA_SLLI_D_EMIT(out, la_t3, la_t2, 4);
+            FT_LA_ADD_D_EMIT(out, la_t3, la_s8, la_t3);
+            FT_LA_LD_D_EMIT(out, la_t0, la_t4, (data32 ? 28 : 14) + i * 10);
+            FT_LA_LD_HU_EMIT(out, la_t1, la_t4, (data32 ? 28 : 14) + i * 10 + 8);
+            FT_LA_ST_D_EMIT(out, la_t0, la_t3, lsenv_offset_of_fpr(lsenv, 0));
+            FT_LA_ST_H_EMIT(out, la_t1, la_t3, lsenv_offset_of_fpr(lsenv, 0) + 8);
+            FT_LA_ADDI_W_EMIT(out, la_t2, la_t2, 1);
+        }
+    }
+    ft_emit_branch_placeholder(out, &s->finish, FT_BRANCH_B, 0, 0, &s->done);
+    ft_bind_branch_label(&s->slow, *out);
+    ft_resolve_branch_fixup(&s->guard[0]);
+    s->active = true;
+    return true;
+#else
+    (void)out; (void)f; (void)pc; (void)s; (void)regs;
+    return false;
+#endif
 }
 
 static int ft_emit_fenv_helper(uint32_t **out,
@@ -1237,7 +1406,11 @@ static int ft_emit_fenv_helper(uint32_t **out,
     }
 
     FtSoftEnv fast = {0};
-    ft_emit_soft_environment(out, fields, pc, restore, 0, &fast);
+    bool latu_direct = restore ? ft_emit_x87_latu_fldenv(out, fields, pc, &fast, false) :
+                                 ft_emit_x87_latu_fstenv(out, fields, pc, &fast, false);
+    if (!latu_direct) {
+        ft_emit_soft_environment(out, fields, pc, restore, 0, &fast);
+    }
 #if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
     if (fast.active &&
         ft_emit_x87_environment_fallback(out, fields, pc, data32,
@@ -1290,6 +1463,15 @@ static int ft_emit_fenv_helper(uint32_t **out,
                                    : (void *)helper_fstenv,
                       (1u << 0) | (1u << 1));
 
+#ifdef QUICKTRANS_LATU
+    if (restore && option_soft_fpu == 2) {
+        /* A successful cross-page helper must establish the same fast
+         * arithmetic rounding state as the direct same-page path. */
+        ft_emit_load_env(out, la_t0, lsenv_offset_of_control_word(lsenv),
+                         FT_LA_OPCODE_LD_HU);
+        ft_emit_x87_soft_control(out, true);
+    }
+#endif
     if (!option_soft_fpu) {
         if (restore) {
             if (!ft_emit_x87_reload_control_status_fcsr(out)) {
