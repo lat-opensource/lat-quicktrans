@@ -154,7 +154,7 @@ static int ft_emit_rcl_rcr_template(const FastTemplateFields *fields, Translatio
             FT_LA_ORI_EMIT(&out, la_t4, la_zero, ring);
             FT_LA_MOD_DU_EMIT(&out, count_reg, count_reg, la_t4);
         }
-        if (!is_mem && width == 32) {
+        if (!is_mem && width == 32 && !ft_omit_gpr_zext32(fields)) {
             FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
         }
         count_zero_branch = out;
@@ -168,7 +168,7 @@ static int ft_emit_rcl_rcr_template(const FastTemplateFields *fields, Translatio
         }
         if (count == 0) {
             /* A zero-count r32 rotate still zero-extends its register write. */
-            if (!is_mem && width == 32) {
+            if (!is_mem && width == 32 && !ft_omit_gpr_zext32(fields)) {
                 FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst),
                                       31, 0);
             }
@@ -520,7 +520,7 @@ static int ft_emit_shift_imm_template(const FastTemplateFields *fields, Translat
             }
         } else if (width == 16) {
             FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), result, 15, 0);
-        } else if (width == 32) {
+        } else if (width == 32 && !ft_omit_gpr_zext32(fields)) {
             FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
         }
         return (out - code);
@@ -983,8 +983,11 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
         } else if (width == 16) {
             FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), result, 15, 0);
         } else if (width == 32) {
+            /* Both count paths join here, even when the clear is omitted. */
             count_zero_target = out;
-            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+            if (!ft_omit_gpr_zext32(fields)) {
+                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+            }
         }
         *count_zero_branch = FT_LA_BEQ(la_t3, la_zero,
                                        (width == 32 ? count_zero_target : out) -
@@ -1142,7 +1145,8 @@ static bool ft_emit_store_shld_shrd_rm(uint32_t **out,
                                       target_ulong pc, int width, int value)
 {
     return width == 64 ? ft_emit_store_rm64(out, fields, pc, value) :
-           width == 32 ? ft_emit_store_rm32(out, fields, pc, value, true) :
+           width == 32 ? ft_emit_store_rm32(out, fields, pc, value,
+                                           !ft_omit_gpr_zext32(fields)) :
                          ft_emit_store_rm16(out, fields, pc, value);
 }
 

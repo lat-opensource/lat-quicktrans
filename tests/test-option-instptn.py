@@ -16,10 +16,8 @@ for name,shift in expected.items():
     pat=rf'#define FT_INSTPTN_{name}\s+\(1ULL << {shift}\)'
     if not re.search(pat,s):
         print(f'missing legacy bit mapping {name}={shift}',file=sys.stderr);sys.exit(1)
-if not re.search(r'static bool ft_instptn_enabled\(uint64_t bit\).*?'
-                 r'#ifdef QUICKTRANS_LATU.*?\(void\)bit;.*?return true;.*?'
-                 r'return \(option_instptn & bit\) != 0;',s,re.S):
-    print('option_instptn adapter or LATU isolation missing',file=sys.stderr);sys.exit(1)
+if 'uint32_t mask = (uint32_t)option_instptn;' not in s or 'return (option_instptn & bit) != 0;' not in s:
+    print('LATU/LATS option adapters missing',file=sys.stderr);sys.exit(1)
 body=s[s.index('static void ft_analyze_direct_jcc_pair('):]
 body=body[:body.index('static bool ft_template_uses_x87_top(')]
 for token in ('FT_INSTPTN_ADD_JCC','FT_INSTPTN_SUB_JCC','FT_INSTPTN_AND_JCC',

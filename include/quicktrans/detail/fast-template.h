@@ -789,6 +789,12 @@ typedef struct FastTemplateFields {
     bool direct_float_xx;
     bool addr32;
     bool skip_flags;
+    /* Ordinary LATU TB analysis only; false at every other entry. */
+    bool omit_zext32;
+    /* Keep the scalar result; omit its separate low-lane insertion. */
+    bool scalar_direct_dst;
+    /* Enabled only by ordinary primary emission for a serial CPU/TB. */
+    bool atomic_no_barrier;
     uint8_t direct_branch_kind;
 } FastTemplateFields;
 

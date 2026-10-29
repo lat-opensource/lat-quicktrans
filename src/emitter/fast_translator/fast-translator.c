@@ -119,6 +119,9 @@ bool latx_fast_translate_sample_for_bench(CPUArchState *env,
 #include "translate.h"
 #endif
 #include "lsenv.h"
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+#include "ts.h"
+#endif
 #include "reg-map.h"
 #include "tu.h"
 #include "exec/cpu_ldst.h"
@@ -475,68 +478,19 @@ static uint8_t *ft_encode_sleb128(uint8_t *p, int64_t val)
     return p;
 }
 
-static int ft_encode_search(TranslationBlock *tb,
-                            const FastTemplateFields *fields_buf,
-                            uint8_t *block,
-                            bool check_highwater)
-{
-#ifdef QUICKTRANS_LATU
-    uint8_t *highwater = tcg_ctx->code_gen_highwater;
-#else
-    uint8_t *highwater = tcg_splitwx_to_rx(tcg_ctx->code_gen_highwater);
-#endif
-    uint16_t *insn_end_off = tcg_ctx->gen_insn_end_off;
-    uint8_t *p = block;
+#define FT_WITH_RSP_MERGE 1
+#define FT_SPECIALIZED_NAME ft_encode_search
+#include "encode-search-body.inc.c"
+#undef FT_SPECIALIZED_NAME
+#undef FT_WITH_RSP_MERGE
 
-#ifndef QUICKTRANS_LATU
-    /* PC deltas fit one byte, code deltas <=65532 fit three SLEB bytes.
-     * Only the initial PC-relative address can need ten bytes. Check once,
-     * before writing, rather than testing capacity for every record. */
-    size_t search_bound = (size_t)tb->icount *
-                         (TARGET_INSN_START_WORDS + 3) + 9;
-    if (check_highwater &&
-        ((uintptr_t)p > (uintptr_t)highwater ||
-         search_bound > (uintptr_t)highwater - (uintptr_t)p)) {
-        longjmp(ft_code_space_active->unwind, FT_CODE_REGION_FULL);
-    }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && defined(LATX_QUICKTRANS_RSP_SEARCH_ABI)
+#define FT_WITH_RSP_MERGE 0
+#define FT_SPECIALIZED_NAME ft_encode_search_no_rsp
+#include "encode-search-body.inc.c"
+#undef FT_SPECIALIZED_NAME
+#undef FT_WITH_RSP_MERGE
 #endif
-    for (int i = 0, n = tb->icount; i < n; ++i) {
-        if (i == 0) {
-#ifdef QUICKTRANS_LATU
-            *p++ = 0;
-#else
-            if (tb_cflags(tb) & CF_PCREL) {
-                p = ft_encode_sleb128(p, fields_buf[0].address);
-            } else {
-                *p++ = 0;
-            }
-#endif
-        } else {
-            *p++ = fields_buf[i].address - fields_buf[i - 1].address;
-        }
-        for (int j = 1; j < TARGET_INSN_START_WORDS; ++j) {
-            *p++ = 0;
-        }
-
-        {
-            int64_t end_delta = insn_end_off[i] -
-                                (i == 0 ? 0 : insn_end_off[i - 1]);
-
-            if (end_delta >= 0 && end_delta < 64) {
-                *p++ = end_delta;
-            } else {
-                p = ft_encode_sleb128(p, end_delta);
-            }
-        }
-#ifdef QUICKTRANS_LATU
-        if (check_highwater && unlikely(p > highwater)) {
-            return -1;
-        }
-#endif
-    }
-
-    return p - block;
-}
 
 static int64_t ft_bench_now_ns(void)
 {
@@ -844,7 +798,9 @@ static FtEmitCacheKey ft_emit_cache_key(const FastTemplateFields *fields)
             (uint64_t)fields->instptn_div_kind |
                 ((uint64_t)fields->instptn_skip << 8) |
                 ((uint64_t)fields->direct_float_result << 9) |
-                ((uint64_t)fields->direct_float_xx << 10),
+                ((uint64_t)fields->direct_float_xx << 10) |
+                ((uint64_t)fields->omit_zext32 << 11) |
+                ((uint64_t)fields->scalar_direct_dst << 12),
         },
     };
 
@@ -1137,8 +1093,10 @@ static int ft_emit_helper_indirect_exit(uint32_t **out, TranslationBlock *tb,
 #include "emit-x87.inc.c"
 #include "emit-dispatch.inc.c"
 
+#include "analyze-xmm-high.inc.c"
 #include "emit-template.inc.c"
 #include "emit-pattern-cache.inc.c"
+#include "emit-rsp-merge.inc.c"
 
 /* The extracted tree has no shared x87 context emitter; keep the generic
  * per-instruction path until that emitter is restored and verified. */
@@ -1186,7 +1144,9 @@ static bool ft_primary_trace_opt_enabled(void);
 static bool ft_template_uses_mmx(const FastTemplateFields *fields);
 static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo **meta,
-                                   int count, unsigned int candidates);
+                                   int count, unsigned int candidates,
+                                   bool analyze_gpr_high,
+                                   bool analyze_xmm_high);
 static bool ft_direct_alu_result_gpr(const FastTemplateFields *alu, int *dst)
 {
     if (alu->alu_width == 8) {
@@ -1535,6 +1495,9 @@ static bool latx_fast_translate_sample_for_bench_impl(CPUArchState *env,
     }
     fields = &decoded.fields;
     fields->skip_flags = false;
+    fields->omit_zext32 = false;
+    fields->scalar_direct_dst = false;
+    fields->atomic_no_barrier = false;
     if (detail_stats) {
         stats->field_ns += ft_bench_now_ns() - stage_start;
     }
@@ -2050,8 +2013,24 @@ static FastTemplateEflagMasks ft_template_eflag_masks(
 static bool ft_instptn_enabled(uint64_t bit)
 {
 #ifdef QUICKTRANS_LATU
-    (void)bit;
-    return true;
+    /* LATU and LATS share bits 0..20, but not the later assignments.
+     * LATU-only MOVAPS/NEG slots must not select unrelated QT patterns.
+     * QT extensions with no LATU bit remain enabled by the default full
+     * mask only; a partial mask selects only its named legacy patterns. */
+    uint32_t mask = (uint32_t)option_instptn;
+    if (bit <= FT_INSTPTN_UCOMISD_SETA) {
+        return (mask & bit) != 0;
+    }
+    switch (bit) {
+    case FT_INSTPTN_SUB_JCC:
+        return (mask & (1u << 21)) != 0;
+    case FT_INSTPTN_SHR_JCC:
+        return (mask & (1u << 24)) != 0;
+    case FT_INSTPTN_AND_JCC:
+        return (mask & (1u << 25)) != 0;
+    default:
+        return mask == 0x3ffffffu;
+    }
 #else
     return (option_instptn & bit) != 0;
 #endif
@@ -2076,47 +2055,50 @@ enum {
     FT_ANALYZE_DIV = 2,
     FT_ANALYZE_FLOAT = 4,
     FT_ANALYZE_SBB = 8,
-    FT_ANALYZE_ALL = 15,
+    FT_ANALYZE_RSP = 16,
+    FT_ANALYZE_ALL = 31,
 };
 
-static unsigned int ft_analysis_candidates(const FastTemplateFields *fields)
-{
-#ifdef QUICKTRANS_LATU
-    unsigned int mask = fields->alu_op == FT_ALU_SBB ? FT_ANALYZE_SBB : 0;
+#define FT_WITH_RSP_MERGE 1
+#define FT_SPECIALIZED_NAME ft_analysis_candidates
+#include "analysis-candidates-body.inc.c"
+#undef FT_SPECIALIZED_NAME
+#undef FT_WITH_RSP_MERGE
 
-    switch (fields->kind) {
-    case FT_SETCC_RM8:
-    case FT_CMOV_R64_RM64:
-    case FT_CMOV_R32_RM32:
-    case FT_CMOV_R16_RM16:
-        mask |= FT_ANALYZE_XXCC;
-        break;
-    case FT_DIV_RM32:
-    case FT_DIV_RM64:
-    case FT_IDIV_RM32:
-    case FT_IDIV_RM64:
-        mask |= FT_ANALYZE_DIV;
-        break;
-    case FT_SIMD_SCALAR_CMP_XMM_XMMM:
-        mask |= FT_ANALYZE_FLOAT;
-        break;
-    default:
-        break;
-    }
-    return mask;
-#else
-    (void)fields;
-    return FT_ANALYZE_ALL;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && defined(LATX_QUICKTRANS_RSP_SEARCH_ABI)
+#define FT_WITH_RSP_MERGE 0
+#define FT_SPECIALIZED_NAME ft_analysis_candidates_no_rsp
+#include "analysis-candidates-body.inc.c"
+#undef FT_SPECIALIZED_NAME
+#undef FT_WITH_RSP_MERGE
 #endif
-}
+
+#include "analyze-gpr-high.inc.c"
 
 static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo **meta,
-                                   int count, unsigned int candidates)
+                                   int count, unsigned int candidates,
+                                   bool analyze_gpr_high,
+                                   bool analyze_xmm_high)
 {
     uint8_t pending = FT_EFLAGS_ALL;
     bool trace_opt = ft_primary_trace_opt_enabled();
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    uint32_t need_hi = FT_GPR_HIGH_ALL;
+#else
+    (void)analyze_gpr_high;
+#endif
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
+    !defined(CONFIG_LATX_AVX_OPT)
+    uint64_t need_xmm_lanes = FT_XMM_LANES_ALL;
+#else
+    (void)analyze_xmm_high;
+#endif
 
+#ifdef QUICKTRANS_LATU
+    /* One TB-level gate avoids scans when all patterns are disabled. */
+    if (option_instptn) {
+#endif
     if (count > 1 && fields[count - 1].kind == FT_JCC_REL) {
         ft_analyze_direct_jcc_pair(&fields[count - 2], &fields[count - 1],
                                    false);
@@ -2140,6 +2122,9 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
     if (candidates & FT_ANALYZE_SBB) {
         ft_analyze_cmp_sbb(fields, count);
     }
+#ifdef QUICKTRANS_LATU
+    }
+#endif
     for (int i = count - 1; i >= 0; --i) {
         FastTemplateEflagMasks masks;
         uint8_t live_def;
@@ -2159,6 +2144,21 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                  fields[i].alu_form == FT_ALU_FORM_R_RM))
 #endif
         );
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* Pattern marking above must finish before deriving GPR demands. */
+        ft_analyze_gpr_high_step(&fields[i], meta[i], &need_hi,
+                                 analyze_gpr_high);
+#else
+        fields[i].omit_zext32 = false;
+#endif
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
+    !defined(CONFIG_LATX_AVX_OPT)
+        /* Share O7's ordinary64/TF/debug/POPF policy, not its GPR state. */
+        ft_analyze_xmm_high_step(&fields[i], meta[i], &need_xmm_lanes,
+                                 analyze_xmm_high);
+#else
+        fields[i].scalar_direct_dst = false;
+#endif
         if (trace_opt) {
             fprintf(stderr,
                     "[FT-OPT] pc=0x%lx id=%d kind=%d alu=%u form=%u "
@@ -2166,7 +2166,7 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                     "direct_rhs=%d direct_kind=%u bit_reg=%d bit_imm=%d "
                     "instptn=0x%llx use=0x%x def=0x%x pending_before=0x%x "
                     "float_result=%d float_xx=%d "
-                    "live_def=0x%x skip=%d\n",
+                    "live_def=0x%x skip=%d omit_zext32=%d scalar_direct_dst=%d\n",
                     (unsigned long)fields[i].address, fields[i].id,
                     fields[i].kind, fields[i].alu_op, fields[i].alu_form,
                     fields[i].alu_width, fields[i].modrm_mod,
@@ -2177,14 +2177,15 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                     fields[i].direct_bit_index_gpr,
                     fields[i].direct_bit_index_imm,
 #ifdef QUICKTRANS_LATU
-                    0xffffffffffffffffULL,
+                    (unsigned long long)(uint32_t)option_instptn,
 #else
                     (unsigned long long)option_instptn,
 #endif
                     masks.use, masks.def, pending,
                     fields[i].direct_float_result,
                     fields[i].direct_float_xx, live_def,
-                    fields[i].skip_flags);
+                    fields[i].skip_flags, fields[i].omit_zext32,
+                    fields[i].scalar_direct_dst);
         }
         pending &= ~masks.def;
         pending |= masks.use;
@@ -3358,6 +3359,9 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
         }
         fields = &decoded.fields;
         fields->skip_flags = false;
+        fields->omit_zext32 = false;
+        fields->scalar_direct_dst = false;
+        fields->atomic_no_barrier = false;
 #ifdef CONFIG_LATX_DEBUG
         if (!fast_template_emit_constraints_ok(fields)) {
             return false;
@@ -3403,7 +3407,7 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
 
     tu_meta->icount = icount;
     tu_meta->eflag_in = ft_analyze_tb_flags(fields_buf, meta_buf, icount,
-                                                    analysis_candidates);
+                                           analysis_candidates, false, false);
     tu_meta->eflag_out = FT_EFLAGS_ALL;
     for (int i = 0; i < icount; ++i) {
         tu_meta->insns[i].fields = fields_buf[i];
@@ -3438,6 +3442,7 @@ uint8_t latx_fast_analyze_tu_tb_flags(FastTranslatorTuTbMeta *tu_meta,
         uint8_t live_def = insn->eflag_def & pending;
 
         fields->skip_flags = live_def == 0 && insn->eflag_use == 0;
+        fields->scalar_direct_dst = false;
         if (trace_opt) {
             fprintf(stderr,
                     "[FT-OPT] pc=0x%lx id=%d kind=%d alu=%u form=%u "
@@ -3489,6 +3494,11 @@ bool latx_fast_translate_tu_tb_cached(CPUArchState *env,
         FastTranslatorTuInsnMeta *insn = &tu_meta->insns[i];
         FastTemplateFields *fields = &insn->fields;
         int insn_emitted;
+
+        /* TU metadata may outlive the CPU thread state used to decode it. */
+        fields->atomic_no_barrier = false;
+        fields->omit_zext32 = false;
+        fields->scalar_direct_dst = false;
 
         if (ft_template_uses_mmx(fields) &&
             ft_mmx_entry_required(mmx_active)) {
@@ -3678,486 +3688,46 @@ bool latx_fast_patch_tu_tb_branches(TranslationBlock *tb)
     return true;
 }
 
-static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
-                                              TranslationBlock *tb,
-                                              int max_insns,
-                                              int *code_size,
-                                              int *search_size,
-                                              QuickTransFailure *failure
-#ifndef QUICKTRANS_LATU
-                                              , FtCodeSpace *space
+#define FT_WITH_RSP_MERGE 1
+#define FT_SPECIALIZED_NAME latx_fast_decode_translate_tb_primary_ex_impl
+#define FT_SEARCH_NAME ft_encode_search
+#define FT_CANDIDATES_NAME ft_analysis_candidates
+#include "primary-translate-body.inc.c"
+#undef FT_SPECIALIZED_NAME
+#undef FT_WITH_RSP_MERGE
+#undef FT_SEARCH_NAME
+#undef FT_CANDIDATES_NAME
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && defined(LATX_QUICKTRANS_RSP_SEARCH_ABI)
+#define FT_WITH_RSP_MERGE 0
+#define FT_SPECIALIZED_NAME latx_fast_decode_translate_tb_primary_ex_impl_no_rsp
+#define FT_SEARCH_NAME ft_encode_search_no_rsp
+#define FT_CANDIDATES_NAME ft_analysis_candidates_no_rsp
+#include "primary-translate-body.inc.c"
+#undef FT_SPECIALIZED_NAME
+#undef FT_WITH_RSP_MERGE
+#undef FT_SEARCH_NAME
+#undef FT_CANDIDATES_NAME
 #endif
-                                              )
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && defined(LATX_QUICKTRANS_RSP_SEARCH_ABI)
+/* Selected once while parsing startup options, before any TB is translated. */
+static bool (*ft_primary_selected)(CPUArchState *, TranslationBlock *, int,
+                                   int *, int *, QuickTransFailure *) =
+    latx_fast_decode_translate_tb_primary_ex_impl;
+#endif
+
+#ifdef QUICKTRANS_LATU
+void latx_fast_set_rsp_merge(bool enabled)
 {
-    uint32_t *code = (uint32_t *)tb->tc.ptr;
-    target_ulong start_pc = tb->pc;
-    target_ulong pc = start_pc;
-    FastTemplateFields fields_buf[TCG_MAX_INSNS];
-    const FastTemplateRuntimeInfo *meta_buf[TCG_MAX_INSNS];
-    int emitted = 0;
-    int icount = 0;
-    unsigned int analysis_candidates = 0;
-    bool x87_top_active = false;
-    bool mmx_active = false;
-    const uint8_t *host_start = NULL;
-    bool debug_skip = ft_debug_skip_config()->enabled;
-    bool debug_split = ft_debug_split_config()->enabled;
-    bool debug_trace = ft_primary_trace_enabled();
-    bool debug_live = ft_primary_debug_live_enabled();
-    bool debug_code = ft_primary_debug_code_enabled();
-    bool sample_trace = ft_primary_sample_trace_enabled();
-    bool stage_stats = ft_primary_stage_stats_enabled();
-    bool emit_profile = stage_stats && ft_emit_profile_enabled();
-    int decode_mode = ft_tu_decode_mode(tb);
-    int64_t stage_total_start = stage_stats ? ft_bench_now_ns() : 0;
-    int64_t stage_decode_ns = 0;
-    int64_t stage_analyze_ns = 0;
-    int64_t stage_emit_start = 0;
-    int64_t stage_search_ns = 0;
-
-#ifndef QUICKTRANS_LATU
-    host_start = lsenv->tr_data->host_addr[0];
-#endif
-
-#ifdef QUICKTRANS_LATU
-    if (max_insns == 1) {
-        max_insns = TCG_MAX_INSNS;
-    }
-#endif
-    if (max_insns > TCG_MAX_INSNS) {
-        max_insns = TCG_MAX_INSNS;
-    }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
-    /* An SS load inhibits interrupts only through the next instruction. */
-    if (tb->flags & HF_INHIBIT_IRQ_MASK) {
-        max_insns = 1;
-    }
-#endif
-
-    for (;;) {
-        uint8_t inst_cache[15];
-        FastDecodedFT decoded;
-        const FastTemplateDesc *tmpl;
-        const FastTemplateRuntimeInfo *meta;
-        FastTemplateFields *fields;
-        int max_insn_len = sizeof(inst_cache);
-        bool is_ending;
-        bool page_boundary;
-
-        if (icount >= max_insns || max_insn_len <= 0) {
-            return ft_primary_fail(
-                failure, QUICKTRANS_FAILURE_STAGE_FETCH,
-                QUICKTRANS_FAILURE_REASON_INSN_LIMIT, pc, NULL, 0, 0,
-                FT_UNSUPPORTED, icount);
-        }
-        if (!ft_decode_x86_primary_window(env, host_start, start_pc, pc,
-                                          inst_cache, decode_mode, &decoded,
-                                          &max_insn_len, &page_boundary)) {
-            if (page_boundary && icount) {
-                ft_primary_update_last_info(tb, &fields_buf[icount - 1]);
-                break;
-            }
-#if !defined(QUICKTRANS_LATU) && defined(CONFIG_SOFTMMU)
-            if (lsenv->tr_data->deadlock_avoidance) {
-                return false;
-            }
-#endif
-            fprintf(stderr, "[FT] fd-primary decode-fail index=%d pc=0x%lx\n",
-                    icount, (unsigned long)pc);
-            if (debug_trace) {
-                fprintf(stderr, "[FT] fd-primary bytes=");
-                for (int j = 0; j < max_insn_len; ++j) {
-                    fprintf(stderr, "%02x", inst_cache[j]);
-                }
-                fprintf(stderr, "\n");
-            }
-            return ft_primary_fail(
-                failure, QUICKTRANS_FAILURE_STAGE_DECODE,
-                QUICKTRANS_FAILURE_REASON_DECODE_FAILED, pc, inst_cache,
-                max_insn_len, 0, FT_UNSUPPORTED, icount);
-        }
-
-        ft_apply_latu_legacy_policy(&decoded);
-        tmpl = decoded.tmpl;
-        meta = ft_template_runtime_info(tmpl ? tmpl->kind : FT_UNSUPPORTED);
-        if (!tmpl || (ft_template_is_helper(tmpl->kind) &&
-                      !ft_template_primary_helper_allowed(tmpl->kind))) {
-            fprintf(stderr,
-                    "[FT] fd-primary miss-insn index=%d pc=0x%lx id=%d "
-                    "size=%u kind=%d helper=%d\n",
-                    icount, (unsigned long)pc,
-                    decoded.fields.id, decoded.fields.size,
-                    tmpl ? tmpl->kind : FT_UNSUPPORTED,
-                    tmpl ? ft_template_is_helper(tmpl->kind) : 0);
-            return ft_primary_fail(
-                failure, QUICKTRANS_FAILURE_STAGE_TEMPLATE,
-                tmpl ? QUICKTRANS_FAILURE_REASON_HELPER_UNSUPPORTED
-                     : QUICKTRANS_FAILURE_REASON_TEMPLATE_MISSING,
-                pc, inst_cache,
-                MIN((size_t)decoded.fields.size, sizeof(inst_cache)),
-                decoded.fields.id, tmpl ? tmpl->kind : FT_UNSUPPORTED,
-                icount);
-        }
-        if (debug_skip &&
-            ft_debug_skip_template(tmpl->kind, decoded.fields.id,
-                                   decoded.fields.address)) {
-            return ft_primary_fail(
-                failure, QUICKTRANS_FAILURE_STAGE_TEMPLATE,
-                QUICKTRANS_FAILURE_REASON_DEBUG_SKIP, pc, inst_cache,
-                MIN((size_t)decoded.fields.size, sizeof(inst_cache)),
-                decoded.fields.id, tmpl->kind, icount);
-        }
-        if (debug_split && icount > 0 &&
-            ft_debug_split_before_template(tmpl->kind,
-                                           decoded.fields.address)) {
-            break;
-        }
-        if (!decoded.fields_valid) {
-            fprintf(stderr,
-                    "[FT] fd-primary field-fail index=%d pc=0x%lx id=%d "
-                    "size=%u kind=%d\n",
-                    icount, (unsigned long)decoded.fields.address,
-                    decoded.fields.id, decoded.fields.size, tmpl->kind);
-            return ft_primary_fail(
-                failure, QUICKTRANS_FAILURE_STAGE_TEMPLATE,
-                QUICKTRANS_FAILURE_REASON_FIELDS_INVALID, pc, inst_cache,
-                MIN((size_t)decoded.fields.size, sizeof(inst_cache)),
-                decoded.fields.id, tmpl->kind, icount);
-        }
-        fields = &decoded.fields;
-        if (!ft_system_primary_insn_supported(fields)) {
-            return ft_primary_fail(
-                failure, QUICKTRANS_FAILURE_STAGE_CONSTRAINT,
-                QUICKTRANS_FAILURE_REASON_MODE_UNSUPPORTED, pc, inst_cache,
-                MIN((size_t)fields->size, sizeof(inst_cache)), fields->id,
-                tmpl->kind, icount);
-        }
-        fields->skip_flags = false;
-#ifdef CONFIG_LATX_DEBUG
-        if (!fast_template_emit_constraints_ok(fields)) {
-            fprintf(stderr,
-                    "[FT] fd-primary constraint-fail index=%d "
-                    "pc=0x%lx id=%d size=%u kind=%d modrm=%02x "
-                    "rex=%02x disp=%ld imm=%ld\n",
-                    icount, (unsigned long)fields->address, fields->id,
-                    fields->size, tmpl->kind, fields->modrm,
-                    fields->rex < 0 ? 0 : fields->rex,
-                    (long)fields->disp, (long)fields->imm);
-            return ft_primary_fail(
-                failure, QUICKTRANS_FAILURE_STAGE_CONSTRAINT,
-                QUICKTRANS_FAILURE_REASON_CONSTRAINT_REJECTED, pc,
-                inst_cache, MIN((size_t)fields->size, sizeof(inst_cache)),
-                fields->id, tmpl->kind, icount);
-        }
-#endif
-
-        if (sample_trace) {
-            ft_primary_sample_trace(env, fields);
-        }
-
-        analysis_candidates |= ft_analysis_candidates(fields);
-        fields_buf[icount] = *fields;
-        meta_buf[icount] = meta;
-        if (stage_stats) {
-            ft_primary_stage_stats.insns++;
-            ft_primary_stage_stats.kind[tmpl->kind]++;
-        }
-        tb->icount = icount + 1;
-        tb->size = fields->address + fields->size - start_pc;
-        if (debug_trace) {
-            fprintf(stderr, "[FT] fd-primary pc=0x%lx size=%u id=%d kind=%d\n",
-                    (unsigned long)fields->address, fields->size, fields->id,
-                    tmpl->kind);
-        }
-
-        is_ending = decoded.is_tb_ending;
-        icount++;
-        pc = fields->address + fields->size;
-
-#if !defined(QUICKTRANS_LATU) && defined(CONFIG_SOFTMMU)
-        is_ending |= (pc & TARGET_PAGE_MASK) !=
-                     (start_pc & TARGET_PAGE_MASK);
-#endif
-        if (meta->terminal_exit || is_ending || icount == max_insns) {
-            ft_primary_update_last_info(tb, fields);
-            break;
-        }
-    }
-
-    if (stage_stats) {
-        int64_t now = ft_bench_now_ns();
-
-        stage_decode_ns = now - stage_total_start;
-        stage_emit_start = now;
-    }
-    (void)ft_analyze_tb_flags(fields_buf, meta_buf, icount,
-                                                    analysis_candidates);
-    if (stage_stats) {
-        int64_t now = ft_bench_now_ns();
-
-        stage_analyze_ns = now - stage_emit_start;
-        if (getenv("LATX_FT_TB_KIND_TRACE")) {
-            fprintf(stderr, "[FT-TB-KINDS] pc=0x%lx count=%d kinds=",
-                    (unsigned long)start_pc, icount);
-            for (int trace_i = 0; trace_i < icount; ++trace_i) {
-                fprintf(stderr, "%s%d", trace_i ? "," : "",
-                        fields_buf[trace_i].kind);
-            }
-            fputc('\n', stderr);
-        }
-        stage_emit_start = ft_bench_now_ns();
-    }
-#ifndef QUICKTRANS_LATU
-    ft_code_space_activate(space);
-#endif
-    for (int i = 0; i < icount; ++i) {
-        FastTemplateFields *fields = &fields_buf[i];
-        const FastTemplateRuntimeInfo *meta = meta_buf[i];
-        uint32_t *insn_code;
-        int64_t kind_emit_start;
-        int insn_emitted;
-
-        if (ft_template_uses_mmx(fields) &&
-            ft_mmx_entry_required(mmx_active)) {
-            uint32_t *out = code + emitted;
-
-            ft_emit_enter_mmx(&out);
-            emitted = out - code;
-            mmx_active = true;
-        }
-        if (!option_soft_fpu && !x87_top_active && meta->uses_x87_top) {
-            uint32_t *out = code + emitted;
-            int top_emitted = ft_emit_x87_top_load(&out);
-
-            if (!top_emitted) {
-                return ft_primary_fail_decoded(
-                    env, failure, QUICKTRANS_FAILURE_STAGE_EMIT,
-                    QUICKTRANS_FAILURE_REASON_X87_TOP_LOAD, fields->address,
-                    fields, i);
-            }
-            emitted += top_emitted;
-            x87_top_active = true;
-        }
-
-        {
-            uint32_t *out = code + emitted;
-
-            if (debug_live) {
-                ft_primary_debug_emit_live_regs(&out, fields->address);
-            }
-            emitted = out - code;
-        }
-
-        insn_code = code + emitted;
-        kind_emit_start = stage_stats ? ft_bench_now_ns() : 0;
-        if (!debug_live && ft_x87_can_share_context(fields)) {
-            bool first = i == 0 ||
-                !ft_x87_can_share_context(&fields_buf[i - 1]);
-            bool last = i + 1 == icount ||
-                !ft_x87_can_share_context(&fields_buf[i + 1]);
-
-            insn_emitted = ft_emit_x87_shared_context(fields, insn_code,
-                                                     first, last);
-        } else {
-            insn_emitted = emit_template_fields(fields, tb, fields->address,
-                                                insn_code);
-        }
-        if (!insn_emitted && !ft_emit_zero_code_allowed(fields)) {
-            fprintf(stderr,
-                    "[FT] fd-primary emit-fail index=%d pc=0x%lx id=%d "
-                    "size=%u kind=%d\n",
-                    i, (unsigned long)fields->address, fields->id,
-                    fields->size,
-                    fields->kind);
-            return ft_primary_fail_decoded(
-                env, failure, QUICKTRANS_FAILURE_STAGE_EMIT,
-                QUICKTRANS_FAILURE_REASON_INSN_EMIT, fields->address,
-                fields, i);
-        }
-        emitted += insn_emitted;
-        if (fields->kind == FT_EMMS) {
-            mmx_active = false;
-        }
-        if (stage_stats) {
-            ft_primary_stage_stats.kind_emit_ns[fields->kind] +=
-                ft_bench_now_ns() - kind_emit_start;
-            ft_primary_stage_stats.kind_words[fields->kind] += insn_emitted;
-            if (emit_profile) {
-                ft_emit_profile_record(fields, meta, insn_code, insn_emitted);
-            }
-        }
-        if (debug_code) {
-            ft_primary_debug_dump_code(fields->address, fields, code, emitted);
-        }
-        if (!option_soft_fpu && x87_top_active && meta->terminal_exit) {
-            uint32_t *out = code + emitted;
-            int top_emitted = ft_emit_x87_top_save(&out);
-
-            if (!top_emitted) {
-                return ft_primary_fail_decoded(
-                    env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                    QUICKTRANS_FAILURE_REASON_X87_TOP_STORE,
-                    fields->address, fields, i);
-            }
-            emitted += top_emitted;
-            x87_top_active = false;
-        }
-
-        ft_set_insn_start_data(i, fields->address);
-        ft_set_insn_end_off(i, emitted << 2);
-
-        if (meta->terminal_exit) {
-            int64_t search_start = stage_stats ? ft_bench_now_ns() : 0;
-
-#ifndef QUICKTRANS_LATU
-            tb->ir2_num = emitted;
-#endif
-            *code_size = emitted * 4;
-#ifdef QUICKTRANS_LATU
-            *search_size = ft_encode_search(tb, fields_buf,
-                                            (uint8_t *)(code + emitted), true);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && defined(LATX_QUICKTRANS_RSP_SEARCH_ABI)
+    ft_primary_selected = enabled ? latx_fast_decode_translate_tb_primary_ex_impl
+                                 : latx_fast_decode_translate_tb_primary_ex_impl_no_rsp;
 #else
-            if (option_split_search) {
-                void *search_block = region_alloc_search_size(
-                    tb, curr_mtcc(env),
-                    (size_t)tb->icount * (TARGET_INSN_START_WORDS + 3) + 9);
-
-                if (!search_block) {
-                    *code_size = __GENCODE_ERR_AUX_DATA_OVERFLOW;
-                    return false;
-                }
-                *search_size = 0;
-                if (ft_encode_search(tb, fields_buf, search_block, false) < 0) {
-                    return ft_primary_fail_decoded(
-                        env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                        QUICKTRANS_FAILURE_REASON_SEARCH_ENCODE,
-                        fields->address, fields, i);
-                }
-            } else {
-                *search_size = ft_encode_search(tb, fields_buf,
-                                                (uint8_t *)(code + emitted),
-                                                true);
-            }
+    (void)enabled;
 #endif
-            if (stage_stats) {
-                int64_t now = ft_bench_now_ns();
-
-                stage_search_ns += now - search_start;
-                ft_primary_stage_stats_record(
-                    now - stage_total_start, stage_decode_ns,
-                    stage_analyze_ns,
-                    search_start - stage_emit_start, stage_search_ns);
-            }
-            if (*search_size < 0) {
-                return ft_primary_fail_decoded(
-                    env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                    QUICKTRANS_FAILURE_REASON_SEARCH_ENCODE,
-                    fields->address, fields, i);
-            }
-            ft_primary_tb_trace(tb, fields_buf, icount, emitted);
-            return true;
-        }
-    }
-
-    {
-        uint32_t *out = code + emitted;
-        int exit_emitted;
-
-        if (!option_soft_fpu && x87_top_active) {
-            int top_emitted = ft_emit_x87_top_save(&out);
-
-            if (!top_emitted) {
-                int last = icount - 1;
-                FastTemplateFields *last_fields = &fields_buf[last];
-
-                return ft_primary_fail_decoded(
-                    env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                    QUICKTRANS_FAILURE_REASON_X87_TOP_STORE,
-                    last_fields->address, last_fields, last);
-            }
-            emitted += top_emitted;
-        }
-
-        exit_emitted =
-            ft_emit_direct_link_exit(tb, &out, 0, tb->pc + tb->size, la_t1);
-
-        if (!exit_emitted) {
-            int last = icount - 1;
-            FastTemplateFields *last_fields = &fields_buf[last];
-
-            return ft_primary_fail_decoded(
-                env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                QUICKTRANS_FAILURE_REASON_DIRECT_EXIT,
-                tb->pc + tb->size, last_fields, last);
-        }
-        emitted += exit_emitted;
-    }
-    if (emitted <= 0 || tb->icount <= 0) {
-        int last = icount - 1;
-
-        return ft_primary_fail_decoded(
-            env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-            QUICKTRANS_FAILURE_REASON_EMPTY_OUTPUT, tb->pc + tb->size,
-            last >= 0 ? &fields_buf[last] : NULL, last);
-    }
-    ft_set_insn_end_off(tb->icount - 1, emitted << 2);
-#ifndef QUICKTRANS_LATU
-    tb->ir2_num = emitted;
-#endif
-    *code_size = emitted * 4;
-    {
-        int64_t search_start = stage_stats ? ft_bench_now_ns() : 0;
-
-#ifdef QUICKTRANS_LATU
-    *search_size = ft_encode_search(tb, fields_buf,
-                                    (uint8_t *)(code + emitted), true);
-#else
-    if (option_split_search) {
-        void *search_block = region_alloc_search_size(
-            tb, curr_mtcc(env),
-            (size_t)tb->icount * (TARGET_INSN_START_WORDS + 3) + 9);
-
-        if (!search_block) {
-            *code_size = __GENCODE_ERR_AUX_DATA_OVERFLOW;
-            return false;
-        }
-        *search_size = 0;
-        if (ft_encode_search(tb, fields_buf, search_block, false) < 0) {
-            int last = icount - 1;
-            FastTemplateFields *last_fields = &fields_buf[last];
-
-            return ft_primary_fail_decoded(
-                env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-                QUICKTRANS_FAILURE_REASON_SEARCH_ENCODE,
-                last_fields->address, last_fields, last);
-        }
-    } else {
-        *search_size = ft_encode_search(tb, fields_buf,
-                                        (uint8_t *)(code + emitted),
-                                        true);
-    }
-#endif
-        if (stage_stats) {
-            int64_t now = ft_bench_now_ns();
-
-            stage_search_ns += now - search_start;
-            ft_primary_stage_stats_record(
-                now - stage_total_start, stage_decode_ns, stage_analyze_ns,
-                search_start - stage_emit_start, stage_search_ns);
-        }
-    }
-    if (*search_size < 0) {
-        int last = icount - 1;
-        FastTemplateFields *last_fields = &fields_buf[last];
-
-        return ft_primary_fail_decoded(
-            env, failure, QUICKTRANS_FAILURE_STAGE_EXIT,
-            QUICKTRANS_FAILURE_REASON_SEARCH_ENCODE, last_fields->address,
-            last_fields, last);
-    }
-    ft_primary_tb_trace(tb, fields_buf, icount, emitted);
-    return true;
 }
+#endif
 
 #ifndef QUICKTRANS_LATU
 static void ft_tb_code_space_init(FtCodeSpace *space, TranslationBlock *tb)
@@ -4236,6 +3806,9 @@ bool latx_fast_decode_translate_tb_primary_ex(CPUArchState *env,
         env, tb, max_insns, code_size, search_size, failure, &space);
     ft_code_space_clear();
     return ok;
+#elif defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && defined(LATX_QUICKTRANS_RSP_SEARCH_ABI)
+    return ft_primary_selected(
+        env, tb, max_insns, code_size, search_size, failure);
 #else
     return latx_fast_decode_translate_tb_primary_ex_impl(
         env, tb, max_insns, code_size, search_size, failure);

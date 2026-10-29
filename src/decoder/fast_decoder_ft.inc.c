@@ -158,10 +158,13 @@ static void fd_ft_init_fields(FastTemplateFields *fields,
     fields->direct_bit_index_imm = -1;
     fields->instptn_div_kind = 0;
     fields->instptn_skip = false;
+    fields->atomic_no_barrier = false;
     fields->direct_float_result = false;
     fields->direct_float_xx = false;
     fields->addr32 = s->aflag == 32;
     fields->skip_flags = false;
+    fields->omit_zext32 = false;
+    fields->scalar_direct_dst = false;
     fields->direct_branch_kind = FT_DIRECT_BRANCH_NONE;
 }
 

@@ -132,7 +132,9 @@ static bool ft_emit_alu_store_rm(uint32_t **out,
         !ft_alu_uses_cf(fields->alu_op) &&
         fields->modrm_rm_index < GPR_NUM &&
         value == ft_gpr(fields->modrm_rm_index)) {
-        FT_LA_BSTRPICK_D_EMIT(out, value, value, 31, 0);
+        if (!ft_omit_gpr_zext32(fields)) {
+            FT_LA_BSTRPICK_D_EMIT(out, value, value, 31, 0);
+        }
         return true;
     }
 #endif
@@ -140,8 +142,10 @@ static bool ft_emit_alu_store_rm(uint32_t **out,
     case 64:
         return ft_emit_store_rm64(out, fields, pc, value);
     case 32:
+        /* false omits only the helper's final clear; its OR copy remains. */
         return ft_emit_store_rm32(out, fields, pc, value,
-                                  fields->modrm_mod == 3);
+                                  fields->modrm_mod == 3 &&
+                                  !ft_omit_gpr_zext32(fields));
     case 16:
         return ft_emit_store_rm16(out, fields, pc, value);
     case 8:
@@ -206,6 +210,11 @@ static bool ft_emit_alu_store_modrm_reg(uint32_t **out,
         FT_LA_OR_EMIT(out, ft_gpr(reg), value, la_zero);
         return true;
     case 32:
+        /* Removing this instruction is valid only when it is a pure
+         * high-half clear; otherwise it also copies the result. */
+        if (value == ft_gpr(reg) && ft_omit_gpr_zext32(fields)) {
+            return true;
+        }
         FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(reg), value, 31, 0);
         return true;
     case 16:
@@ -385,9 +394,10 @@ static bool ft_emit_locked_alu(uint32_t **out,
         ft_emit_raw(out, ft_gpr3(data_op, desired, old, rhs));
         FT_LA_OR_EMIT(out, expected, old, la_zero);
         ft_emit_raw(out,
-                    ft_gpr3(fields->alu_width == 8 ?
-                            FT_LA_OPCODE_AMCAS_DB_B :
-                            FT_LA_OPCODE_AMCAS_DB_H,
+                    ft_gpr3(ft_atomic_opcode(fields,
+                                             fields->alu_width == 8 ?
+                                             FT_LA_OPCODE_AMCAS_DB_B :
+                                             FT_LA_OPCODE_AMCAS_DB_H),
                             expected, addr, desired));
         ft_emit_zero_extend_atomic_old(out, expected, fields->alu_width);
         ft_emit_branch_placeholder(out, &done_fixup, FT_BRANCH_BEQ,
@@ -415,7 +425,8 @@ static bool ft_emit_locked_alu(uint32_t **out,
                             value, la_zero, rhs));
     }
     old = addr == la_t0 ? la_t3 : la_t0;
-    ft_emit_raw(out, ft_gpr3(atomic_op, old, addr, value));
+    ft_emit_raw(out, ft_gpr3(ft_atomic_opcode(fields, atomic_op),
+                            old, addr, value));
     if (fields->alu_op == FT_ALU_SBB && !fields->skip_flags) {
         uint32_t add_op = fields->alu_width == 64 ?
                           FT_LA_OPCODE_ADD_D : FT_LA_OPCODE_ADD_W;
@@ -527,7 +538,7 @@ static bool ft_emit_logic_imm_reg(uint32_t **out,
     } else {
         FT_LA_XORI_EMIT(out, dst, dst, imm);
     }
-    if (width == 32) {
+    if (width == 32 && !ft_omit_gpr_zext32(fields)) {
         FT_LA_BSTRPICK_D_EMIT(out, dst, dst, 31, 0);
     }
     return true;
@@ -568,7 +579,9 @@ static bool ft_emit_addsub_imm_reg(uint32_t **out,
         FT_LA_ADDI_D_EMIT(out, dst, dst, addend);
     } else {
         FT_LA_ADDI_W_EMIT(out, dst, dst, addend);
-        FT_LA_BSTRPICK_D_EMIT(out, dst, dst, 31, 0);
+        if (!ft_omit_gpr_zext32(fields)) {
+            FT_LA_BSTRPICK_D_EMIT(out, dst, dst, 31, 0);
+        }
     }
     return true;
 #else
@@ -577,6 +590,57 @@ static bool ft_emit_addsub_imm_reg(uint32_t **out,
     return false;
 #endif
 }
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Commit flags only after a non-LOCK memory destination has been written.
+ * A store fault must retain the input CF for signal return and retry.
+ * Keep the address and both inputs live instead of recalculating an address
+ * that can overwrite the flag operands in t0/t1. */
+static bool ft_emit_carry_memory(uint32_t **out,
+                                  const FastTemplateFields *fields,
+                                  target_ulong pc)
+{
+    int addr, rhs;
+    int width = fields->alu_width;
+    uint32_t data_op = ft_alu_data_op(fields->alu_op, width);
+
+    if (!ft_emit_rmw_addr(out, fields, pc, &addr, la_t4)) {
+        return false;
+    }
+    ft_preserve_cmpxchg_addr(out, &addr);
+    switch (width) {
+    case 8: FT_LA_LD_BU_EMIT(out, la_t3, addr, 0); break;
+    case 16: FT_LA_LD_HU_EMIT(out, la_t3, addr, 0); break;
+    case 32: FT_LA_LD_WU_EMIT(out, la_t3, addr, 0); break;
+    case 64: FT_LA_LD_D_EMIT(out, la_t3, addr, 0); break;
+    default: return false;
+    }
+    if (fields->alu_form == FT_ALU_FORM_RM_R) {
+        if (!ft_emit_alu_modrm_reg_value(out, fields, width, la_t1, &rhs)) {
+            return false;
+        }
+    } else if (!ft_emit_alu_imm(out, fields, width, &rhs)) {
+        return false;
+    }
+    ft_emit_raw(out, ft_gpr3(data_op, la_t2, la_t3, rhs));
+    switch (width) {
+    case 8: FT_LA_ST_B_EMIT(out, la_t2, addr, 0); break;
+    case 16: FT_LA_ST_H_EMIT(out, la_t2, addr, 0); break;
+    case 32: FT_LA_ST_W_EMIT(out, la_t2, addr, 0); break;
+    case 64: FT_LA_ST_D_EMIT(out, la_t2, addr, 0); break;
+    }
+    if (!ft_emit_alu_flag(out, fields, fields->alu_op, width, la_t3, rhs)) {
+        return false;
+    }
+    if (fields->alu_op == FT_ALU_SBB && !fields->skip_flags) {
+        FT_LA_XOR_EMIT(out, la_t3, la_t3, rhs);
+        FT_LA_XOR_EMIT(out, la_t3, la_t3, la_t2);
+        FT_LA_ANDI_EMIT(out, la_t3, la_t3, 0x10);
+        FT_LA_X86MTFLAG_EMIT(out, la_t3, AF_USEDEF_BIT);
+    }
+    return true;
+}
+#endif
 
 static bool ft_emit_alu_template(uint32_t **out,
                                  const FastTemplateFields *fields,
@@ -594,6 +658,13 @@ static bool ft_emit_alu_template(uint32_t **out,
     if (fields->prefix0 == dt_X86_PREFIX_LOCK) {
         return ft_emit_locked_alu(out, fields, pc);
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (ft_alu_uses_cf(op) && fields->modrm_mod != 3 &&
+        (fields->alu_form == FT_ALU_FORM_RM_R ||
+         fields->alu_form == FT_ALU_FORM_RM_IMM)) {
+        return ft_emit_carry_memory(out, fields, pc);
+    }
+#endif
     switch (fields->alu_form) {
     case FT_ALU_FORM_RM_R:
         if (!ft_emit_alu_load_rm(out, fields, pc, width, &lhs) ||
@@ -714,7 +785,7 @@ static bool ft_emit_alu_template(uint32_t **out,
             FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), result, 7, 0);
         } else if (width == 16) {
             FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), result, 15, 0);
-        } else if (width == 32) {
+        } else if (width == 32 && !ft_omit_gpr_zext32(fields)) {
             FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rax_index),
                                      ft_gpr(rax_index), 31, 0);
         }

@@ -696,7 +696,8 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst_or_base), la_t0, 15, 0);
             } else {
                 ft_emit_mov_imm32(&out, ft_gpr(dst_or_base),
-                                  (uint32_t)fields->imm);
+                                  (uint32_t)fields->imm,
+                                  ft_omit_gpr_zext32(fields));
             }
         } else {
             int value_reg;
@@ -4414,6 +4415,9 @@ simd_bin_done:
             FT_LA_VXOR_V_EMIT(&out, ft_xmm(dst), ft_xmm(dst),
                              ft_xmm(dst));
         } else if (imm == 0) {
+            if (ft_emit_zero_code_allowed(fields)) {
+                break;
+            }
             ft_emit_raw(&out, FT_LA_OPCODE_VORI_B | ft_xmm(dst) | (ft_xmm(dst) << 5));
         } else {
             ft_emit_raw(&out, (fields->kind == FT_PSRLDQ_XMM_IMM8 ?
@@ -4649,6 +4653,8 @@ simd_bin_done:
         bool is_double = fields->prefix0 == dt_X86_PREFIX_REPNE;
         bool scalar_noop = false;
         bool simd_fpe;
+        bool scalar_direct = false;
+        int scalar_result = ft_vscratch;
 
         if (!ft_simd_scalar_bin_opcode_info(fields->prefix0,
                                             fields->opcode1, &la_opcode,
@@ -4663,13 +4669,24 @@ simd_bin_done:
         }
         simd_fpe = id != dt_X86_INS_RCPSS &&
                    id != dt_X86_INS_RSQRTSS;
-        /* Scalar FP writes only the low lane; preserve the upper XMM lane. */
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU) && \
+    !defined(CONFIG_LATX_AVX_OPT)
+        if (fields->scalar_direct_dst &&
+            ft_scalar_direct_dst_candidate(fields)) {
+            scalar_direct = true;
+            scalar_result = ft_xmm(dst);
+        }
+#endif
+        /* Normally preserve the upper XMM lanes by inserting the scalar
+         * result. The bounded LATU analysis can prove those lanes unused.
+         * The low result is computed in either case, including its traps.
+         */
         switch (id) {
         case dt_X86_INS_SQRTSD:
-            FT_LA_FSQRT_D_EMIT(&out, ft_vscratch, src);
+            FT_LA_FSQRT_D_EMIT(&out, scalar_result, src);
             break;
         case dt_X86_INS_SQRTSS:
-            FT_LA_FSQRT_S_EMIT(&out, ft_vscratch, src);
+            FT_LA_FSQRT_S_EMIT(&out, scalar_result, src);
             break;
         case dt_X86_INS_RCPSS:
             FT_LA_FRECIP_S_EMIT(&out, ft_vscratch, src);
@@ -4678,28 +4695,28 @@ simd_bin_done:
             FT_LA_FRSQRT_S_EMIT(&out, ft_vscratch, src);
             break;
         case dt_X86_INS_ADDSD:
-            FT_LA_FADD_D_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FADD_D_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_ADDSS:
-            FT_LA_FADD_S_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FADD_S_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_SUBSD:
-            FT_LA_FSUB_D_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FSUB_D_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_MULSD:
-            FT_LA_FMUL_D_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FMUL_D_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_SUBSS:
-            FT_LA_FSUB_S_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FSUB_S_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_MULSS:
-            FT_LA_FMUL_S_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FMUL_S_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_DIVSD:
-            FT_LA_FDIV_D_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FDIV_D_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_DIVSS:
-            FT_LA_FDIV_S_EMIT(&out, ft_vscratch, ft_xmm(dst), src);
+            FT_LA_FDIV_S_EMIT(&out, scalar_result, ft_xmm(dst), src);
             break;
         case dt_X86_INS_MINSD:
             if (src == ft_xmm(dst) && !ft_lats_simd_fpe_enabled(tb)) {
@@ -4741,6 +4758,9 @@ simd_bin_done:
         }
         if (simd_fpe) {
             ft_emit_lats_simd_fpe_check(&out, tb, pc);
+        }
+        if (scalar_direct) {
+            break;
         }
         if (is_double) {
             if (option_enable_lasx) {

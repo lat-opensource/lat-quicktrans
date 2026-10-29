@@ -254,9 +254,11 @@ static bool ft_emit_xadd_rm(uint32_t **out, const FastTemplateFields *fields,
         int old = addr == la_t0 ? la_t4 : la_t0;
 
         /* AM* traps on 3A6000 when rd aliases the address register. */
-        ft_emit_raw(out, ft_gpr3(is64 ? FT_LA_OPCODE_AMADD_DB_D :
-                                        FT_LA_OPCODE_AMADD_DB_W,
-                                 old, addr, ft_gpr(src)));
+        ft_emit_raw(out,
+                    ft_gpr3(ft_atomic_opcode(fields,
+                                             is64 ? FT_LA_OPCODE_AMADD_DB_D :
+                                                    FT_LA_OPCODE_AMADD_DB_W),
+                            old, addr, ft_gpr(src)));
         if (!fields->skip_flags) {
             ft_emit_raw(out, ft_gpr2(is64 ? FT_LA_OPCODE_X86ADD_D : FT_LA_OPCODE_X86ADD_W,
                                 old, ft_gpr(src)));
@@ -271,7 +273,8 @@ static bool ft_emit_xadd_rm(uint32_t **out, const FastTemplateFields *fields,
         ft_preserve_cmpxchg_addr(out, &addr);
         old = la_t1;
         FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(src), 15, 0);
-        FT_LA_AMADD_DB_H_EMIT(out, old, la_t2, addr);
+        ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMADD_DB_H,
+                           old, la_t2, addr);
         if (!fields->skip_flags) {
             FT_LA_X86ADD_H_EMIT(out, old, la_t2);
         }
@@ -294,7 +297,8 @@ static bool ft_emit_xadd_rm(uint32_t **out, const FastTemplateFields *fields,
         } else {
             FT_LA_ANDI_EMIT(out, src_value, ft_gpr(src_base), 0xff);
         }
-        FT_LA_AMADD_DB_B_EMIT(out, old, src_value, addr);
+        ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMADD_DB_B,
+                           old, src_value, addr);
         if (!fields->skip_flags) {
             FT_LA_X86ADD_B_EMIT(out, old, src_value);
         }
@@ -339,7 +343,8 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
             FT_LA_ANDI_EMIT(out, la_t2, ft_gpr(src_base), 0xff);
         }
         FT_LA_ANDI_EMIT(out, la_t1, ft_gpr(rax_index), 0xff);
-        FT_LA_AMCAS_DB_B_EMIT(out, la_t1, la_t2, addr);
+        ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_B,
+                           la_t1, la_t2, addr);
         if (!fields->skip_flags) {
             FT_LA_X86SUB_B_EMIT(out, ft_gpr(rax_index), la_t1);
         }
@@ -353,7 +358,8 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
     if (is16) {
         FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(src), 15, 0);
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rax_index), 15, 0);
-        FT_LA_AMCAS_DB_H_EMIT(out, la_t1, la_t2, addr);
+        ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_H,
+                           la_t1, la_t2, addr);
         if (!fields->skip_flags) {
             FT_LA_X86SUB_H_EMIT(out, ft_gpr(rax_index), la_t1);
         }
@@ -367,7 +373,8 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
     if (is64) {
         FT_LA_OR_EMIT(out, la_t1, ft_gpr(rax_index), la_zero);
         FT_LA_OR_EMIT(out, la_t2, ft_gpr(src), la_zero);
-        FT_LA_AMCAS_DB_D_EMIT(out, la_t1, la_t2, addr);
+        ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_D,
+                           la_t1, la_t2, addr);
         FT_LA_X86SUB_D_EMIT(out, ft_gpr(rax_index), la_t1);
         FT_LA_XOR_EMIT(out, la_t3, la_t1, ft_gpr(rax_index));
         FT_LA_BEQ_EMIT(out, la_t3, la_zero, 2);
@@ -375,7 +382,8 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
     } else {
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rax_index), 31, 0);
         FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(src), 31, 0);
-        FT_LA_AMCAS_DB_W_EMIT(out, la_t1, la_t2, addr);
+        ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_W,
+                           la_t1, la_t2, addr);
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t1, 31, 0);
         FT_LA_X86SUB_W_EMIT(out, ft_gpr(rax_index), la_t1);
         FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index), 31, 0);
@@ -416,7 +424,7 @@ static bool ft_emit_cmpxchg8b(uint32_t **out,
     FT_LA_OR_EMIT(out, la_t2, la_t2, la_t1);
 
     FT_LA_OR_EMIT(out, la_t1, la_t3, la_zero);
-    FT_LA_AMCAS_DB_D_EMIT(out, la_t1, la_t2, addr);
+    ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_D, la_t1, la_t2, addr);
     FT_LA_XOR_EMIT(out, la_t2, la_t1, la_t3);
 
     if (!fields->skip_flags) {
@@ -708,6 +716,16 @@ static int ft_emit_xadd_reg_template(const FastTemplateFields *fields, Translati
             FT_LA_X86ADD_W_EMIT(&out, ft_gpr(src), ft_gpr(dst));
         }
         FT_LA_ADD_W_EMIT(&out, la_t0, ft_gpr(src), ft_gpr(dst));
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (src == dst && fields->prefix0 != dt_X86_PREFIX_LOCK &&
+            fields->segment < 0 && (tb->flags & HF_CS64_MASK)) {
+            /* With aliased operands the final sum overwrites the old value.
+             * Flags above still use the original two low32 operands.
+             */
+            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(src), la_t0, 31, 0);
+            return (out - code);
+        }
+#endif
         FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(src), 31, 0);
         FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(src), la_t0, 31, 0);
         return (out - code);

@@ -48,6 +48,11 @@ def main() -> int:
         return 2
 
     source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+    # Check the shared implementation included by both specialized entries.
+    body = (pathlib.Path(sys.argv[1]).parent / "primary-translate-body.inc.c").read_text()
+    body = body.replace("FT_SPECIALIZED_NAME(", "latx_fast_decode_translate_tb_primary_ex_impl(")
+    source = source.replace('#include "primary-translate-body.inc.c"', body, 1)
+
     bodies = function_bodies(source, "latx_fast_decode_translate_tb_primary_ex")
     if len(bodies) != 2:
         print(f"expected stub and legacy primary bodies, found {len(bodies)}",

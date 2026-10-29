@@ -10,6 +10,11 @@ import sys
 
 def main() -> int:
     source = pathlib.Path(sys.argv[1]).read_text()
+    # Check the shared implementation included by both specialized entries.
+    body = (pathlib.Path(sys.argv[1]).parent / "primary-translate-body.inc.c").read_text()
+    body = body.replace("FT_SPECIALIZED_NAME(", "latx_fast_decode_translate_tb_primary_ex_impl(")
+    source = source.replace('#include "primary-translate-body.inc.c"', body, 1)
+
     forbidden = "ft_template_needs_store_tb_boundary"
 
     if forbidden in source:

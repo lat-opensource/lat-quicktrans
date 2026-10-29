@@ -90,6 +90,9 @@ test('quicktrans_fast_decoder_hot', quicktrans_fast_decoder_hot)
 
 fast_translator_check_sources = files(
   'src/emitter/fast_translator/fast-translator.c',
+  'src/emitter/fast_translator/primary-translate-body.inc.c',
+  'src/emitter/fast_translator/analysis-candidates-body.inc.c',
+  'src/emitter/fast_translator/encode-search-body.inc.c',
   'src/emitter/fast_translator/constraints.inc.c',
   'src/emitter/fast_translator/emit-alu.inc.c',
   'src/emitter/fast_translator/emit-atomic-div.inc.c',
@@ -319,3 +322,6 @@ test('static-helper-call', python,
 test('x87-integer-inline-context', python,
   args: [files('tests/test-x87-integer-inline-context.py')],
 )
+
+test('quicktrans_latu_instptn_switch', python,
+     args: files('tests/test-latu-instptn-switch.py'))

@@ -6,6 +6,85 @@
 
 /* CPU env, exception, and x87 TOP emit helpers. */
 
+/* Query once per ordinary primary TB; sample and TU emission never opt in. */
+static bool ft_atomic_use_no_db(CPUArchState *env, const TranslationBlock *tb)
+{
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    CPUState *cpu;
+
+    if (!env || !tb || close_latx_parallel ||
+        option_aot || in_pre_translate ||
+        (tb->bool_flags & (IS_AOT_TB | IS_TU_TB | IS_TU_JMP))) {
+        return false;
+    }
+    cpu = env_cpu(env);
+    return !((cpu->tcg_cflags | tb_cflags(tb)) & CF_PARALLEL);
+#else
+    (void)env;
+    (void)tb;
+    return false;
+#endif
+}
+
+static uint32_t ft_atomic_opcode(const FastTemplateFields *fields,
+                                  uint32_t opcode)
+{
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (fields->atomic_no_barrier) {
+        switch (opcode) {
+        case FT_LA_OPCODE_AMCAS_DB_B:
+            return FT_LA_OPCODE_AMCAS_B;
+        case FT_LA_OPCODE_AMCAS_DB_H:
+            return FT_LA_OPCODE_AMCAS_H;
+        case FT_LA_OPCODE_AMCAS_DB_W:
+            return FT_LA_OPCODE_AMCAS_W;
+        case FT_LA_OPCODE_AMCAS_DB_D:
+            return FT_LA_OPCODE_AMCAS_D;
+        case FT_LA_OPCODE_AMSWAP_DB_B:
+            return FT_LA_OPCODE_AMSWAP_B;
+        case FT_LA_OPCODE_AMSWAP_DB_H:
+            return FT_LA_OPCODE_AMSWAP_H;
+        case FT_LA_OPCODE_AMSWAP_DB_W:
+            return FT_LA_OPCODE_AMSWAP_W;
+        case FT_LA_OPCODE_AMSWAP_DB_D:
+            return FT_LA_OPCODE_AMSWAP_D;
+        case FT_LA_OPCODE_AMADD_DB_B:
+            return FT_LA_OPCODE_AMADD_B;
+        case FT_LA_OPCODE_AMADD_DB_H:
+            return FT_LA_OPCODE_AMADD_H;
+        case FT_LA_OPCODE_AMADD_DB_W:
+            return FT_LA_OPCODE_AMADD_W;
+        case FT_LA_OPCODE_AMADD_DB_D:
+            return FT_LA_OPCODE_AMADD_D;
+        case FT_LA_OPCODE_AMAND_DB_W:
+            return FT_LA_OPCODE_AMAND_W;
+        case FT_LA_OPCODE_AMAND_DB_D:
+            return FT_LA_OPCODE_AMAND_D;
+        case FT_LA_OPCODE_AMOR_DB_W:
+            return FT_LA_OPCODE_AMOR_W;
+        case FT_LA_OPCODE_AMOR_DB_D:
+            return FT_LA_OPCODE_AMOR_D;
+        case FT_LA_OPCODE_AMXOR_DB_W:
+            return FT_LA_OPCODE_AMXOR_W;
+        case FT_LA_OPCODE_AMXOR_DB_D:
+            return FT_LA_OPCODE_AMXOR_D;
+        default:
+            break;
+        }
+    }
+#else
+    (void)fields;
+#endif
+    return opcode;
+}
+
+/* Match the generated AM emitter operand order: destination, value, address. */
+static void ft_emit_atomic_op(uint32_t **out, const FastTemplateFields *fields,
+                              uint32_t opcode, int rd, int rk, int rj)
+{
+    ft_emit_raw(out, ft_gpr3(ft_atomic_opcode(fields, opcode), rd, rj, rk));
+}
+
 static bool ft_offset_fits_imm12(int offset)
 {
     return offset >= -2048 && offset <= 2047;
@@ -276,10 +355,10 @@ static int ft_emit_raise_syscall(uint32_t **out, TranslationBlock *tb,
     ft_emit_save_gprs_to_env(out);
 #ifdef QUICKTRANS_LATU
     /* The linux-user loop restores these from env after the syscall. */
+    ft_emit_save_fprs_to_env(out);
     FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 0);
     ft_emit_store_env(out, la_t0, lsenv_offset_of_fcsr(lsenv),
                       FT_LA_OPCODE_ST_W);
-    ft_emit_save_fprs_to_env(out);
     ft_emit_save_xmms_to_env(out);
 #endif
     ft_emit_save_condition_flags(out);

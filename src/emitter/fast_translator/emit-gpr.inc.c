@@ -4,9 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* MOV r32 always clears the high half, including an aliased destination. */
-static void ft_emit_mov_imm32(uint32_t **out, int dst, uint32_t value)
+/* Keep architectural zero extension unless ordinary-TB analysis has proved
+ * that this high half is overwritten before any observer. */
+static void ft_emit_mov_imm32(uint32_t **out, int dst, uint32_t value,
+                             bool omit_zext32)
 {
+#if !defined(QUICKTRANS_LATU) || defined(CONFIG_SOFTMMU)
+    omit_zext32 = false;
+#endif
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     if (value <= 0xfff) {
         FT_LA_ORI_EMIT(out, dst, la_zero, value);
@@ -16,10 +21,11 @@ static void ft_emit_mov_imm32(uint32_t **out, int dst, uint32_t value)
     if (value & 0xfff) {
         FT_LA_ORI_EMIT(out, dst, dst, value & 0xfff);
     }
-    if (value & 0x80000000u) {
+    if ((value & 0x80000000u) && !omit_zext32) {
         FT_LA_BSTRPICK_D_EMIT(out, dst, dst, 31, 0);
     }
 #else
+    (void)omit_zext32;
     ft_emit_li32_two(out, dst, value);
     FT_LA_BSTRPICK_D_EMIT(out, dst, dst, 31, 0);
 #endif
@@ -68,7 +74,8 @@ static int ft_emit_mov_reg_imm_template(const FastTemplateFields *fields, Transl
         if (fields->reg < 0 || fields->reg >= GPR_NUM) {
             return 0;
         }
-        ft_emit_mov_imm32(&out, ft_gpr(fields->reg), (uint32_t)fields->imm);
+        ft_emit_mov_imm32(&out, ft_gpr(fields->reg), (uint32_t)fields->imm,
+                          ft_omit_gpr_zext32(fields));
         break;
     case FT_MOV_R64_IMM64:
         if (!ft_rex_w(fields) || fields->reg < 0 ||
@@ -1066,6 +1073,14 @@ static int ft_emit_sign_extend_acc_template(const FastTemplateFields *fields, Tr
         FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(rax_index), la_t0, 15, 0);
         break;
     case FT_CWDE:
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (ft_omit_gpr_zext32(fields)) {
+            /* Low 32 bits are the complete CWDE result; EXT does not set
+             * guest flags. Avoid the temporary-to-RAX copy when highs die. */
+            FT_LA_EXT_W_H_EMIT(&out, ft_gpr(rax_index), ft_gpr(rax_index));
+            break;
+        }
+#endif
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         FT_LA_EXT_W_H_EMIT(&out, la_t0, ft_gpr(rax_index));
 #else
@@ -1143,6 +1158,17 @@ static int ft_emit_xchg_template(const FastTemplateFields *fields, TranslationBl
             if (dst >= GPR_NUM) {
                 return 0;
             }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            if (!is64 && !is16 && dst == src &&
+                fields->prefix0 != dt_X86_PREFIX_LOCK &&
+                fields->segment < 0 && (tb->flags & HF_CS64_MASK)) {
+                /* ModRM self-XCHG still writes r32, unlike opcode 90 NOP.
+                 * Keep its required zero extension, but no exchange copy.
+                 */
+                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+                break;
+            }
+#endif
             FT_LA_OR_EMIT(&out, la_t1, ft_gpr(dst), la_zero);
             if (is16) {
                 FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), ft_gpr(src), 15, 0);
@@ -1172,14 +1198,17 @@ static int ft_emit_xchg_template(const FastTemplateFields *fields, TranslationBl
             }
             ft_preserve_cmpxchg_addr(&out, &addr);
             if (is64) {
-                FT_LA_AMSWAP_DB_D_EMIT(&out, la_t1, ft_gpr(src), addr);
+                ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_D,
+                                   la_t1, ft_gpr(src), addr);
                 FT_LA_OR_EMIT(&out, ft_gpr(src), la_t1, la_zero);
             } else if (is16) {
                 FT_LA_BSTRPICK_D_EMIT(&out, la_t2, ft_gpr(src), 15, 0);
-                FT_LA_AMSWAP_DB_H_EMIT(&out, la_t1, la_t2, addr);
+                ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_H,
+                                   la_t1, la_t2, addr);
                 FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(src), la_t1, 15, 0);
             } else {
-                FT_LA_AMSWAP_DB_W_EMIT(&out, la_t1, ft_gpr(src), addr);
+                ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_W,
+                                   la_t1, ft_gpr(src), addr);
                 FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(src), la_t1, 31, 0);
             }
         }
@@ -1242,7 +1271,8 @@ static int ft_emit_xchg_template(const FastTemplateFields *fields, TranslationBl
             return 0;
         }
         ft_preserve_cmpxchg_addr(&out, &addr);
-        FT_LA_AMSWAP_DB_B_EMIT(&out, la_t1, src_val, addr);
+        ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_B,
+                           la_t1, src_val, addr);
         if (ft_modrm_reg_is_high8(fields)) {
             FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(src_reg), la_t1, 15, 8);
         } else {
@@ -1331,8 +1361,10 @@ static int ft_emit_not_template(const FastTemplateFields *fields, TranslationBlo
         if (width == 32 || width == 64) {
             FT_LA_ADDI_D_EMIT(&out, la_t2, la_zero, -1);
             ft_emit_raw(&out,
-                        ft_gpr3(width == 64 ? FT_LA_OPCODE_AMXOR_DB_D :
-                                              FT_LA_OPCODE_AMXOR_DB_W,
+                        ft_gpr3(ft_atomic_opcode(fields,
+                                                 width == 64 ?
+                                                 FT_LA_OPCODE_AMXOR_DB_D :
+                                                 FT_LA_OPCODE_AMXOR_DB_W),
                                 addr == la_t0 ? la_t1 : la_t0,
                                 addr, la_t2));
             return out - code;
@@ -1348,8 +1380,10 @@ static int ft_emit_not_template(const FastTemplateFields *fields, TranslationBlo
         FT_LA_NOR_EMIT(&out, la_t2, old, la_zero);
         FT_LA_OR_EMIT(&out, la_t1, old, la_zero);
         ft_emit_raw(&out,
-                    ft_gpr3(width == 8 ? FT_LA_OPCODE_AMCAS_DB_B :
-                                         FT_LA_OPCODE_AMCAS_DB_H,
+                    ft_gpr3(ft_atomic_opcode(fields,
+                                             width == 8 ?
+                                             FT_LA_OPCODE_AMCAS_DB_B :
+                                             FT_LA_OPCODE_AMCAS_DB_H),
                             la_t1, addr, la_t2));
         ft_emit_zero_extend_atomic_old(&out, la_t1, width);
         ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ,
@@ -1390,7 +1424,9 @@ static int ft_emit_not_template(const FastTemplateFields *fields, TranslationBlo
                 return 0;
             }
             FT_LA_NOR_EMIT(&out, ft_gpr(dst), ft_gpr(dst), la_zero);
-            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+            if (!ft_omit_gpr_zext32(fields)) {
+                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+            }
             break;
         }
 #endif
@@ -1428,11 +1464,80 @@ static int ft_emit_not_template(const FastTemplateFields *fields, TranslationBlo
     return (out - code);
 }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* A non-LOCK unary memory operation must not commit flags before its store.
+ * Keep the original value and effective address until the store succeeds. */
+static bool ft_emit_unary_memory(uint32_t **out,
+                                 const FastTemplateFields *fields,
+                                 target_ulong pc, int width,
+                                 bool is_neg, bool is_inc)
+{
+    int addr;
+    uint32_t flag_op;
+
+    if (!ft_emit_rmw_addr(out, fields, pc, &addr, la_t4)) {
+        return false;
+    }
+    ft_preserve_cmpxchg_addr(out, &addr);
+    switch (width) {
+    case 8: FT_LA_LD_BU_EMIT(out, la_t3, addr, 0); break;
+    case 16: FT_LA_LD_HU_EMIT(out, la_t3, addr, 0); break;
+    case 32: FT_LA_LD_WU_EMIT(out, la_t3, addr, 0); break;
+    case 64: FT_LA_LD_D_EMIT(out, la_t3, addr, 0); break;
+    default: return false;
+    }
+    if (is_neg) {
+        ft_emit_raw(out, ft_gpr3(width == 64 ? FT_LA_OPCODE_SUB_D :
+                                             FT_LA_OPCODE_SUB_W,
+                               la_t2, la_zero, la_t3));
+        flag_op = width == 64 ? FT_LA_OPCODE_X86SUB_D :
+                  width == 32 ? FT_LA_OPCODE_X86SUB_W :
+                  width == 16 ? FT_LA_OPCODE_X86SUB_H : FT_LA_OPCODE_X86SUB_B;
+    } else {
+        ft_emit_raw(out, ft_gpr3_imm12(width == 64 ? FT_LA_OPCODE_ADDI_D :
+                                                   FT_LA_OPCODE_ADDI_W,
+                                     la_t2, la_t3, is_inc ? 1 : -1));
+        flag_op = is_inc ?
+                  (width == 64 ? FT_LA_OPCODE_X86INC_D :
+                   width == 32 ? FT_LA_OPCODE_X86INC_W :
+                   width == 16 ? FT_LA_OPCODE_X86INC_H : FT_LA_OPCODE_X86INC_B) :
+                  (width == 64 ? FT_LA_OPCODE_X86DEC_D :
+                   width == 32 ? FT_LA_OPCODE_X86DEC_W :
+                   width == 16 ? FT_LA_OPCODE_X86DEC_H : FT_LA_OPCODE_X86DEC_B);
+    }
+    switch (width) {
+    case 8: FT_LA_ST_B_EMIT(out, la_t2, addr, 0); break;
+    case 16: FT_LA_ST_H_EMIT(out, la_t2, addr, 0); break;
+    case 32: FT_LA_ST_W_EMIT(out, la_t2, addr, 0); break;
+    case 64: FT_LA_ST_D_EMIT(out, la_t2, addr, 0); break;
+    }
+    if (!fields->skip_flags) {
+        ft_emit_raw(out, ft_gpr2(flag_op, is_neg ? la_zero : la_t3,
+                               is_neg ? la_t3 : la_zero));
+    }
+    return true;
+}
+#endif
+
 static int ft_emit_neg_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
     int src;
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (fields->modrm_mod != 3 && fields->prefix0 != dt_X86_PREFIX_LOCK) {
+        int width = fields->kind == FT_NEG_RM64 ? 64 :
+                    fields->kind == FT_NEG_RM32 ? 32 :
+                    fields->kind == FT_NEG_RM16 ? 16 :
+                    fields->kind == FT_NEG_RM8 ? 8 : 0;
+        if (!width || fields->modrm_reg != 3 ||
+            ft_rex_w(fields) != (width == 64) ||
+            !ft_emit_unary_memory(&out, fields, pc, width, true, false)) {
+            return 0;
+        }
+        return out - code;
+    }
+#endif
     if (fields->prefix0 == dt_X86_PREFIX_LOCK) {
         FastBranchLabel retry = { 0 };
         FastBranchLabel done = { 0 };
@@ -1475,7 +1580,8 @@ static int ft_emit_neg_template(const FastTemplateFields *fields, TranslationBlo
                                           FT_LA_OPCODE_SUB_W,
                             la_t2, la_zero, old));
         FT_LA_OR_EMIT(&out, la_t1, old, la_zero);
-        ft_emit_raw(&out, ft_gpr3(cas_op, la_t1, addr, la_t2));
+        ft_emit_raw(&out, ft_gpr3(ft_atomic_opcode(fields, cas_op),
+                                la_t1, addr, la_t2));
         ft_emit_zero_extend_atomic_old(&out, la_t1, width);
         ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ,
                                    la_t1, old, &done);
@@ -1528,7 +1634,9 @@ static int ft_emit_neg_template(const FastTemplateFields *fields, TranslationBlo
              * the LOCK path above. Read the source before writing dst. */
             FT_FLAG2(FT_LA_OPCODE_X86SUB_W, la_zero, src);
             FT_LA_SUB_W_EMIT(&out, ft_gpr(dst), la_zero, src);
-            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+            if (!ft_omit_gpr_zext32(fields)) {
+                FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+            }
             break;
         }
 #endif
@@ -1609,7 +1717,8 @@ static int ft_emit_inc_dec_template(const FastTemplateFields *fields, Translatio
             }
             ft_preserve_cmpxchg_addr(&out, &addr);
             FT_LA_ADDI_D_EMIT(&out, la_t2, la_zero, is_inc ? 1 : -1);
-            ft_emit_raw(&out, ft_gpr3(atomic_op, la_t1, addr, la_t2));
+            ft_emit_raw(&out, ft_gpr3(ft_atomic_opcode(fields, atomic_op),
+                                    la_t1, addr, la_t2));
             if (!fields->skip_flags) {
                 ft_emit_raw(&out,
                             ft_gpr2(is_inc ?
@@ -1623,6 +1732,16 @@ static int ft_emit_inc_dec_template(const FastTemplateFields *fields, Translatio
             }
             break;
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->modrm_mod != 3) {
+            if (!ft_emit_unary_memory(&out, fields, pc,
+                                      is_64 ? 64 : is_16 ? 16 : 32,
+                                      false, is_inc)) {
+                return 0;
+            }
+            break;
+        }
+#endif
         if (!(is_64 ? ft_emit_load_rm64(&out, fields, pc, &dst) :
               is_16 ? ft_emit_load_rm16(&out, fields, pc, &dst) :
                       ft_emit_load_rm32(&out, fields, pc, &dst))) {
@@ -1643,7 +1762,7 @@ static int ft_emit_inc_dec_template(const FastTemplateFields *fields, Translatio
                         ft_gpr3_imm12(is_64 ? FT_LA_OPCODE_ADDI_D :
                                               FT_LA_OPCODE_ADDI_W,
                                       dst, dst, is_inc ? 1 : -1));
-            if (!is_64) {
+            if (!is_64 && !ft_omit_gpr_zext32(fields)) {
                 FT_LA_BSTRPICK_D_EMIT(&out, dst, dst, 31, 0);
             }
             break;
@@ -1690,7 +1809,8 @@ static int ft_emit_inc_dec_template(const FastTemplateFields *fields, Translatio
             }
             ft_preserve_cmpxchg_addr(&out, &addr);
             FT_LA_ADDI_D_EMIT(&out, la_t2, la_zero, is_inc ? 1 : -1);
-            FT_LA_AMADD_DB_B_EMIT(&out, la_t1, la_t2, addr);
+            ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMADD_DB_B,
+                               la_t1, la_t2, addr);
             if (!fields->skip_flags) {
                 ft_emit_raw(&out,
                             ft_gpr2(is_inc ? FT_LA_OPCODE_X86INC_B :
@@ -1699,6 +1819,14 @@ static int ft_emit_inc_dec_template(const FastTemplateFields *fields, Translatio
             }
             break;
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->modrm_mod != 3) {
+            if (!ft_emit_unary_memory(&out, fields, pc, 8, false, is_inc)) {
+                return 0;
+            }
+            break;
+        }
+#endif
         if (!ft_emit_load_rm8(&out, fields, pc, &dst)) {
             return 0;
         }

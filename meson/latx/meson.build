@@ -43,6 +43,9 @@ quicktrans_latx_library_sources = files(
 
 quicktrans_latx_fast_translator_check_sources = files(
   '../../src/emitter/fast_translator/fast-translator.c',
+  '../../src/emitter/fast_translator/primary-translate-body.inc.c',
+  '../../src/emitter/fast_translator/analysis-candidates-body.inc.c',
+  '../../src/emitter/fast_translator/encode-search-body.inc.c',
   '../../src/emitter/fast_translator/constraints.inc.c',
   '../../src/emitter/fast_translator/emit-alu.inc.c',
   '../../src/emitter/fast_translator/emit-atomic-div.inc.c',

@@ -76,7 +76,8 @@ static bool ft_inst_pattern_key(const FastTemplateFields *fields,
            ((uint64_t)fields->alu_width << 7) |
            ((uint64_t)(uint8_t)fields->modrm << 14) |
            ((uint64_t)(uint8_t)fields->rex << 22) |
-           ((uint64_t)fields->skip_flags << 30);
+           ((uint64_t)fields->skip_flags << 30) |
+           ((uint64_t)fields->omit_zext32 << 31);
     *key = meta | ((uint64_t)(uint32_t)fields->imm << 32);
     *extra_key = (uint64_t)(uint8_t)fields->direct_cmp_lhs_gpr |
         ((uint64_t)(uint8_t)fields->direct_cmp_rhs_gpr << 8) |

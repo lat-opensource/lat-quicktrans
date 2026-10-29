@@ -47,6 +47,12 @@ typedef struct LatxFastTranslatorBenchStats {
     uint64_t code_nr;
 } LatxFastTranslatorBenchStats;
 
+/* Startup only: changing this after translating TBs is unsupported. */
+#if defined(QUICKTRANS_LATU) || \
+    (defined(CONFIG_LATX_FAST_TRANSLATOR) && defined(TARGET_X86_64))
+void latx_fast_set_rsp_merge(bool enabled);
+#endif
+
 bool latx_fast_decode_translate_tb_primary(CPUArchState *env,
                                            TranslationBlock *tb,
                                            int max_insns,

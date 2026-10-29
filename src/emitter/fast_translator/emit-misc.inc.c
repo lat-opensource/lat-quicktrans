@@ -16,6 +16,21 @@ static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
     case FT_ENDBR64:
     case FT_PAUSE:
         return true;
+#ifndef CONFIG_SOFTMMU
+    case FT_SHIFT_RM_IMM8:
+        /* A zero-count r32 rotate preserves flags but still clears highs.
+         * Only the ordinary-TB demand proof may remove that last effect.
+         * Decoder/sample/TU defaults leave omit_zext32 false.
+         */
+        return fields->opcode0 == 0xc1 && fields->modrm_mod == 3 &&
+               fields->modrm_reg <= 1 &&
+               fields->id == (fields->modrm_reg == 0 ?
+                              dt_X86_INS_ROL : dt_X86_INS_ROR) &&
+               !ft_rex_w(fields) && fields->prefix2 == 0 &&
+               fields->prefix0 != dt_X86_PREFIX_LOCK && fields->segment < 0 &&
+               ft_modrm_rm_index(fields) < GPR_NUM &&
+               (fields->imm & 31) == 0 && ft_omit_gpr_zext32(fields);
+#endif
     case FT_PREFETCHNTA:
     case FT_PREFETCHT1:
     case FT_PREFETCHT2:
@@ -24,6 +39,14 @@ static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
                fields->prefix2 == 0 &&
                fields->modrm_reg == (fields->kind == FT_PREFETCHNTA ? 0 :
                                       fields->kind == FT_PREFETCHT1 ? 2 : 3);
+    case FT_PSRLDQ_XMM_IMM8:
+    case FT_PSLLDQ_XMM_IMM8:
+        return fields->modrm_mod == 3 && fields->prefix0 == 0 &&
+               fields->prefix2 == dt_X86_PREFIX_OPSIZE &&
+               fields->modrm_reg ==
+                   (fields->kind == FT_PSRLDQ_XMM_IMM8 ? 3 : 7) &&
+               ft_modrm_rm_index(fields) < XMM_NUM &&
+               (fields->imm & 0xff) == 0;
     case FT_NOP_MULTI:
         return fields->id == dt_X86_INS_FNOP && !option_soft_fpu;
     case FT_MOV128_XMM_XMMM:
@@ -33,6 +56,30 @@ static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
         return fields->modrm_mod == 3 &&
                ft_modrm_reg_index(fields) < XMM_NUM &&
                ft_modrm_reg_index(fields) == ft_modrm_rm_index(fields);
+#ifndef CONFIG_SOFTMMU
+    case FT_SIMD_BIN_XMM_XMMM:
+    case FT_SIMD_SCALAR_BIN_XMM_XMMM:
+        /* These emitters already skip same-register MIN/MAX when the LATS
+         * explicit exception checks are disabled (as in this LATU build).
+         * This does not imply hardware traps are disabled; preserve the
+         * existing NaN/exception policy without introducing FP operations.
+         */
+        if (fields->opcode0 != 0x0f ||
+            (fields->opcode1 != 0x5d && fields->opcode1 != 0x5f) ||
+            fields->modrm_mod != 3 ||
+            ft_modrm_reg_index(fields) >= XMM_NUM ||
+            ft_modrm_reg_index(fields) != ft_modrm_rm_index(fields)) {
+            return false;
+        }
+        if (fields->kind == FT_SIMD_BIN_XMM_XMMM) {
+            return fields->prefix0 == 0 &&
+                   (fields->prefix2 == 0 ||
+                    fields->prefix2 == dt_X86_PREFIX_OPSIZE);
+        }
+        return fields->prefix2 == 0 &&
+               (fields->prefix0 == dt_X86_PREFIX_REP ||
+                fields->prefix0 == dt_X86_PREFIX_REPNE);
+#endif
     case FT_BLEND_XMM_XMMM_IMM8:
         if (fields->modrm_mod != 3 ||
             fields->prefix2 != dt_X86_PREFIX_OPSIZE ||

@@ -798,7 +798,7 @@ static bool ft_emit_locked_btx(uint32_t **out,
         FT_LA_XOR_EMIT(out, la_t2, la_t3, la_t2);
     }
     FT_LA_OR_EMIT(out, la_t1, la_t3, la_zero);
-    FT_LA_AMCAS_DB_D_EMIT(out, la_t1, la_t2, addr);
+    ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_D, la_t1, la_t2, addr);
     ft_emit_branch_placeholder(out, &done_fixup, FT_BRANCH_BEQ,
                                la_t1, la_t3, &done);
     FT_LA_OR_EMIT(out, la_t3, la_t1, la_zero);

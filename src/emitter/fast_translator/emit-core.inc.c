@@ -160,6 +160,16 @@ static inline int ft_gpr(int x86_index)
     return reg_gpr_map[x86_index];
 }
 
+static inline bool ft_omit_gpr_zext32(const FastTemplateFields *fields)
+{
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return fields->omit_zext32;
+#else
+    (void)fields;
+    return false;
+#endif
+}
+
 static inline int ft_xmm(int x86_index)
 {
     return reg_xmm_map[x86_index];

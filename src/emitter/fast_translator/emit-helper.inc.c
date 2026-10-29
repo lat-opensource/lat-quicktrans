@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+static void ft_emit_cpuid_helper_epilogue(uint32_t **out);
+
 #ifdef QUICKTRANS_LATU
 /* Same segment cache and CS mode policy as legacy store_ireg_to_ir1_seg.
  * t2 holds the zero-extended selector; preserve r21 (return target).
@@ -1406,7 +1408,7 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
         ft_emit_helper_prologue(&out);
         ft_emit_cpu_env_ptr(&out, la_a0);
         ft_emit_host_call(&out, (void *)helper_cpuid, 1u << 0);
-        ft_emit_helper_epilogue(&out);
+        ft_emit_cpuid_helper_epilogue(&out);
         break;
     case FT_HELPER_PCMPISTRI:
         if (!ft_emit_call_pcmpistri_helper(&out, fields, pc)) {
@@ -1956,6 +1958,21 @@ static void ft_emit_save_fprs_to_env(uint32_t **out)
         ft_emit_store_env(out, ft_mmx(i), lsenv_offset_of_mmx(lsenv, i),
                           FT_LA_OPCODE_FST_D);
     }
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI)
+    if (!option_soft_fpu) {
+        FT_LA_ORI_EMIT(out, la_t0, la_zero, 1);
+        ft_emit_store_env(out, la_t0,
+                          offsetof(CPUX86State, qt_hard_signal_protocol_enabled),
+                          FT_LA_OPCODE_ST_B);
+        ft_emit_load_env(out, la_t0, offsetof(CPUX86State, mode_fpu),
+                         FT_LA_OPCODE_LD_BU);
+        FT_LA_XORI_EMIT(out, la_t0, la_t0, 1);
+        FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 1);
+        ft_emit_store_env(out, la_t0,
+                          offsetof(CPUX86State, qt_x87_env_format),
+                          FT_LA_OPCODE_ST_B);
+    }
+#endif
 }
 
 static void ft_emit_load_fprs_from_env(uint32_t **out)
@@ -2102,10 +2119,28 @@ static void ft_emit_helper_prologue(uint32_t **out)
     ft_emit_save_fprs_to_env(out);
     ft_emit_save_xmms_to_env(out);
     ft_emit_save_condition_flags(out);
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI)
+    if (!option_soft_fpu) {
+        /* Save FCSR after physical-slot save has cleared TOP mode. */
+        FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 0);
+        ft_emit_store_env(out, la_t0, lsenv_offset_of_fcsr(lsenv),
+                          FT_LA_OPCODE_ST_W);
+        FT_LA_ORI_EMIT(out, la_t0, la_zero, 1);
+        ft_emit_store_env(out, la_t0, offsetof(CPUX86State, qt_helper_env_saved),
+                          FT_LA_OPCODE_ST_B);
+    }
+#endif
 }
 
 static void ft_emit_helper_epilogue_gprs(uint32_t **out, int first_gpr)
 {
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI)
+    if (!option_soft_fpu) {
+        ft_emit_store_env(out, la_zero,
+                          offsetof(CPUX86State, qt_helper_env_saved),
+                          FT_LA_OPCODE_ST_B);
+    }
+#endif
     ft_emit_restore_condition_flags(out);
     ft_emit_load_xmms_from_env(out);
     ft_emit_load_fprs_from_env(out);
@@ -2118,6 +2153,26 @@ static void ft_emit_helper_epilogue_gprs(uint32_t **out, int first_gpr)
 static void ft_emit_helper_epilogue(uint32_t **out)
 {
     ft_emit_helper_epilogue_gprs(out, 0);
+}
+
+/* CPUID changes only its four architectural result registers. Keep every
+ * pre-call env snapshot, and retain the other ABI-preserved GPR mappings. */
+static void ft_emit_cpuid_helper_epilogue(uint32_t **out)
+{
+    int first_gpr = 0;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    while (first_gpr < 8 && ft_gpr(first_gpr) == la_s0 + first_gpr) {
+        ++first_gpr;
+    }
+#endif
+    ft_emit_helper_epilogue_gprs(out, first_gpr);
+    for (int i = 0; i < first_gpr; ++i) {
+        if (i == rax_index || i == rbx_index ||
+            i == rcx_index || i == rdx_index) {
+            ft_emit_load_env(out, ft_gpr(i), lsenv_offset_of_gpr(lsenv, i),
+                             FT_LA_OPCODE_LD_D);
+        }
+    }
 }
 
 /* x87 helpers do not change guest GPRs. Keep the pre-call fault snapshot,

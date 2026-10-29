@@ -105,6 +105,71 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
 {
     uint32_t *out = code;
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* Keep architectural frame registers intact until every access succeeds.
+     * A signal restarts the whole x86 instruction, not an internal push. */
+    if (fields->kind == FT_ENTER || fields->kind == FT_ENTER16 ||
+        fields->kind == FT_ENTER_ZERO_LEVEL1) {
+        bool word = fields->kind == FT_ENTER16;
+        int step = word ? 2 : 8;
+        unsigned level = ((unsigned)fields->imm >> 16) & 31;
+        int total = step * (level ? level + 1 : 1) + (fields->imm & 0xffff);
+        int sp = ft_gpr(rsp_index), bp = ft_gpr(rbp_index);
+        if (word) {
+            FT_LA_ST_H_EMIT(&out, bp, sp, -step);
+        } else {
+            FT_LA_ST_D_EMIT(&out, bp, sp, -step);
+        }
+        FT_LA_ADDI_D_EMIT(&out, (!word && !level) ? bp : la_t1, sp, -step);
+        for (unsigned i = 1; i < level; ++i) {
+            if (word) {
+                FT_LA_LD_HU_EMIT(&out, la_t3, bp, -(int)(step * i));
+                FT_LA_ST_H_EMIT(&out, la_t3, sp, -(int)(step * (i + 1)));
+            } else {
+                FT_LA_LD_D_EMIT(&out, la_t3, bp, -(int)(step * i));
+                FT_LA_ST_D_EMIT(&out, la_t3, sp, -(int)(step * (i + 1)));
+            }
+        }
+        if (level) {
+            if (word) {
+                FT_LA_ST_H_EMIT(&out, la_t1, sp, -(int)(step * (level + 1)));
+            } else {
+                FT_LA_ST_D_EMIT(&out, la_t1, sp, -(int)(step * (level + 1)));
+            }
+        }
+        if (word) {
+            FT_LA_BSTRINS_D_EMIT(&out, bp, la_t1, 15, 0);
+        } else if (level) {
+            FT_LA_OR_EMIT(&out, bp, la_t1, la_zero);
+        }
+        if (ft_fits_simm12(-total)) {
+            FT_LA_ADDI_D_EMIT(&out, sp, sp, -total);
+        } else {
+            if (!ft_emit_li32(&out, la_t0, total)) {
+                return 0;
+            }
+            FT_LA_SUB_D_EMIT(&out, sp, sp, la_t0);
+        }
+        return out - code;
+    }
+    if (fields->kind == FT_LEAVE && fields->alu_width != 32) {
+        int sp = ft_gpr(rsp_index), bp = ft_gpr(rbp_index);
+        bool word = fields->prefix2 == dt_X86_PREFIX_OPSIZE;
+        if (word) {
+            FT_LA_LD_HU_EMIT(&out, la_t0, bp, 0);
+        } else {
+            FT_LA_LD_D_EMIT(&out, la_t0, bp, 0);
+        }
+        FT_LA_ADDI_D_EMIT(&out, sp, bp, word ? 2 : 8);
+        if (word) {
+            FT_LA_BSTRINS_D_EMIT(&out, bp, la_t0, 15, 0);
+        } else {
+            FT_LA_OR_EMIT(&out, bp, la_t0, la_zero);
+        }
+        return out - code;
+    }
+#endif
+
     switch (fields->kind) {
     case FT_PUSHA:
     case FT_POPA:
@@ -166,6 +231,14 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
     case FT_PUSH_IMM32:
     case FT_PUSH_IMM8:
         ft_emit_li64(&out, la_t0, (uint64_t)(int64_t)fields->imm);
+#ifdef QUICKTRANS_LATU
+        if (fields->alu_width == 16) {
+            /* 66 6a ib sign-extends the immediate to a 16-bit stack value. */
+            FT_LA_ST_H_EMIT(&out, la_t0, ft_gpr(rsp_index), -2);
+            FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index),
+                              ft_gpr(rsp_index), -2);
+        } else
+#endif
         if (fields->alu_width == 32) {
             FT_LA_ST_W_EMIT(&out, la_t0, ft_gpr(rsp_index), -4);
             FT_LA_ADDI_D_EMIT(&out, ft_gpr(rsp_index),

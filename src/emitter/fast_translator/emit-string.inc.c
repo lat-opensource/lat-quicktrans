@@ -83,11 +83,12 @@ static bool ft_string_is_scas(int id)
            id == dt_X86_INS_SCASD || id == dt_X86_INS_SCASQ;
 }
 
-static bool ft_emit_string_addr(uint32_t **out, int dst, int base, int seg,
-                                bool addr32)
+static bool ft_emit_string_addr_scratch(uint32_t **out, int dst, int base,
+                                        int seg, bool addr32, int scratch)
 {
 #ifndef QUICKTRANS_LATU
     (void)addr32;
+    (void)scratch;
 #endif
     if (seg >= 0) {
         int seg_base_offset = offsetof(CPUX86State, segs[seg].base);
@@ -98,8 +99,8 @@ static bool ft_emit_string_addr(uint32_t **out, int dst, int base, int seg,
         ft_emit_load_env(out, dst, seg_base_offset, FT_LA_OPCODE_LD_D);
 #ifdef QUICKTRANS_LATU
         if (addr32) {
-            FT_LA_BSTRPICK_D_EMIT(out, la_t2, base, 31, 0);
-            FT_LA_ADD_D_EMIT(out, dst, dst, la_t2);
+            FT_LA_BSTRPICK_D_EMIT(out, scratch, base, 31, 0);
+            FT_LA_ADD_D_EMIT(out, dst, dst, scratch);
             return true;
         }
 #endif
@@ -115,6 +116,12 @@ static bool ft_emit_string_addr(uint32_t **out, int dst, int base, int seg,
 #endif
     FT_LA_OR_EMIT(out, dst, base, la_zero);
     return true;
+}
+
+static bool ft_emit_string_addr(uint32_t **out, int dst, int base, int seg,
+                                bool addr32)
+{
+    return ft_emit_string_addr_scratch(out, dst, base, seg, addr32, la_t2);
 }
 
 static void ft_emit_string_load_bytes(uint32_t **out, int dst, int addr,
@@ -261,6 +268,13 @@ static bool ft_emit_string_body(uint32_t **out,
                                 int bytes, TranslationBlock *tb)
 {
     int id = fields->id;
+#ifdef QUICKTRANS_LATU
+    /* Address formation precedes the destination load into t1.  Keep t2
+     * available for the direction step throughout ordinary string bodies. */
+    const int addr_scratch = la_t1;
+#else
+    const int addr_scratch = la_t2;
+#endif
 
     (void)tb;
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
@@ -297,15 +311,17 @@ static bool ft_emit_string_body(uint32_t **out,
         if (flat64 && fields->segment != fs_index &&
             fields->segment != gs_index) {
             src = ft_gpr(rsi_index);
-        } else if (!ft_emit_string_addr(out, src, ft_gpr(rsi_index),
-                                       fields->segment, fields->addr32)) {
+        } else if (!ft_emit_string_addr_scratch(out, src, ft_gpr(rsi_index),
+                                               fields->segment, fields->addr32,
+                                               addr_scratch)) {
             return false;
         }
         FT_LA_LD_D_EMIT(out, la_t0, src, 0);
         if (flat64) {
             dst = ft_gpr(rdi_index);
-        } else if (!ft_emit_string_addr(out, dst, ft_gpr(rdi_index),
-                                       es_index, fields->addr32)) {
+        } else if (!ft_emit_string_addr_scratch(out, dst, ft_gpr(rdi_index),
+                                               es_index, fields->addr32,
+                                               addr_scratch)) {
             return false;
         }
         FT_LA_ST_D_EMIT(out, la_t0, dst, 0);
@@ -332,8 +348,9 @@ static bool ft_emit_string_body(uint32_t **out,
     if (ft_string_is_movs(id) || ft_string_is_cmps(id) ||
         ft_string_is_lods(id)) {
         if (src_addr == la_t3 &&
-            !ft_emit_string_addr(out, src_addr, ft_gpr(rsi_index),
-                                 fields->segment, fields->addr32)) {
+            !ft_emit_string_addr_scratch(out, src_addr, ft_gpr(rsi_index),
+                                         fields->segment, fields->addr32,
+                                         addr_scratch)) {
             return false;
         }
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
@@ -349,8 +366,9 @@ static bool ft_emit_string_body(uint32_t **out,
     if (ft_string_is_movs(id) || ft_string_is_stos(id) ||
         ft_string_is_cmps(id) || ft_string_is_scas(id)) {
         if (dst_addr == la_t4 &&
-            !ft_emit_string_addr(out, dst_addr, ft_gpr(rdi_index),
-                                 es_index, fields->addr32)) {
+            !ft_emit_string_addr_scratch(out, dst_addr, ft_gpr(rdi_index),
+                                         es_index, fields->addr32,
+                                         addr_scratch)) {
             return false;
         }
     }
@@ -470,9 +488,9 @@ static int ft_emit_string_template(const FastTemplateFields *fields, Translation
     }
 
 #ifdef QUICKTRANS_LATU
-    /* Native-width accesses leave t2 intact in 64-bit address mode.
-     * addr32 segment address formation still uses t2 inside the loop. */
-    hoist_step = rep && tb && (tb->flags & HF_CS64_MASK) && !fields->addr32;
+    /* Native-width accesses and t1 address scratch leave t2 intact,
+     * including long-mode strings with a 32-bit address override. */
+    hoist_step = rep && tb && (tb->flags & HF_CS64_MASK);
     if (hoist_step && !ft_emit_string_step(&out, bytes)) {
         return 0;
     }

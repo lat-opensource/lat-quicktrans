@@ -8,6 +8,67 @@
 
 #include "fpu/softfloat.h"
 
+/* Legacy LATU hard-FPU mode may leave tags stale. This deliberately keeps
+ * its unchecked stack policy, not the checked QT policy or soft-FPU modes.
+ */
+static bool ft_x87_latu_legacy_no_tag(void)
+{
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    return option_soft_fpu == 0 && !option_fputag;
+#else
+    return false;
+#endif
+}
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Keep do_fstenv's existing field widths, constants and write order. Only
+ * the tag policy changes; differences from legacy padding/pointers remain.
+ * The entry points capture the generated-code return address before calling
+ * this serializer, so partial guest-memory faults retain the original PC.
+ */
+static void ft_x87_latu_store_env32(CPUX86State *env, target_ulong ptr,
+                                    unsigned int tag, uintptr_t ra)
+{
+    unsigned int status = (env->fpus & ~0x3800) |
+                          ((env->fpstt & 7) << 11);
+    cpu_stl_data_ra(env, ptr, env->fpuc, ra);
+    cpu_stl_data_ra(env, ptr + 4, status, ra);
+    cpu_stl_data_ra(env, ptr + 8, tag, ra);
+    cpu_stl_data_ra(env, ptr + 12, 0, ra);
+    cpu_stl_data_ra(env, ptr + 16, 0, ra);
+    cpu_stl_data_ra(env, ptr + 20, 0, ra);
+    cpu_stl_data_ra(env, ptr + 24, 0, ra);
+}
+
+static void ft_x87_latu_fstenv32_no_tag(CPUX86State *env, target_ulong ptr)
+{
+    uintptr_t ra = GETPC();
+    unsigned int tag = 0;
+    /* Match tr_fpu_store_tag_to_mem: valid/empty, without classifying values. */
+    for (unsigned int i = 0; i < 8; ++i) {
+        unsigned int byte = env->fptags[i];
+        tag |= ((byte | (byte << 1)) & 3) << (2 * i);
+    }
+    ft_x87_latu_store_env32(env, ptr, tag, ra);
+}
+
+static void ft_x87_latu_fsave32_no_tag(CPUX86State *env, target_ulong ptr)
+{
+    uintptr_t ra = GETPC();
+    /* Legacy tag-off FNSAVE exports all-valid tags, regardless of env tags. */
+    ft_x87_latu_store_env32(env, ptr, 0, ra);
+    ptr += 28;
+    for (unsigned int i = 0; i < 8; ++i) {
+        floatx80 value = env->fpregs[(env->fpstt + i) & 7].d;
+        cpu_stq_data_ra(env, ptr, value.low, ra);
+        cpu_stw_data_ra(env, ptr + 8, value.high, ra);
+        ptr += 10;
+    }
+    /* As in do_fsave, reset only after every guest write succeeds. */
+    helper_fninit(env);
+}
+#endif
+
 static bool ft_x87_check_stack(CPUX86State *env, unsigned int inputs,
                                unsigned int outputs, int push, int pops);
 
@@ -18,7 +79,37 @@ static void ft_convert_fpregs_64_to_x80(CPUX86State *env)
         env->fpregs[i].d = float64_to_floatx80(
             (float64)env->fpregs[i].d.low, &status);
     }
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI)
+    env->qt_x87_env_format = QT_X87_ENV_X80;
+#endif
 }
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* FXSAVE is an observation, not a floating-point state conversion. Keep an
+ * exact snapshot so even unused NaN payloads survive the helper unchanged.
+ * MMX aliases are integer bits and must never pass through float64_to_x80.
+ */
+static void ft_latu_fxsave_prepare(CPUX86State *env, FPReg *saved)
+{
+    memcpy(saved, env->fpregs, sizeof(env->fpregs));
+    if (env->mode_fpu) {
+        ft_convert_fpregs_64_to_x80(env);
+    } else {
+        for (int i = 0; i < 8; ++i) {
+            env->fpregs[i].d.high = 0xffff;
+        }
+    }
+}
+
+static void ft_latu_fxsave_finish(CPUX86State *env, const FPReg *saved)
+{
+    memcpy(env->fpregs, saved, sizeof(env->fpregs));
+#ifdef LATX_QUICKTRANS_X87_SIGNAL_ABI
+    env->qt_x87_env_format = env->mode_fpu ? QT_X87_ENV_HARD64 :
+                                                          QT_X87_ENV_MMX64;
+#endif
+}
+#endif
 
 static void ft_convert_fpregs_x80_to_64(CPUX86State *env)
 {
@@ -28,7 +119,117 @@ static void ft_convert_fpregs_x80_to_64(CPUX86State *env)
             (uint64_t)floatx80_to_float64(env->fpregs[i].d, &status);
         env->fpregs[i].d.high = 0;
     }
+#if defined(QUICKTRANS_LATU) && defined(LATX_QUICKTRANS_X87_SIGNAL_ABI)
+    env->qt_x87_env_format = QT_X87_ENV_HARD64;
+#endif
 }
+
+#if defined(QUICKTRANS_LATU) && defined(CONFIG_LATX_FAST_TRANSLATOR) && \
+    defined(TARGET_X86_64) && !defined(CONFIG_SOFTMMU) && \
+    defined(LATX_QUICKTRANS_BCD_HARD64_ABI)
+/* These helpers keep the real env in hard64 format throughout guest-memory
+ * accesses. On a fault, restore_state_to_opc preserves the prologue snapshot;
+ * the signal boundary handles the explicit env format. Async signals only
+ * queue delivery until the helper returns.
+ * Capture GETPC here, never inside a nested C helper or a temporary CPU env.
+ */
+static void ft_x87_hard_fbld(CPUX86State *env, target_ulong ptr)
+{
+    uintptr_t ra = GETPC();
+    uint64_t val = 0;
+    floatx80 value;
+    float_status status;
+    unsigned int top;
+
+    env->qt_bcd_helper_env_hard64 = true;
+    signal_barrier();
+    /* Match helper_fbld_ST0: load the sign last, push after all loads. */
+    for (int i = 8; i >= 0; --i) {
+        unsigned int v = cpu_ldub_data_ra(env, ptr + i, ra);
+        val = val * 100 + (v >> 4) * 10 + (v & 0xf);
+    }
+    value = int64_to_floatx80(val, &env->fp_status);
+    if (cpu_ldub_data_ra(env, ptr + 9, ra) & 0x80) {
+        value = floatx80_chs(value);
+    }
+    status = env->fp_status;
+    top = (env->fpstt - 1) & 7;
+    env->fpregs[top].d.low = floatx80_to_float64(value, &status);
+    env->fpregs[top].d.high = 0;
+    env->fptags[top] = 0;
+    env->fpstt = top;
+    signal_barrier();
+    env->qt_bcd_helper_env_hard64 = false;
+}
+
+static void ft_x87_hard_bcd_merge_flags(CPUX86State *env, uint8_t old_flags)
+{
+    /* Match fpu_helper.c's merge_exception_flags, including deferred SE/B. */
+    uint8_t flags = get_float_exception_flags(&env->fp_status);
+    float_raise(old_flags, &env->fp_status);
+    env->fpus |= (flags & float_flag_invalid ? 1 << 0 : 0) |
+                 (flags & float_flag_divbyzero ? 1 << 2 : 0) |
+                 (flags & float_flag_overflow ? 1 << 3 : 0) |
+                 (flags & float_flag_underflow ? 1 << 4 : 0) |
+                 (flags & float_flag_inexact ? 1 << 5 : 0) |
+                 (flags & float_flag_input_denormal ? 1 << 1 : 0);
+    if (env->fpus & (~env->fpuc & 0x3f)) {
+        env->fpus |= (1 << 7) | (1 << 15);
+    }
+}
+
+static void ft_x87_hard_fbstp(CPUX86State *env, target_ulong ptr)
+{
+    uintptr_t ra = GETPC();
+    float_status status;
+    floatx80 value;
+    uint8_t old_flags;
+    target_ulong mem_ref = ptr;
+    int64_t val;
+
+    env->qt_bcd_helper_env_hard64 = true;
+    signal_barrier();
+    status = env->fp_status;
+    value = float64_to_floatx80(
+        (float64)env->fpregs[env->fpstt].d.low, &status);
+    old_flags = get_float_exception_flags(&env->fp_status);
+    set_float_exception_flags(0, &env->fp_status);
+    val = floatx80_to_int64(value, &env->fp_status);
+    if (val >= 1000000000000000000LL || val <= -1000000000000000000LL) {
+        set_float_exception_flags(float_flag_invalid, &env->fp_status);
+        while (mem_ref < ptr + 7) {
+            cpu_stb_data_ra(env, mem_ref++, 0, ra);
+        }
+        cpu_stb_data_ra(env, mem_ref++, 0xc0, ra);
+        cpu_stb_data_ra(env, mem_ref++, 0xff, ra);
+        cpu_stb_data_ra(env, mem_ref++, 0xff, ra);
+    } else {
+        target_ulong mem_end = ptr + 9;
+        /* Match helper_fbst_ST0: sign first, then low BCD bytes in order. */
+        if (value.high & 0x8000) {
+            cpu_stb_data_ra(env, mem_end, 0x80, ra);
+            val = -val;
+        } else {
+            cpu_stb_data_ra(env, mem_end, 0x00, ra);
+        }
+        while (mem_ref < mem_end && val != 0) {
+            int v = val % 100;
+            val /= 100;
+            v = ((v / 10) << 4) | (v % 10);
+            cpu_stb_data_ra(env, mem_ref++, v, ra);
+        }
+        while (mem_ref < mem_end) {
+            cpu_stb_data_ra(env, mem_ref++, 0, ra);
+        }
+    }
+    /* Faults leave conversion flags unmerged and TOP unchanged, as before. */
+    ft_x87_hard_bcd_merge_flags(env, old_flags);
+    env->fptags[env->fpstt] = 1;
+    env->fpstt = (env->fpstt + 1) & 7;
+    signal_barrier();
+    env->qt_bcd_helper_env_hard64 = false;
+}
+#endif
 
 static void ft_x87_helper_f2xm1(CPUX86State *env)
 {
@@ -256,7 +457,8 @@ static int64_t ft_x87_helper_fisttll(CPUX86State *env)
 
 static bool ft_x87_st1_empty(CPUX86State *env)
 {
-    return env->fptags[env->fpstt] || env->fptags[(env->fpstt + 1) & 7];
+    return !ft_x87_latu_legacy_no_tag() &&
+           (env->fptags[env->fpstt] || env->fptags[(env->fpstt + 1) & 7]);
 }
 
 static void ft_x87_set_st0_qnan(CPUX86State *env)
@@ -309,6 +511,9 @@ static void ft_x87_helper_fstp80(CPUX86State *env, target_ulong ptr)
 static bool ft_x87_check_stack(CPUX86State *env, unsigned int inputs,
                                unsigned int outputs, int push, int pops)
 {
+    if (ft_x87_latu_legacy_no_tag()) {
+        return true;
+    }
     bool overflow = push && !env->fptags[(env->fpstt - 1) & 7];
     bool underflow = false;
     for (unsigned int i = 0; inputs >> i; ++i) {
@@ -770,7 +975,9 @@ static void ft_x87_hard_set_st(CPUX86State *env, unsigned int st_index,
     memcpy(&bits, &value, sizeof(bits));
     env->fpregs[index].d.low = bits;
     env->fpregs[index].d.high = 0;
-    env->fptags[index] = 0;
+    if (!ft_x87_latu_legacy_no_tag()) {
+        env->fptags[index] = 0;
+    }
 }
 
 static void ft_x87_hard_set_st0_qnan(CPUX86State *env)
@@ -784,7 +991,9 @@ static void ft_x87_hard_set_st0_qnan(CPUX86State *env)
 
 static void ft_x87_hard_pop(CPUX86State *env)
 {
-    env->fptags[env->fpstt] = 1;
+    if (!ft_x87_latu_legacy_no_tag()) {
+        env->fptags[env->fpstt] = 1;
+    }
     env->fpstt = (env->fpstt + 1) & 7;
 }
 
