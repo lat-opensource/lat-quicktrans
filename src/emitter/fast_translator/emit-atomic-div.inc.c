@@ -390,6 +390,68 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
     }
     ft_preserve_cmpxchg_addr(out, &addr);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if ((is8 || is16) && fields->prefix0 != dt_X86_PREFIX_LOCK) {
+        int value = ft_gpr(src);
+        if (is8 && ft_modrm_reg_is_high8(fields)) {
+            int base = ft_modrm_reg_high8_base_index(fields);
+            if (base >= GPR_NUM) {
+                return false;
+            }
+            FT_LA_SRLI_D_EMIT(out, la_t2, ft_gpr(base), 8);
+            value = la_t2;
+        }
+        ft_emit_raw(out, ft_gpr3_imm12(is8 ? FT_LA_OPCODE_LD_BU :
+                                     FT_LA_OPCODE_LD_HU, la_t1, addr, 0));
+        FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index),
+                              is8 ? 7 : 15, 0);
+        FT_LA_BNE_EMIT(out, la_t1, la_t3, 3);
+        ft_emit_raw(out, ft_gpr3_imm12(is8 ? FT_LA_OPCODE_ST_B :
+                                     FT_LA_OPCODE_ST_H, value, addr, 0));
+        FT_LA_B_EMIT(out, 2);
+        /* A failed comparison still performs a write access. */
+        ft_emit_raw(out, ft_gpr3_imm12(is8 ? FT_LA_OPCODE_ST_B :
+                                     FT_LA_OPCODE_ST_H, la_t1, addr, 0));
+        if (!fields->skip_flags) {
+            if (is8) {
+                FT_LA_X86SUB_B_EMIT(out, ft_gpr(rax_index), la_t1);
+            } else {
+                FT_LA_X86SUB_H_EMIT(out, ft_gpr(rax_index), la_t1);
+            }
+        }
+        FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), la_t1,
+                             is8 ? 7 : 15, 0);
+        return true;
+    }
+    if (!is64 && !is16 && !is8 &&
+        fields->prefix0 != dt_X86_PREFIX_LOCK) {
+        /* Reuse the compare branch for the RAX write decision.  Both
+         * paths finish their write cycle before changing guest state. */
+        FT_LA_LD_WU_EMIT(out, la_t1, addr, 0);
+        FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index), 31, 0);
+        FT_LA_BNE_EMIT(out, la_t1, la_t3, 4);
+        FT_LA_ST_W_EMIT(out, ft_gpr(src), addr, 0);
+        FT_LA_X86SUB_W_EMIT(out, ft_gpr(rax_index), la_t1);
+        FT_LA_B_EMIT(out, 4);
+        FT_LA_ST_W_EMIT(out, la_t1, addr, 0);
+        FT_LA_X86SUB_W_EMIT(out, ft_gpr(rax_index), la_t1);
+        FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
+        return true;
+    }
+    if (is64 && fields->prefix0 != dt_X86_PREFIX_LOCK) {
+        /* Non-LOCK CMPXCHG needs no atomic RMW.  Keep the write cycle on
+         * mismatch too, and do not change guest state before it succeeds. */
+        FT_LA_LD_D_EMIT(out, la_t1, addr, 0);
+        FT_LA_BNE_EMIT(out, la_t1, ft_gpr(rax_index), 3);
+        FT_LA_ST_D_EMIT(out, ft_gpr(src), addr, 0);
+        FT_LA_B_EMIT(out, 2);
+        FT_LA_ST_D_EMIT(out, la_t1, addr, 0);
+        FT_LA_X86SUB_D_EMIT(out, ft_gpr(rax_index), la_t1);
+        FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
+        return true;
+    }
+#endif
+
     if (is8) {
         bool src_high8 = ft_modrm_reg_is_high8(fields);
         int src_base = src_high8 ?
@@ -509,8 +571,35 @@ static bool ft_emit_cmpxchg8b(uint32_t **out,
     FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rbx_index), 31, 0);
     FT_LA_OR_EMIT(out, la_t2, la_t2, la_t1);
 
-    FT_LA_OR_EMIT(out, la_t1, la_t3, la_zero);
-    ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_D, la_t1, la_t2, addr);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (fields->prefix0 != dt_X86_PREFIX_LOCK) {
+        FT_LA_LD_D_EMIT(out, la_t1, addr, 0);
+        ft_emit_branch_placeholder(out, &mismatch_fixup, FT_BRANCH_BNE,
+                                   la_t1, la_t3, &mismatch);
+        FT_LA_ST_D_EMIT(out, la_t2, addr, 0);
+        if (!fields->skip_flags) {
+            FT_LA_ORI_EMIT(out, la_t4, la_zero, 0xfff);
+            FT_LA_X86MTFLAG_EMIT(out, la_t4, ZF_USEDEF_BIT);
+        }
+        ft_emit_branch_placeholder(out, &done_fixup, FT_BRANCH_B, 0, 0, &done);
+        ft_bind_branch_label(&mismatch, *out);
+        ft_resolve_branch_fixup(&mismatch_fixup);
+        FT_LA_ST_D_EMIT(out, la_t1, addr, 0);
+        if (!fields->skip_flags) {
+            FT_LA_X86MTFLAG_EMIT(out, la_zero, ZF_USEDEF_BIT);
+        }
+        FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rax_index), la_t1, 31, 0);
+        FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rdx_index), la_t1, 63, 32);
+        ft_bind_branch_label(&done, *out);
+        ft_resolve_branch_fixup(&done_fixup);
+        return true;
+    } else
+#endif
+    {
+        FT_LA_OR_EMIT(out, la_t1, la_t3, la_zero);
+        ft_emit_atomic_op(out, fields, FT_LA_OPCODE_AMCAS_DB_D,
+                          la_t1, la_t2, addr);
+    }
     FT_LA_XOR_EMIT(out, la_t2, la_t1, la_t3);
 
     if (!fields->skip_flags) {
@@ -910,10 +999,16 @@ static bool ft_emit_div_rm32(uint32_t **out, const FastTemplateFields *fields,
         ft_bind_branch_label(&nonzero, *out);
         ft_resolve_branch_fixup(&fixup);
     }
+#ifdef QUICKTRANS_LATU
+    /* The shift already discards RDX high bits; insert only EAX. */
+    FT_LA_SLLI_D_EMIT(out, la_t1, ft_gpr(rdx_index), 32);
+    FT_LA_BSTRINS_D_EMIT(out, la_t1, ft_gpr(rax_index), 31, 0);
+#else
     FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rdx_index), 31, 0);
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 32);
     FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rax_index), 31, 0);
     FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
+#endif
     FT_LA_MOD_DU_EMIT(out, ft_gpr(rdx_index), la_t1, la_t0);
     FT_LA_DIV_DU_EMIT(out, ft_gpr(rax_index), la_t1, la_t0);
     FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rdx_index), ft_gpr(rdx_index), 31, 0);
@@ -948,10 +1043,16 @@ static bool ft_emit_div_rm16(uint32_t **out, const FastTemplateFields *fields,
         ft_bind_branch_label(&nonzero, *out);
         ft_resolve_branch_fixup(&fixup);
     }
+#ifdef QUICKTRANS_LATU
+    /* Form unsigned DX:AX without a separate shifted DX temporary. */
+    FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rax_index), 15, 0);
+    FT_LA_BSTRINS_D_EMIT(out, la_t1, ft_gpr(rdx_index), 31, 16);
+#else
     FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rdx_index), 15, 0);
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 16);
     FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rax_index), 15, 0);
     FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
+#endif
     FT_LA_DIV_DU_EMIT(out, la_t2, la_t1, la_t0);
     FT_LA_SRLI_D_EMIT(out, la_t3, la_t2, 16);
     {
@@ -1034,7 +1135,10 @@ static bool ft_emit_idiv_rm8(uint32_t **out, const FastTemplateFields *fields,
     }
 
 #ifdef QUICKTRANS_LATU
-    FT_LA_EXT_W_B_EMIT(out, la_t0, src);
+    /* Memory LD.B already sign-extends; register bytes still need EXT.W.B. */
+    if (fields->modrm_mod == 3) {
+        FT_LA_EXT_W_B_EMIT(out, la_t0, src);
+    }
 #else
     FT_LA_SLLI_D_EMIT(out, la_t0, src, 56);
     FT_LA_SRAI_D_EMIT(out, la_t0, la_t0, 56);
@@ -1106,13 +1210,15 @@ static bool ft_emit_idiv_rm16(uint32_t **out, const FastTemplateFields *fields,
         ft_resolve_branch_fixup(&fixup);
     }
 
+#ifdef QUICKTRANS_LATU
+    /* SLLI.W sign-extends DX:0; inserting AX preserves that sign. */
+    FT_LA_SLLI_W_EMIT(out, la_t1, ft_gpr(rdx_index), 16);
+    FT_LA_BSTRINS_D_EMIT(out, la_t1, ft_gpr(rax_index), 15, 0);
+#else
     FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rdx_index), 15, 0);
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 16);
     FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rax_index), 15, 0);
     FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
-#ifdef QUICKTRANS_LATU
-    FT_LA_SLLI_W_EMIT(out, la_t1, la_t1, 0);
-#else
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 32);
     FT_LA_SRAI_D_EMIT(out, la_t1, la_t1, 32);
 #endif
@@ -1177,10 +1283,16 @@ static bool ft_emit_idiv_rm32(uint32_t **out, const FastTemplateFields *fields,
         ft_resolve_branch_fixup(&fixup);
     }
 
+#ifdef QUICKTRANS_LATU
+    /* Shifting discards RDX high bits; insert exactly the low EAX bits. */
+    FT_LA_SLLI_D_EMIT(out, la_t1, ft_gpr(rdx_index), 32);
+    FT_LA_BSTRINS_D_EMIT(out, la_t1, ft_gpr(rax_index), 31, 0);
+#else
     FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rdx_index), 31, 0);
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 32);
     FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rax_index), 31, 0);
     FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
+#endif
 
     FT_LA_MOD_D_EMIT(out, la_t2, la_t1, la_t0);
     FT_LA_DIV_D_EMIT(out, la_t3, la_t1, la_t0);

@@ -4969,6 +4969,15 @@ simd_bin_done:
         FT_LA_MOVCF2GR_EMIT(&out, eq, 0);
         FT_LA_MOVCF2GR_EMIT(&out, lt, 2);
         FT_LA_AND_EMIT(&out, unordered, lt, eq);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->modrm_mod != 3 && !fields->direct_float_xx &&
+            fields->direct_branch_kind == FT_DIRECT_BRANCH_NONE) {
+            FT_LA_BSTRINS_W_EMIT(&out, lt, eq, 6, 6);
+            FT_LA_BSTRINS_W_EMIT(&out, lt, unordered, 2, 2);
+            FT_LA_X86MTFLAG_EMIT(&out, lt, 0x3f);
+            break;
+        }
+#endif
         FT_LA_OR_EMIT(&out, flags, lt, la_zero);
         FT_LA_BSTRINS_W_EMIT(&out, flags, eq, 6, 6);
         FT_LA_BSTRINS_W_EMIT(&out, flags, unordered, 2, 2);

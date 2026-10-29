@@ -1161,6 +1161,10 @@ static int ft_emit_xchg_template(const FastTemplateFields *fields, TranslationBl
 {
     uint32_t *out = code;
 
+    /* LATU nonparallel TBs may use load/store, as the legacy translator does.
+     * clone(CLONE_VM) sets CF_PARALLEL and flushes TBs before starting a thread.
+     * Keep the guest register unchanged until the store succeeds. */
+
     switch (fields->kind) {
     case FT_XCHG_RM64_R64:
     case FT_XCHG_RM32_R32:
@@ -1222,13 +1226,28 @@ static int ft_emit_xchg_template(const FastTemplateFields *fields, TranslationBl
             }
             ft_preserve_cmpxchg_addr(&out, &addr);
             if (is64) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+                if (fields->atomic_no_barrier) {
+                    FT_LA_LD_D_EMIT(&out, la_t1, addr, 0);
+                    FT_LA_ST_D_EMIT(&out, ft_gpr(src), addr, 0);
+                } else {
+                    ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_D,
+                                   la_t1, ft_gpr(src), addr);
+                }
+#else
                 ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_D,
                                    la_t1, ft_gpr(src), addr);
+#endif
                 FT_LA_OR_EMIT(&out, ft_gpr(src), la_t1, la_zero);
             } else if (is16) {
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
-                ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_H,
+                if (fields->atomic_no_barrier) {
+                    FT_LA_LD_HU_EMIT(&out, la_t1, addr, 0);
+                    FT_LA_ST_H_EMIT(&out, ft_gpr(src), addr, 0);
+                } else {
+                    ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_H,
                                    la_t1, ft_gpr(src), addr);
+                }
 #else
                 FT_LA_BSTRPICK_D_EMIT(&out, la_t2, ft_gpr(src), 15, 0);
                 ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_H,
@@ -1236,8 +1255,18 @@ static int ft_emit_xchg_template(const FastTemplateFields *fields, TranslationBl
 #endif
                 FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(src), la_t1, 15, 0);
             } else {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+                if (fields->atomic_no_barrier) {
+                    FT_LA_LD_WU_EMIT(&out, la_t1, addr, 0);
+                    FT_LA_ST_W_EMIT(&out, ft_gpr(src), addr, 0);
+                } else {
+                    ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_W,
+                                   la_t1, ft_gpr(src), addr);
+                }
+#else
                 ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_W,
                                    la_t1, ft_gpr(src), addr);
+#endif
                 FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(src), la_t1, 31, 0);
             }
         }
@@ -1300,8 +1329,16 @@ static int ft_emit_xchg_template(const FastTemplateFields *fields, TranslationBl
             return 0;
         }
         ft_preserve_cmpxchg_addr(&out, &addr);
-        ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_B,
-                           la_t1, src_val, addr);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->atomic_no_barrier) {
+            FT_LA_LD_BU_EMIT(&out, la_t1, addr, 0);
+            FT_LA_ST_B_EMIT(&out, src_val, addr, 0);
+        } else
+#endif
+        {
+            ft_emit_atomic_op(&out, fields, FT_LA_OPCODE_AMSWAP_DB_B,
+                               la_t1, src_val, addr);
+        }
         if (ft_modrm_reg_is_high8(fields)) {
             FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(src_reg), la_t1, 15, 8);
         } else {
