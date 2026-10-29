@@ -1186,7 +1186,7 @@ static bool ft_primary_trace_opt_enabled(void);
 static bool ft_template_uses_mmx(const FastTemplateFields *fields);
 static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo **meta,
-                                   int count);
+                                   int count, unsigned int candidates);
 static bool ft_direct_alu_result_gpr(const FastTemplateFields *alu, int *dst)
 {
     if (alu->alu_width == 8) {
@@ -2032,26 +2032,75 @@ static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
 static void ft_analyze_ucomisd_seta(FastTemplateFields *fields, int count);
 static void ft_analyze_cmp_sbb(FastTemplateFields *fields, int count);
 
+enum {
+    FT_ANALYZE_XXCC = 1,
+    FT_ANALYZE_DIV = 2,
+    FT_ANALYZE_FLOAT = 4,
+    FT_ANALYZE_SBB = 8,
+    FT_ANALYZE_ALL = 15,
+};
+
+static unsigned int ft_analysis_candidates(const FastTemplateFields *fields)
+{
+#ifdef QUICKTRANS_LATU
+    unsigned int mask = fields->alu_op == FT_ALU_SBB ? FT_ANALYZE_SBB : 0;
+
+    switch (fields->kind) {
+    case FT_SETCC_RM8:
+    case FT_CMOV_R64_RM64:
+    case FT_CMOV_R32_RM32:
+    case FT_CMOV_R16_RM16:
+        mask |= FT_ANALYZE_XXCC;
+        break;
+    case FT_DIV_RM32:
+    case FT_DIV_RM64:
+    case FT_IDIV_RM32:
+    case FT_IDIV_RM64:
+        mask |= FT_ANALYZE_DIV;
+        break;
+    case FT_SIMD_SCALAR_CMP_XMM_XMMM:
+        mask |= FT_ANALYZE_FLOAT;
+        break;
+    default:
+        break;
+    }
+    return mask;
+#else
+    (void)fields;
+    return FT_ANALYZE_ALL;
+#endif
+}
+
 static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
                                    const FastTemplateRuntimeInfo **meta,
-                                   int count)
+                                   int count, unsigned int candidates)
 {
     uint8_t pending = FT_EFLAGS_ALL;
     bool trace_opt = ft_primary_trace_opt_enabled();
 
-    if (count > 1) {
+    if (count > 1 && fields[count - 1].kind == FT_JCC_REL) {
         ft_analyze_direct_jcc_pair(&fields[count - 2], &fields[count - 1],
                                    false);
         if (fields[count - 1].direct_cmp_lhs_gpr < 0) {
             ft_analyze_direct_jcc_gap(fields, meta, count);
         }
     }
-    ft_analyze_direct_xxcc(fields, meta, count);
-    ft_analyze_div_patterns(fields, count);
-    ft_analyze_float_jcc(fields, count);
-    ft_analyze_float_xx_jcc(fields, meta, count);
-    ft_analyze_ucomisd_seta(fields, count);
-    ft_analyze_cmp_sbb(fields, count);
+    if (candidates & FT_ANALYZE_XXCC) {
+        ft_analyze_direct_xxcc(fields, meta, count);
+    }
+    if (candidates & FT_ANALYZE_DIV) {
+        ft_analyze_div_patterns(fields, count);
+    }
+    if (candidates & FT_ANALYZE_FLOAT) {
+        ft_analyze_float_jcc(fields, count);
+        ft_analyze_float_xx_jcc(fields, meta, count);
+        if (candidates & FT_ANALYZE_XXCC) {
+            ft_analyze_ucomisd_seta(fields, count);
+        }
+    }
+    if (candidates & FT_ANALYZE_SBB) {
+        ft_analyze_cmp_sbb(fields, count);
+    }
     for (int i = count - 1; i >= 0; --i) {
         FastTemplateEflagMasks masks;
         uint8_t live_def;
@@ -2535,9 +2584,19 @@ static void ft_analyze_direct_jcc_gap(
         return;
     }
     for (int head = count - 3; head >= first; --head) {
-        FastTemplateFields trial = *jcc;
+        FastTemplateFields trial;
         bool safe = true;
 
+        /* The pair matcher reads only kind/id and updates these six fields.
+         * Avoid copying the complete decoded instruction for every miss. */
+        trial.kind = jcc->kind;
+        trial.id = jcc->id;
+        trial.direct_cmp_lhs_gpr = jcc->direct_cmp_lhs_gpr;
+        trial.direct_cmp_rhs_gpr = jcc->direct_cmp_rhs_gpr;
+        trial.direct_cmp_width = jcc->direct_cmp_width;
+        trial.direct_branch_kind = jcc->direct_branch_kind;
+        trial.direct_bit_index_gpr = jcc->direct_bit_index_gpr;
+        trial.direct_bit_index_imm = jcc->direct_bit_index_imm;
         ft_analyze_direct_jcc_pair(&fields[head], &trial, true);
         if (trial.direct_cmp_lhs_gpr < 0) {
             continue;
@@ -2551,7 +2610,12 @@ static void ft_analyze_direct_jcc_gap(
             }
         }
         if (safe) {
-            *jcc = trial;
+            jcc->direct_cmp_lhs_gpr = trial.direct_cmp_lhs_gpr;
+            jcc->direct_cmp_rhs_gpr = trial.direct_cmp_rhs_gpr;
+            jcc->direct_cmp_width = trial.direct_cmp_width;
+            jcc->direct_branch_kind = trial.direct_branch_kind;
+            jcc->direct_bit_index_gpr = trial.direct_bit_index_gpr;
+            jcc->direct_bit_index_imm = trial.direct_bit_index_imm;
             return;
         }
     }
@@ -3163,6 +3227,7 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
     FastTemplateFields fields_buf[TCG_MAX_INSNS];
     const FastTemplateRuntimeInfo *meta_buf[TCG_MAX_INSNS];
     int icount = 0;
+    unsigned int analysis_candidates = 0;
     bool trace = getenv("LATX_FT_TU_TRACE") != NULL;
     int decode_mode = ft_tu_decode_mode(tb);
 
@@ -3259,6 +3324,7 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
         }
 #endif
 
+        analysis_candidates |= ft_analysis_candidates(fields);
         fields_buf[icount] = *fields;
         meta_buf[icount] = meta;
         if (trace) {
@@ -3296,7 +3362,8 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
     }
 
     tu_meta->icount = icount;
-    tu_meta->eflag_in = ft_analyze_tb_flags(fields_buf, meta_buf, icount);
+    tu_meta->eflag_in = ft_analyze_tb_flags(fields_buf, meta_buf, icount,
+                                                    analysis_candidates);
     tu_meta->eflag_out = FT_EFLAGS_ALL;
     for (int i = 0; i < icount; ++i) {
         tu_meta->insns[i].fields = fields_buf[i];
@@ -3589,6 +3656,7 @@ static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
     const FastTemplateRuntimeInfo *meta_buf[TCG_MAX_INSNS];
     int emitted = 0;
     int icount = 0;
+    unsigned int analysis_candidates = 0;
     bool x87_top_active = false;
     bool mmx_active = false;
     const uint8_t *host_start = NULL;
@@ -3746,6 +3814,7 @@ static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
             ft_primary_sample_trace(env, fields);
         }
 
+        analysis_candidates |= ft_analysis_candidates(fields);
         fields_buf[icount] = *fields;
         meta_buf[icount] = meta;
         if (stage_stats) {
@@ -3780,7 +3849,8 @@ static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
         stage_decode_ns = now - stage_total_start;
         stage_emit_start = now;
     }
-    (void)ft_analyze_tb_flags(fields_buf, meta_buf, icount);
+    (void)ft_analyze_tb_flags(fields_buf, meta_buf, icount,
+                                                    analysis_candidates);
     if (stage_stats) {
         int64_t now = ft_bench_now_ns();
 

@@ -124,7 +124,7 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
     int width = ft_count_bits_width(fields->kind);
     int dst = ft_modrm_reg_index(fields);
     int src;
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     int result = la_t2;
     bool direct_result = false;
 #else
@@ -141,7 +141,7 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
         return 0;
     }
 
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     if (fields->skip_flags && width != 16) {
         result = ft_gpr(dst);
         direct_result = true;
@@ -190,7 +190,7 @@ static int ft_emit_count_bits_template(const FastTemplateFields *fields, Transla
         }
     }
 
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     if (!direct_result) {
         ft_count_bits_store_dst(&out, fields, dst, result, width);
     }
@@ -262,19 +262,27 @@ static int ft_emit_mulx_template(const FastTemplateFields *fields,
             !ft_emit_load_rm64(&out, fields, pc, &src)) {
             return 0;
         }
-        FT_LA_MUL_D_EMIT(&out, la_t2, src, ft_gpr(rdx_index));
-        FT_LA_MULH_DU_EMIT(&out, la_t3, src, ft_gpr(rdx_index));
-        FT_LA_OR_EMIT(&out, ft_gpr(dst_lo), la_t2, la_zero);
-        FT_LA_OR_EMIT(&out, ft_gpr(dst_hi), la_t3, la_zero);
+        /* Finish both products before overwriting an aliased input.  When
+         * both destinations coincide, x86 keeps the high product. */
+        int lo = ft_gpr(dst_lo);
+        int hi = ft_gpr(dst_hi);
+        bool direct_lo = lo != src && lo != ft_gpr(rdx_index) && lo != hi;
+
+        FT_LA_MUL_D_EMIT(&out, direct_lo ? lo : la_t2,
+                         src, ft_gpr(rdx_index));
+        FT_LA_MULH_DU_EMIT(&out, hi, src, ft_gpr(rdx_index));
+        if (!direct_lo && lo != hi) {
+            FT_LA_OR_EMIT(&out, lo, la_t2, la_zero);
+        }
     } else {
         if (ft_rex_w(fields) ||
             !ft_emit_load_rm32(&out, fields, pc, &src)) {
             return 0;
         }
-        FT_LA_BSTRPICK_D_EMIT(&out, la_t0, src, 31, 0);
-        FT_LA_BSTRPICK_D_EMIT(&out, la_t1, ft_gpr(rdx_index), 31, 0);
-        FT_LA_MUL_D_EMIT(&out, la_t2, la_t0, la_t1);
-        FT_LA_SRLI_D_EMIT(&out, la_t3, la_t2, 32);
+        /* Word multiplies ignore stale high input bits.  Keep both results
+         * in temporaries so every source/destination overlap is safe. */
+        FT_LA_MUL_W_EMIT(&out, la_t2, src, ft_gpr(rdx_index));
+        FT_LA_MULH_WU_EMIT(&out, la_t3, src, ft_gpr(rdx_index));
         FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst_lo), la_t2, 31, 0);
         FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst_hi), la_t3, 31, 0);
     }
@@ -306,7 +314,7 @@ static int ft_emit_bls_template(const FastTemplateFields *fields, TranslationBlo
             !ft_emit_load_rm64(&out, fields, pc, &src)) {
             return 0;
         }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if (!fields->skip_flags && src == ft_gpr(dst)) {
 #else
         if (src == ft_gpr(dst)) {
@@ -314,20 +322,17 @@ static int ft_emit_bls_template(const FastTemplateFields *fields, TranslationBlo
             FT_LA_OR_EMIT(&out, la_t3, src, la_zero);
             src = la_t3;
         }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        /* BLSI uses -src below; src - 1 is only needed by BLSR/BLSMSK. */
         if (ext != 3) {
             FT_LA_ADDI_D_EMIT(&out, la_t2, src, -1);
         }
-#else
-        FT_LA_ADDI_D_EMIT(&out, la_t2, src, -1);
-#endif
     } else {
         if (ft_rex_w(fields) ||
             !ft_emit_load_rm32(&out, fields, pc, &src)) {
             return 0;
         }
         /* BLS flags are defined from the 32-bit source, not stale high bits. */
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if (!fields->skip_flags) {
             FT_LA_BSTRPICK_D_EMIT(&out, la_t3, src, 31, 0);
             src = la_t3;
@@ -338,7 +343,9 @@ static int ft_emit_bls_template(const FastTemplateFields *fields, TranslationBlo
 #else
         FT_LA_BSTRPICK_D_EMIT(&out, la_t3, src, 31, 0);
         src = la_t3;
-        FT_LA_ADDI_W_EMIT(&out, la_t2, src, -1);
+        if (ext != 3) {
+            FT_LA_ADDI_W_EMIT(&out, la_t2, src, -1);
+        }
 #endif
     }
 
@@ -956,8 +963,7 @@ static int ft_emit_btx_reg_template(const FastTemplateFields *fields, Translatio
         FT_LA_OR_EMIT(&out, la_t1, addr, la_zero);
         addr = la_t1;
         FT_LA_SRAI_D_EMIT(&out, la_t2, la_t4, log2_width);
-        FT_LA_SLLI_D_EMIT(&out, la_t2, la_t2, log2_bytes);
-        FT_LA_ADD_D_EMIT(&out, addr, addr, la_t2);
+        FT_LA_ALSL_D_EMIT(&out, addr, la_t2, addr, log2_bytes - 1);
         FT_LA_ANDI_EMIT(&out, la_t0, la_t4, width - 1);
         ft_emit_raw(&out,
                     ft_gpr3_imm12(width == 64 ? FT_LA_OPCODE_LD_D :

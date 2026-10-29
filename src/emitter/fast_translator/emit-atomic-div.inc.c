@@ -20,7 +20,6 @@ static bool ft_emit_imul_unary(uint32_t **out,
                                target_ulong pc)
 {
     int src;
-    int lhs;
 
     switch (fields->kind) {
     case FT_IMUL_RM8:
@@ -28,10 +27,8 @@ static bool ft_emit_imul_unary(uint32_t **out,
             !ft_emit_load_rm8(out, fields, pc, &src)) {
             return false;
         }
-        FT_LA_SLLI_D_EMIT(out, la_t1, src, 56);
-        FT_LA_SRAI_D_EMIT(out, la_t1, la_t1, 56);
-        FT_LA_SLLI_D_EMIT(out, la_t2, ft_gpr(rax_index), 56);
-        FT_LA_SRAI_D_EMIT(out, la_t2, la_t2, 56);
+        FT_LA_EXT_W_B_EMIT(out, la_t1, src);
+        FT_LA_EXT_W_B_EMIT(out, la_t2, ft_gpr(rax_index));
         ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_B,
                               la_t2, la_t1);
         FT_LA_MUL_W_EMIT(out, la_t0, la_t2, la_t1);
@@ -42,10 +39,8 @@ static bool ft_emit_imul_unary(uint32_t **out,
             !ft_emit_load_rm16(out, fields, pc, &src)) {
             return false;
         }
-        FT_LA_SLLI_D_EMIT(out, la_t1, src, 48);
-        FT_LA_SRAI_D_EMIT(out, la_t1, la_t1, 48);
-        FT_LA_SLLI_D_EMIT(out, la_t2, ft_gpr(rax_index), 48);
-        FT_LA_SRAI_D_EMIT(out, la_t2, la_t2, 48);
+        FT_LA_EXT_W_H_EMIT(out, la_t1, src);
+        FT_LA_EXT_W_H_EMIT(out, la_t2, ft_gpr(rax_index));
         ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_H,
                               la_t2, la_t1);
         FT_LA_MUL_W_EMIT(out, la_t0, la_t2, la_t1);
@@ -58,34 +53,26 @@ static bool ft_emit_imul_unary(uint32_t **out,
             !ft_emit_load_rm32(out, fields, pc, &src)) {
             return false;
         }
-        FT_LA_SLLI_D_EMIT(out, la_t1, src, 32);
-        FT_LA_SRAI_D_EMIT(out, la_t1, la_t1, 32);
-        FT_LA_SLLI_D_EMIT(out, la_t2, ft_gpr(rax_index), 32);
-        FT_LA_SRAI_D_EMIT(out, la_t2, la_t2, 32);
         ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_W,
-                              la_t2, la_t1);
-        FT_LA_MUL_D_EMIT(out, la_t0, la_t2, la_t1);
-        FT_LA_SRAI_D_EMIT(out, ft_gpr(rdx_index), la_t0, 32);
+                              ft_gpr(rax_index), src);
+        FT_LA_MULW_D_W_EMIT(out, la_t0, ft_gpr(rax_index), src);
         FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rax_index), la_t0, 31, 0);
-        FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rdx_index),
-                               ft_gpr(rdx_index), 31, 0);
+        FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rdx_index), la_t0, 63, 32);
         return true;
     case FT_IMUL_RM64:
         if (!ft_rex_w(fields) || fields->modrm_reg != 5 ||
             !ft_emit_load_rm64(out, fields, pc, &src)) {
             return false;
         }
-        lhs = src == la_t0 ? la_t1 : la_t0;
-        FT_LA_OR_EMIT(out, lhs, ft_gpr(rax_index), la_zero);
+        /* Only RDX is overwritten before the low product consumes src. */
+        if (src == ft_gpr(rdx_index)) {
+            FT_LA_OR_EMIT(out, la_t0, src, la_zero);
+            src = la_t0;
+        }
         ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_D,
                               ft_gpr(rax_index), src);
-        if (src == ft_gpr(rdx_index)) {
-            FT_LA_MUL_D_EMIT(out, ft_gpr(rax_index), lhs, src);
-            FT_LA_MULH_D_EMIT(out, ft_gpr(rdx_index), lhs, src);
-        } else {
-            FT_LA_MULH_D_EMIT(out, ft_gpr(rdx_index), lhs, src);
-            FT_LA_MUL_D_EMIT(out, ft_gpr(rax_index), lhs, src);
-        }
+        FT_LA_MULH_D_EMIT(out, ft_gpr(rdx_index), ft_gpr(rax_index), src);
+        FT_LA_MUL_D_EMIT(out, ft_gpr(rax_index), ft_gpr(rax_index), src);
         return true;
     default:
         return false;
@@ -229,8 +216,7 @@ static bool ft_emit_imul_rm(uint32_t **out, const FastTemplateFields *fields,
             ft_emit_li64(out, la_t1,
                          (uint64_t)(int64_t)(int16_t)fields->imm);
         }
-        FT_LA_SLLI_D_EMIT(out, la_t2, src, 48);
-        FT_LA_SRAI_D_EMIT(out, la_t2, la_t2, 48);
+        FT_LA_EXT_W_H_EMIT(out, la_t2, src);
         ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_H,
                               la_t2, la_t1);
         FT_LA_MUL_W_EMIT(out, la_t0, la_t2, la_t1);

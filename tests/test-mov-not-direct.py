@@ -76,13 +76,13 @@ int main(void){unsigned count=0;uint64_t seed=0xa55a5aa5c33c3cc3ULL;
   seed^=seed<<13;seed^=seed>>7;seed^=seed<<17;uint32_t v=j<11?edges[j]:(uint32_t)seed;
   for(int i=0;i<32;i++)r[i]=seed;r[31]=0;uint32_t code[64];FastTemplateFields x={.kind=form?FT_MOV_RM32_IMM32:FT_MOV_R32_IMM32,.reg=dst,.modrm_mod=3,.modrm_rm=dst,.imm=(int32_t)v,.rex=0};
   int n=form?emit_mov(&x,0,0,code):ft_emit_mov_reg_imm_template(&x,0,0,code);assert(n>0&&r[dst]==v);
-  if(OPTIMIZED&&EXPECT_LATS){int expected=v<=0xfff?1:1+!!(v&0xfff)+!!(v&0x80000000u);assert(n==expected);}else if(OPTIMIZED)assert(n==3);
+  if(OPTIMIZED&&EXPECT_LOCAL){int expected=v<=0xfff?1:1+!!(v&0xfff)+!!(v&0x80000000u);assert(n==expected);}else if(OPTIMIZED)assert(n==3);
   for(int k=0;k<16;k++)if(k!=dst)assert(r[k]==seed);count++;
  }
  for(int src=0;src<16;src++)for(int dst=0;dst<16;dst++)for(int j=0;j<75;j++){
   seed^=seed<<13;seed^=seed>>7;seed^=seed<<17;uint64_t v=j<11?0xdeadbeef00000000ULL|edges[j]:seed;
   for(int i=0;i<32;i++)r[i]=seed;r[31]=0;r[src]=v;uint32_t code[64];FastTemplateFields x={.kind=FT_MOV_RM32_R32,.modrm_mod=3,.modrm_reg=src,.modrm_rm=dst};
-  int n=emit_mov(&x,0,0,code);assert(r[dst]==(uint32_t)v);if(OPTIMIZED)assert(n==(EXPECT_LATS?1:2));
+  int n=emit_mov(&x,0,0,code);assert(r[dst]==(uint32_t)v);if(OPTIMIZED)assert(n==(EXPECT_LOCAL?1:2));
   for(int k=0;k<16;k++)if(k!=dst)assert(r[k]==(k==src?v:seed));count++;
  }
  for(int w=32;w<=64;w+=32)for(int dst=0;dst<16;dst++)for(int j=0;j<75;j++)for(int memory=0;memory<2;memory++){
@@ -90,15 +90,15 @@ int main(void){unsigned count=0;uint64_t seed=0xa55a5aa5c33c3cc3ULL;
   for(int i=0;i<32;i++)r[i]=seed;r[31]=0;r[dst]=v;mem=v;loads=stores=0;uint32_t code[64];FastTemplateFields x={.kind=w==32?FT_NOT_RM32:FT_NOT_RM64,.modrm_mod=memory?0:3,.modrm_rm=dst};
   int n=emit_not(&x,0,0,code);uint64_t expected=w==32?(uint32_t)~v:~v;
   if(memory){assert(mem==(w==32?(v&~0xffffffffULL)|expected:expected));assert(r[dst]==v&&loads==1&&stores==1);}
-  else {assert(r[dst]==expected&&loads==0&&stores==0);if(OPTIMIZED)assert(n==(w==32?2:1)+(EXPECT_LATS?0:1));}
+  else {assert(r[dst]==expected&&loads==0&&stores==0);if(OPTIMIZED)assert(n==(w==32?2:1)+(EXPECT_LOCAL?0:1));}
   for(int k=0;k<16;k++)if(k!=dst)assert(r[k]==seed);count++;
  }
- printf("actual MOV/NOT body %u cases PASS LATS=%d optimized=%d\n",count,EXPECT_LATS,OPTIMIZED);
+ printf("actual MOV/NOT body %u cases PASS local-sequence=%d optimized=%d\n",count,EXPECT_LOCAL,OPTIMIZED);
 }
 '''
 with tempfile.TemporaryDirectory() as d:
  c=Path(d)/'movnot.c';c.write_text(header+li+mov+'\nstatic int emit_mov(const FastTemplateFields*fields,TranslationBlock*tb,target_ulong pc,uint32_t*code){uint32_t*out=code;switch(fields->kind){\n'+rr+'default:return 0;}return out-code;}\nstatic int emit_not(const FastTemplateFields*fields,TranslationBlock*tb,target_ulong pc,uint32_t*code){uint32_t*out=code;int dst;\n'+notbody+main)
- for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('user',['-DEXPECT_LATS=0'])]:
+ for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LOCAL=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('latu-native',['-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('user',['-DEXPECT_LOCAL=0'])]:
   exe=Path(d)/label
   subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror',*(['-fsanitize=undefined'] if not os.environ.get('NO_SANITIZE') else []),f'-DOPTIMIZED={int("--optimized" in sys.argv)}',*defs,str(c),'-o',str(exe)],check=True)
   subprocess.run([str(exe)],check=True)

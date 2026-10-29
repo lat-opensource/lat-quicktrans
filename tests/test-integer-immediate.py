@@ -41,7 +41,7 @@ int main(void) {
   bool ok=logic?ft_emit_logic_imm_reg(&out,&f):ft_emit_addsub_imm_reg(&out,&f);
   int64_t addend=op==FT_ALU_ADD?f.imm:-f.imm;
   uint64_t imm=w==32?(uint32_t)f.imm:(uint64_t)f.imm;
-  bool eligible=EXPECT_LATS && flags && w>=32 && (form==0 || (form==1&&!mem&&dst<16)) && (logic?imm<=4095:ft_fits_simm12(addend));
+  bool eligible=EXPECT_LOCAL && flags && w>=32 && (form==0 || (form==1&&!mem&&dst<16)) && (logic?imm<=4095:ft_fits_simm12(addend));
   assert(ok==eligible);
   if(ok) {
    uint64_t expected=op==FT_ALU_ADD?value+(uint64_t)f.imm:op==FT_ALU_SUB?value-(uint64_t)f.imm:op==FT_ALU_OR?value|imm:value^imm;
@@ -50,12 +50,12 @@ int main(void) {
   } else {assert(n==0&&out==code);if(dst<16)assert(r[dst]==value);}
   cases++;
  }
- printf("integer immediate semantic cases=%u hits=%u LATS=%d PASS\n",cases,hits,EXPECT_LATS);
+ printf("integer immediate semantic cases=%u hits=%u local-sequence=%d PASS\n",cases,hits,EXPECT_LOCAL);
 }
 '''
 with tempfile.TemporaryDirectory() as d:
     c=Path(d)/'test.c';c.write_text(header+helper+main)
-    for label,flags in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('user',['-DEXPECT_LATS=0'])]:
+    for label,flags in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LOCAL=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('latu-native',['-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('user',['-DEXPECT_LOCAL=0'])]:
         exe=Path(d)/label
         subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-fsanitize=undefined',*flags,str(c),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)

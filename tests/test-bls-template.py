@@ -53,12 +53,13 @@ for(int k=0;k<32;k++)r[k]=seed;r[31]=0;int sr=alias?dst:dst==0?8:0;r[sr]=v;mem=v
 FastTemplateFields f={.kind=w==64?FT_BLS_R64_RM:FT_BLS_R32_RM,.reg=dst,.src=sr,.modrm=(memory?0:192)|(ext<<3),.skip_flags=dead,.rex=w==64};
 uint32_t c[64];n=0;int count=ft_emit_bls_template(&f,0,0,c);assert(count>0);
 int want_count=memory+(w==32?2:(!memory&&alias))+(ext==3?3:2)+(!dead?(ext==2?7:10):0);
-if(EXPECT_OPT){if(ext==3)want_count--;if(dead&&(w==32||(!memory&&alias)))want_count--;}
+if(ext==3)want_count--;
+if(EXPECT_OPT && dead && (w==32||(!memory&&alias)))want_count--;
 assert(count==want_count);uint64_t src=w==32?(uint32_t)v:v;uint64_t z=ext==1?src&(src-1):ext==2?src^(src-1):src&(-src);if(w==32)z=(uint32_t)z;run(c,count);assert(r[dst]==z);
 uint64_t want=(ext==3?(src!=0):(src==0))|((ext!=2&&z==0)?64:0)|(((z>>(w-1))&1)<<7);assert(dead?flags==0x8d5:(flags&0x8c1)==want);cases++;}
 printf("actual BLS body %u cases PASS LATS=%d; load modeled; not full engine\n",cases,EXPECT_LATS);}
 '''
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'body.c').write_text(head+body+tail)
- for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('user',['-DEXPECT_LATS=0'])]:
-  subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-DEXPECT_OPT='+str(int('--optimized' in sys.argv and label=='lats')),*([] if os.environ.get('NO_SANITIZE') else ['-fsanitize=undefined']),*defs,str(p/'body.c'),'-o',str(p/label)],check=True);subprocess.run([str(p/label)],check=True)
+ for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('latu-native',['-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('user',['-DEXPECT_LATS=0'])]:
+  subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-DEXPECT_OPT='+str(int('--optimized' in sys.argv and label!='user')),*([] if os.environ.get('NO_SANITIZE') else ['-fsanitize=undefined']),*defs,str(p/'body.c'),'-o',str(p/label)],check=True);subprocess.run([str(p/label)],check=True)

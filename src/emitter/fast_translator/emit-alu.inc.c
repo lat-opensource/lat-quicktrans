@@ -122,9 +122,12 @@ static bool ft_emit_alu_store_rm(uint32_t **out,
         value == ft_gpr(fields->modrm_rm_index)) {
         return true;
     }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     /* Ordinary register RM_R results already reside in their destination. */
     if (width == 32 && fields->modrm_mod == 3 &&
+#ifdef QUICKTRANS_LATU
+        fields->alu_op == FT_ALU_ADD &&
+#endif
         fields->alu_form == FT_ALU_FORM_RM_R &&
         !ft_alu_uses_cf(fields->alu_op) &&
         fields->modrm_rm_index < GPR_NUM &&
@@ -193,7 +196,7 @@ static bool ft_emit_alu_store_modrm_reg(uint32_t **out,
     }
     switch (width) {
     case 64:
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if (fields->modrm_mod == 3 &&
             fields->alu_form == FT_ALU_FORM_R_RM &&
             !ft_alu_uses_cf(fields->alu_op) && value == ft_gpr(reg)) {
@@ -265,7 +268,7 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
     if (ft_alu_uses_cf(op)) {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         /* Dead output flags do not need the old lhs; ADC/SBC still use CF. */
         if (!fields->skip_flags || fields->modrm_mod != 3 ||
             (width != 32 && width != 64) ||
@@ -274,7 +277,7 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
 #endif
             flag_lhs = la_t3;
             FT_LA_OR_EMIT(out, flag_lhs, lhs, la_zero);
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         }
 #endif
         if (!fields->skip_flags &&
@@ -437,7 +440,7 @@ static bool ft_emit_locked_alu(uint32_t **out,
 static bool ft_emit_and_imm_reg(uint32_t **out,
                                 const FastTemplateFields *fields)
 {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     int width = fields->alu_width;
     int dst;
     uint64_t mask;
@@ -497,7 +500,7 @@ static bool ft_emit_and_imm_reg(uint32_t **out,
 static bool ft_emit_logic_imm_reg(uint32_t **out,
                               const FastTemplateFields *fields)
 {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     int width = fields->alu_width;
     int dst;
     uint64_t imm = width == 32 ? (uint32_t)fields->imm :
@@ -539,7 +542,7 @@ static bool ft_emit_logic_imm_reg(uint32_t **out,
 static bool ft_emit_addsub_imm_reg(uint32_t **out,
                                   const FastTemplateFields *fields)
 {
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     int width = fields->alu_width;
     int dst;
     int64_t addend;
@@ -627,7 +630,7 @@ static bool ft_emit_alu_template(uint32_t **out,
         return true;
 
     case FT_ALU_FORM_RM_IMM:
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if ((op == FT_ALU_OR || op == FT_ALU_XOR) &&
             ft_emit_logic_imm_reg(out, fields)) {
             return true;
@@ -636,7 +639,7 @@ static bool ft_emit_alu_template(uint32_t **out,
         if (op == FT_ALU_AND && ft_emit_and_imm_reg(out, fields)) {
             return true;
         }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if ((op == FT_ALU_ADD || op == FT_ALU_SUB) &&
             ft_emit_addsub_imm_reg(out, fields)) {
             return true;
@@ -671,13 +674,13 @@ static bool ft_emit_alu_template(uint32_t **out,
         return true;
 
     case FT_ALU_FORM_ACC_IMM:
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if ((op == FT_ALU_OR || op == FT_ALU_XOR) &&
             ft_emit_logic_imm_reg(out, fields)) {
             return true;
         }
 #endif
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if ((op == FT_ALU_ADD || op == FT_ALU_SUB) &&
             ft_emit_addsub_imm_reg(out, fields)) {
             return true;

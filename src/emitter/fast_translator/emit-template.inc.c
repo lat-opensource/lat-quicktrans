@@ -366,6 +366,14 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 return 0;
             }
         }
+#ifndef CONFIG_SOFTMMU
+        /* Direct conditions use t0-t2, including the memory-load result t0.
+         * Keep the source live until the conditional destination write. */
+        if (fields->direct_cmp_lhs_gpr >= 0 && fields->modrm_mod != 3) {
+            FT_LA_OR_EMIT(&out, la_t3, src, la_zero);
+            src = la_t3;
+        }
+#endif
         if (fields->kind == FT_CMOV_R32_RM32) {
             if (fields->direct_cmp_lhs_gpr >= 0) {
                 if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
@@ -473,7 +481,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             FT_LA_BSTRPICK_D_EMIT(&out, la_t2, src, 31, 0);
             src = la_t2;
         }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         /* Scan results fit in six bits; write r32/r64 without a copy. */
         if (!is_16) {
             result = ft_gpr(dst);
@@ -647,7 +655,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         if (src >= GPR_NUM) {
             return 0;
         }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if (fields->modrm_mod == 3) {
             int dst = ft_modrm_rm_index(fields);
 
@@ -907,7 +915,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t2, la_zero);
                 FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), la_t0, 15, 0);
             }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
             else {
                 /* li32 sign-extends; LEA32 must clear the high word. */
                 FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
@@ -955,7 +963,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             if (index >= GPR_NUM) {
                 return 0;
             }
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
             if (!is16 && !no_base) {
                 if (!ft_base_from_modrm_sib_with_index(fields, &base)) {
                     return 0;

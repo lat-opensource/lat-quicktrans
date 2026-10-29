@@ -17,7 +17,7 @@ def main() -> int:
         "bool latx_fast_decode_translate_tb_primary(", start,
     )
     primary = source[start:end]
-    analysis = "ft_analyze_tb_flags(fields_buf, meta_buf, icount)"
+    analysis = "ft_analyze_tb_flags(fields_buf, meta_buf, icount,"
     emit_loop = "for (int i = 0; i < icount; ++i)"
 
     if primary.count(analysis) != 1:
@@ -68,7 +68,7 @@ def main() -> int:
                   file=sys.stderr)
             return 1
     if not re.search(
-        r"if \(count > 1\)\s*\{\s*"
+        r"if \(count > 1 && fields\[count - 1\]\.kind == FT_JCC_REL\)\s*\{\s*"
         r"ft_analyze_direct_jcc_pair\(&fields\[count - 2\],\s*"
         r"&fields\[count - 1\],\s*false\);",
         source,

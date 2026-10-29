@@ -70,11 +70,11 @@ int w=wi==0?16:wi==1?32:64;seed^=seed<<13;seed^=seed>>7;seed^=seed<<17;uint64_t 
 for(int k=0;k<32;k++)r[k]=seed;r[31]=0;int sr=alias?dst:dst==0?8:0;r[sr]=v;uint64_t old=r[dst];mem=v;flags=0x8d5;
 FastTemplateFields f={.kind=op*3+wi,.reg=dst,.src=sr,.modrm=(memory?0:192),.skip_flags=dead,.rex=w==64,.prefix2=w==16?dt_X86_PREFIX_OPSIZE:0};
 uint32_t c[128];n=0;int count=ft_emit_count_bits_template(&f,0,0,c);assert(count>0);uint64_t src=w==64?v:v&((1ULL<<w)-1);uint64_t z=op==0?(src?__builtin_clzll(src)-(64-w):w):op==1?(src?__builtin_ctzll(src):w):__builtin_popcountll(src);uint64_t wantdst=w==16?(old&~0xffffULL)|z:z;run(c,count);assert(r[dst]==wantdst);if(w==32)assert((r[dst]>>32)==0);
-if(EXPECT_OPT && EXPECT_LATS && dead && w!=16){int last=ins[c[count-1]].op;assert(last==(op==2?20:op==0?(w==64?17:3):(w==64?18:11)));}else assert(ins[c[count-1]].op==(w==64?1:w==32?2:16));
+if(EXPECT_OPT && EXPECT_LOCAL && dead && w!=16){int last=ins[c[count-1]].op;assert(last==(op==2?20:op==0?(w==64?17:3):(w==64?18:11)));}else assert(ins[c[count-1]].op==(w==64?1:w==32?2:16));
 uint64_t want=op==2?(src==0?64:0):(src==0)|(z==0?64:0);assert(dead?flags==0x8d5:(flags&(op==2?0x8d5:0x41))==want);cases++;}
-printf("actual count-bits body %u cases PASS LATS=%d; load modeled; not full engine\n",cases,EXPECT_LATS);}
+printf("actual count-bits body %u cases PASS local-sequence=%d; load modeled; not full engine\n",cases,EXPECT_LOCAL);}
 '''
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'body.c').write_text(head+body+tail)
- for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('user',['-DEXPECT_LATS=0'])]:
+ for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LOCAL=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('latu-native',['-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('user',['-DEXPECT_LOCAL=0'])]:
   subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-DEXPECT_OPT='+str(int('--optimized' in sys.argv)),*([] if os.environ.get('NO_SANITIZE') else ['-fsanitize=undefined']),*defs,str(p/'body.c'),'-o',str(p/label)],check=True);subprocess.run([str(p/label)],check=True)

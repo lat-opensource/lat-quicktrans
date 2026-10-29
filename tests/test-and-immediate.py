@@ -37,7 +37,7 @@ int main(void) {
   FastTemplateFields f={.alu_op=FT_ALU_AND,.alu_width=w,.alu_form=form==0?FT_ALU_FORM_ACC_IMM:form==1?FT_ALU_FORM_RM_IMM:FT_ALU_FORM_RM_R,.modrm_mod=mem?0:3,.rm=reg==0?0:reg==1?8:16,.prefix0=lock?dt_X86_PREFIX_LOCK:0,.skip_flags=flags,.imm=masks[mi]};
   int dst=form==0?0:f.rm;for(int j=0;j<32;j++)r[j]=value;r[31]=0;n=0;uint32_t *out=code;
   bool ok=ft_emit_and_imm_reg(&out,&f);
-  bool eligible=EXPECT_LATS && flags && !lock && (form==0 || (form==1&&!mem&&dst<16));
+  bool eligible=EXPECT_LOCAL && flags && !lock && (form==0 || (form==1&&!mem&&dst<16));
   if(ok) {
    assert(eligible);uint64_t expected=value & (uint64_t)f.imm;if(w==32)expected=(uint32_t)expected;
    assert(r[dst]==expected);assert(n>=1&&n<=2);hits++;
@@ -50,12 +50,12 @@ int main(void) {
  uint32_t *out=code;assert(!ft_emit_and_imm_reg(&out,&rejected));
  rejected.alu_op=FT_ALU_AND;rejected.alu_width=16;assert(!ft_emit_and_imm_reg(&out,&rejected));
  rejected.alu_width=8;assert(!ft_emit_and_imm_reg(&out,&rejected));
- printf("AND immediate semantic cases=%u hits=%u LATS=%d PASS\n",cases,hits,EXPECT_LATS);
+ printf("AND immediate semantic cases=%u hits=%u local-sequence=%d PASS\n",cases,hits,EXPECT_LOCAL);
 }
 '''
 with tempfile.TemporaryDirectory() as d:
     c=Path(d)/'test.c';c.write_text(header+helper+main)
-    for label,flags in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('user',['-DEXPECT_LATS=0'])]:
+    for label,flags in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LOCAL=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('latu-native',['-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('user',['-DEXPECT_LOCAL=0'])]:
         exe=Path(d)/label
         subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-fsanitize=undefined',*flags,str(c),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)

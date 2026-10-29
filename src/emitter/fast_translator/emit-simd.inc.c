@@ -1117,6 +1117,33 @@ static int ft_emit_pmovx_template(const FastTemplateFields *fields, TranslationB
         return 0;
     }
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (option_enable_lasx) {
+        switch (fields->id) {
+        case dt_X86_INS_PMOVSXBD:
+            FT_LA_VEXT2XV_W_B_EMIT(&out, ft_xmm(dst), src);
+            return (out - code);
+        case dt_X86_INS_PMOVZXBD:
+            FT_LA_VEXT2XV_WU_BU_EMIT(&out, ft_xmm(dst), src);
+            return (out - code);
+        case dt_X86_INS_PMOVSXBQ:
+            FT_LA_VEXT2XV_D_B_EMIT(&out, ft_xmm(dst), src);
+            return (out - code);
+        case dt_X86_INS_PMOVZXBQ:
+            FT_LA_VEXT2XV_DU_BU_EMIT(&out, ft_xmm(dst), src);
+            return (out - code);
+        case dt_X86_INS_PMOVSXWQ:
+            FT_LA_VEXT2XV_D_H_EMIT(&out, ft_xmm(dst), src);
+            return (out - code);
+        case dt_X86_INS_PMOVZXWQ:
+            FT_LA_VEXT2XV_DU_HU_EMIT(&out, ft_xmm(dst), src);
+            return (out - code);
+        default:
+            break;
+        }
+    }
+#endif
+
     switch (fields->id) {
     case dt_X86_INS_PMOVSXBW:
         FT_LA_VSLLWIL_H_B_EMIT(&out, ft_xmm(dst), src, 0);

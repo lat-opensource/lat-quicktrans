@@ -43,17 +43,17 @@ int main(void){uint64_t state=0x70123456789abcdeULL;unsigned cases=0;
   for(int i=0;i<32;i++)r[i]=state;r[reg]=value;r[31]=0;mem=value;uint64_t initial=r[reg];uint32_t code[32];
   int n=ft_emit_movbe_template(&f,0,0,code);uint64_t result=0;
   for(int i=0;i<w/8;i++)result|=((value>>(i*8))&255)<<(w-8-i*8);
-  assert(n==(isstore?(w==64?2:3):(w==64?(EXPECT_LATS?2:3):w==32?(EXPECT_LATS?3:4):4)));
+  assert(n==(isstore?(w==64?2:3):(w==64?(EXPECT_LOCAL?2:3):w==32?(EXPECT_LOCAL?3:4):4)));
   if(isstore)assert(mem==result&&r[reg]==initial);
   else {assert(mem==value);assert(r[reg]==(w==16?(initial&~65535ULL)|result:result));}
   cases++;
  }
- printf("actual MOVBE emission %u cases PASS LATS=%d\n",cases,EXPECT_LATS);
+ printf("actual MOVBE emission %u cases PASS local-sequence=%d\n",cases,EXPECT_LOCAL);
 }
 '''
 with tempfile.TemporaryDirectory() as d:
  c=Path(d)/'movbe.c';c.write_text(header+body+main)
- for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LATS=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LATS=0']),('user',['-DEXPECT_LATS=0'])]:
+ for label,defs in [('lats',['-DCONFIG_SOFTMMU=1','-DEXPECT_LOCAL=1']),('latu',['-DCONFIG_SOFTMMU=1','-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('latu-native',['-DQUICKTRANS_LATU=1','-DEXPECT_LOCAL=1']),('user',['-DEXPECT_LOCAL=0'])]:
   exe=Path(d)/label
   subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O2','-Werror','-fsanitize=undefined',*defs,str(c),'-o',str(exe)],check=True)
   subprocess.run([str(exe)],check=True)

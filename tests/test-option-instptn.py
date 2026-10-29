@@ -87,3 +87,11 @@ for token in ('ft_emit_direct_condition', 'case FT_SETCC_RM8:',
         print(f'missing direct condition emission: {token}', file=sys.stderr)
         sys.exit(1)
 print('option_instptn extended source checks: PASS')
+
+# The gap matcher initializes only the fields consumed by the pair matcher.
+pair_start = s.rindex('static void ft_analyze_direct_jcc_pair(')
+pair = s[pair_start:s.index('static bool ft_template_uses_x87_top(', pair_start)]
+allowed = {'kind', 'id', 'direct_cmp_lhs_gpr', 'direct_cmp_rhs_gpr',
+           'direct_cmp_width', 'direct_branch_kind', 'direct_bit_index_gpr',
+           'direct_bit_index_imm'}
+assert set(re.findall(r'jcc->(\w+)', pair)) <= allowed, 'gap trial needs newly accessed fields initialized'
