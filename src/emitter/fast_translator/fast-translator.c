@@ -391,6 +391,14 @@ static bool ft_lazy_mxcsr_enabled(void)
 }
 #endif
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+/* Translation-time mapping of the LATS option; no guest-side option load. */
+static bool ft_fast_masked_v_enabled(void)
+{
+    return option_fast_masked_v != 0;
+}
+#endif
+
 static int ft_lsenv_offset_of_tr_selector(ENV *env)
 {
     CPUX86State *cpu = (CPUX86State *)env->cpu_state;
@@ -1548,7 +1556,7 @@ static bool latx_fast_translate_sample_for_bench_impl(CPUArchState *env,
     stage_start = detail_stats ? ft_bench_now_ns() : 0;
     insn_emitted = emit_template_fields(fields, tb, fields->address,
                                         code + emitted);
-    if (!insn_emitted) {
+    if (!insn_emitted && !ft_emit_zero_code_allowed(fields)) {
         return false;
     }
     emitted += insn_emitted;
@@ -3398,7 +3406,7 @@ bool latx_fast_translate_tu_tb_cached(CPUArchState *env,
         }
         insn_emitted = emit_template_fields(fields, tb, fields->address,
                                             code + emitted);
-        if (!insn_emitted) {
+        if (!insn_emitted && !ft_emit_zero_code_allowed(fields)) {
             fprintf(stderr,
                     "[FT] tu-cached emit-fail index=%d pc=0x%lx id=%d "
                     "size=%u kind=%d\n",
@@ -3829,7 +3837,7 @@ static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
             insn_emitted = emit_template_fields(fields, tb, fields->address,
                                                 insn_code);
         }
-        if (!insn_emitted) {
+        if (!insn_emitted && !ft_emit_zero_code_allowed(fields)) {
             fprintf(stderr,
                     "[FT] fd-primary emit-fail index=%d pc=0x%lx id=%d "
                     "size=%u kind=%d\n",

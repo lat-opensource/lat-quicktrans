@@ -31,6 +31,18 @@ static void ft_soft_env_guard(uint32_t **out, FtSoftEnv *s,
                                lhs, rhs, &s->slow);
 }
 
+static void ft_soft_bcd_pop(uint32_t **out)
+{
+    FT_LA_LD_W_EMIT(out, la_t0, la_s0, lsenv_offset_of_top(lsenv));
+    FT_LA_BSTRPICK_D_EMIT(out, la_t0, la_t0, 2, 0);
+    FT_LA_ORI_EMIT(out, la_t1, la_zero, 1);
+    FT_LA_ADD_D_EMIT(out, la_t2, la_s0, la_t0);
+    FT_LA_ST_B_EMIT(out, la_t1, la_t2, lsenv_offset_of_tag_word(lsenv));
+    FT_LA_ADDI_W_EMIT(out, la_t1, la_t0, 1);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t1, 2, 0);
+    FT_LA_ST_W_EMIT(out, la_t1, la_s0, lsenv_offset_of_top(lsenv));
+}
+
 static void ft_emit_soft_memory_call(uint32_t **out, const FastTemplateFields *f,
                                      target_ulong pc, FtSoftEnv *s)
 {
@@ -45,29 +57,58 @@ static void ft_emit_soft_memory_call(uint32_t **out, const FastTemplateFields *f
     case FT_X87_FISTTP_M64: width = 64; break;
     default: return;
     }
+    if (f->kind == FT_X87_FBSTP &&
+        (!ft_offset_fits_imm12(lsenv_offset_of_top(lsenv)) ||
+         !ft_offset_fits_imm12(lsenv_offset_of_tag_word(lsenv)))) return;
     memset(s, 0, sizeof(*s));
     if (width) helper = (void *)ft_soft_fisttp_memory;
     int addr;
     uint32_t *start = *out;
     if (!ft_emit_rip_or_mem_addr(out, f, pc, &addr)) { *out = start; return; }
+    /* a2 survives the shared prologue; a1 receives the guest virtual address. */
+    bool expected_static = scs_enabled();
+    int preserved = expected_static ? la_a2 : la_a3;
+    if (!width) {
+        FT_LA_ADDI_D_EMIT(out, preserved, addr, ft_mem_access_offset(f, addr));
+    }
 #ifdef CONFIG_LATX_OPT_NOFP
     FT_LA_LD_W_EMIT(out, la_t4, la_s0, lsenv_offset_of_nofp(lsenv));
     ft_soft_env_guard(out, s, FT_BRANCH_BNE, la_t4, la_zero);
 #endif
-    /* a2 survives the shared prologue; a1 receives the guest virtual address. */
-    bool expected_static = scs_enabled();
-    int preserved = expected_static ? la_a2 : la_a3;
-    FT_LA_ADDI_D_EMIT(out, preserved, addr, ft_mem_access_offset(f, addr));
+    if (width) {
+        FT_LA_ADDI_D_EMIT(out, preserved, addr, ft_mem_access_offset(f, addr));
+    }
     bool static_context = ft_emit_nofp_helper_prologue(out);
     FT_LA_OR_EMIT(out, la_a1, preserved, la_zero);
     ft_emit_cpu_env_ptr(out, la_a0);
     if (width) FT_LA_ORI_EMIT(out, la_a2, la_zero, width);
     ft_emit_default_helper_call(out, helper, 1u << 0, static_context);
-    if (f->kind == FT_X87_FBSTP) {
-        ft_emit_cpu_env_ptr(out, la_a0);
-        ft_emit_default_helper_call(out, (void *)helper_fpop, 1u << 0, static_context);
-    }
     ft_emit_nofp_helper_epilogue(out, static_context);
+    if (!width) {
+        if (s->count) {
+            /* Keep the effective nofp branch. Share the default context
+             * instead of emitting a second inline register-save sequence. */
+            ft_emit_branch_placeholder(out, &s->finish, FT_BRANCH_B,
+                                       0, 0, &s->done);
+            ft_bind_branch_label(&s->slow, *out);
+            for (unsigned i = 0; i < s->count; ++i) {
+                ft_resolve_branch_fixup(&s->guard[i]);
+            }
+            static_context = ft_emit_default_helper_prologue(out, false);
+            FT_LA_OR_EMIT(out, la_a1, preserved, la_zero);
+            ft_emit_cpu_env_ptr(out, la_a0);
+            ft_emit_default_helper_call(out, helper, 1u << 0, static_context);
+            ft_emit_default_helper_epilogue(out, static_context, false);
+            ft_bind_branch_label(&s->done, *out);
+            ft_resolve_branch_fixup(&s->finish);
+        }
+        /* Pop only after the store helper returns, as in la_fpu_pop(). */
+        if (f->kind == FT_X87_FBSTP) {
+            ft_soft_bcd_pop(out);
+        }
+        s->active = true;
+        return;
+    }
     ft_emit_branch_placeholder(out, &s->finish, FT_BRANCH_B, 0, 0, &s->done);
     ft_bind_branch_label(&s->slow, *out);
     for (unsigned i = 0; i < s->count; ++i) ft_resolve_branch_fixup(&s->guard[i]);
@@ -140,18 +181,30 @@ static void ft_soft_env_status(uint32_t **out, int sw, int cw)
 
 static void ft_soft_env_regs(uint32_t **out, bool restore, bool fx, int offset)
 {
+    /* Keep the FX layout's measured schedule; hoist only for FSAVE/FRSTOR. */
+    if (!fx) FT_LA_LD_WU_EMIT(out, la_t0, la_s0, lsenv_offset_of_top(lsenv));
+    if (restore && !fx) FT_LA_SLLI_D_EMIT(out, la_t0, la_t0, 4);
     for (int i = 0; i < 8; ++i) {
         int pos = offset + i * (fx ? 16 : 10);
-        FT_LA_LD_WU_EMIT(out, la_t1, la_s0, lsenv_offset_of_top(lsenv));
-        FT_LA_ADDI_D_EMIT(out, la_t1, la_t1, i);
-        FT_LA_ANDI_EMIT(out, la_t1, la_t1, 7);
-        FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 4);
-        FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t1);
+        if (fx) FT_LA_LD_WU_EMIT(out, la_t1, la_s0, lsenv_offset_of_top(lsenv));
+        if (restore && !fx) {
+            /* The restored header has already limited TOP to 0..7. */
+            FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t0);
+        } else {
+            FT_LA_ADDI_D_EMIT(out, la_t1, fx ? la_t1 : la_t0, i);
+            FT_LA_ANDI_EMIT(out, la_t1, la_t1, 7);
+            FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 4);
+            FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t1);
+        }
         if (restore) {
             FT_LA_LD_D_EMIT(out, la_t2, la_t4, pos);
             FT_LA_LD_HU_EMIT(out, la_t3, la_t4, pos + 8);
             FT_LA_ST_D_EMIT(out, la_t2, la_t1, lsenv_offset_of_fpr(lsenv, 0));
             FT_LA_ST_H_EMIT(out, la_t3, la_t1, lsenv_offset_of_fpr(lsenv, 0) + 8);
+            if (!fx && i != 7) {
+                FT_LA_ADDI_D_EMIT(out, la_t0, la_t0, 16);
+                FT_LA_ANDI_EMIT(out, la_t0, la_t0, 0x70);
+            }
         } else {
             FT_LA_LD_D_EMIT(out, la_t2, la_t1, lsenv_offset_of_fpr(lsenv, 0));
             FT_LA_LD_HU_EMIT(out, la_t3, la_t1, lsenv_offset_of_fpr(lsenv, 0) + 8);
@@ -161,26 +214,90 @@ static void ft_soft_env_regs(uint32_t **out, bool restore, bool fx, int offset)
     }
 }
 
-static void ft_soft_env_header(uint32_t **out, bool restore, bool fx, bool data32)
+/* Expand the saved tag bits into eight byte fields, then store once.
+ * Like the legacy fast path, t0 holds the input; t1/t2 are scratch. */
+static void ft_soft_env_restore_tags(uint32_t **out, bool fx)
+{
+    /* The combined FX changes reduced code size but regressed execution in
+     * the measured workloads. Retain the original FX instruction sequence. */
+    if (fx) {
+        FT_LA_XORI_EMIT(out, la_t0, la_t0, 0xff);
+        for (int i = 0; i < 8; ++i) {
+            FT_LA_ANDI_EMIT(out, la_t1, la_t0, 1);
+            FT_LA_ST_B_EMIT(out, la_t1, la_s0, lsenv_offset_of_tag_word(lsenv) + i);
+            FT_LA_SRLI_D_EMIT(out, la_t0, la_t0, 1);
+        }
+        return;
+    }
+    /* Legacy tags are empty exactly when both bits of their pair are set.
+     * Compute all eight predicates together before expanding them to bytes. */
+    FT_LA_SRLI_D_EMIT(out, la_t1, la_t0, 1);
+    FT_LA_AND_EMIT(out, la_t0, la_t0, la_t1);
+    FT_LA_OR_EMIT(out, la_t2, la_zero, la_zero);
+    for (int i = 0; i < 8; ++i) {
+        FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t0, 2 * i, 2 * i);
+        FT_LA_BSTRINS_D_EMIT(out, la_t2, la_t1, 8 * i + 7, 8 * i);
+    }
+    FT_LA_ST_D_EMIT(out, la_t2, la_s0, lsenv_offset_of_tag_word(lsenv));
+}
+
+/* FXRSTOR follows the legacy soft-FPU restore ordering. In particular the
+ * x87 control word updates software status only: host FCSR is restored from
+ * MXCSR later, under the existing lazy-MXCSR policy. */
+static void ft_soft_env_fxrestore_fpu(uint32_t **out)
+{
+    FT_LA_LD_D_EMIT(out, la_t3, la_t4, 0);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t0, la_t3, 15, 0);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t3, 31, 16);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t2, la_t3, 39, 32);
+    FT_LA_ST_H_EMIT(out, la_t0, la_s0, lsenv_offset_of_control_word(lsenv));
+    ft_soft_env_status(out, la_t1, la_t0);
+
+    int status = lsenv_offset_of_fp_status(lsenv);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t1, la_t0, 11, 10);
+    ft_emit_store_env(out, la_t1,
+        status + offsetof(float_status, float_rounding_mode), FT_LA_OPCODE_ST_B);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t1, la_t0, 9, 8);
+    /* Legacy PC mapping: 00/01 -> 2, 10 -> 1, 11 -> 0. */
+    FT_LA_SLTUI_EMIT(out, la_t3, la_t1, 1);
+    FT_LA_OR_EMIT(out, la_t1, la_t1, la_t3);
+    FT_LA_XORI_EMIT(out, la_t1, la_t1, 3);
+    ft_emit_store_env(out, la_t1,
+        status + offsetof(float_status, floatx80_rounding_precision), FT_LA_OPCODE_ST_B);
+
+    FT_LA_OR_EMIT(out, la_t0, la_zero, la_zero);
+    FT_LA_XORI_EMIT(out, la_t2, la_t2, 0xff);
+    for (int i = 7; i >= 0; --i) {
+        FT_LA_BSTRPICK_D_EMIT(out, la_t1, la_t2, i, i);
+        FT_LA_BSTRINS_D_EMIT(out, la_t0, la_t1, 8 * i + 7, 8 * i);
+    }
+    FT_LA_ST_D_EMIT(out, la_t0, la_s0, lsenv_offset_of_tag_word(lsenv));
+
+    FT_LA_LD_WU_EMIT(out, la_t0, la_s0, lsenv_offset_of_top(lsenv));
+    for (int i = 0; i < 8; ++i) {
+        FT_LA_LD_D_EMIT(out, la_t2, la_t4, 32 + 16 * i);
+        FT_LA_LD_HU_EMIT(out, la_t3, la_t4, 40 + 16 * i);
+        FT_LA_ADDI_D_EMIT(out, la_t1, la_t0, i);
+        FT_LA_ANDI_EMIT(out, la_t1, la_t1, 7);
+        FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 4);
+        FT_LA_ADD_D_EMIT(out, la_t1, la_s0, la_t1);
+        FT_LA_ST_D_EMIT(out, la_t2, la_t1, lsenv_offset_of_fpr(lsenv, 0));
+        FT_LA_ST_H_EMIT(out, la_t3, la_t1, lsenv_offset_of_fpr(lsenv, 0) + 8);
+    }
+}
+
+static void ft_soft_env_header(uint32_t **out, bool restore, bool fx, bool data32,
+                               bool compact_control)
 {
     int step = fx || !data32 ? 2 : 4;
     if (restore) {
         FT_LA_LD_HU_EMIT(out, la_t0, la_t4, 0);
         FT_LA_ST_H_EMIT(out, la_t0, la_s0, lsenv_offset_of_control_word(lsenv));
-        ft_emit_x87_soft_control(out);
+        ft_emit_x87_soft_control(out, compact_control);
         FT_LA_LD_HU_EMIT(out, la_t1, la_t4, step);
         ft_soft_env_status(out, la_t1, la_t0);
         FT_LA_LD_HU_EMIT(out, la_t0, la_t4, step * 2);
-        if (fx) FT_LA_XORI_EMIT(out, la_t0, la_t0, 0xff);
-        for (int i = 0; i < 8; ++i) {
-            FT_LA_ANDI_EMIT(out, la_t1, la_t0, fx ? 1 : 3);
-            if (!fx) {
-                FT_LA_XORI_EMIT(out, la_t1, la_t1, 3);
-                FT_LA_SLTUI_EMIT(out, la_t1, la_t1, 1);
-            }
-            FT_LA_ST_B_EMIT(out, la_t1, la_s0, lsenv_offset_of_tag_word(lsenv) + i);
-            FT_LA_SRLI_D_EMIT(out, la_t0, la_t0, fx ? 1 : 2);
-        }
+        ft_soft_env_restore_tags(out, fx);
         return;
     }
     ft_soft_env_tags(out, fx);
@@ -212,50 +329,45 @@ static void ft_soft_env_header(uint32_t **out, bool restore, bool fx, bool data3
     }
 }
 
-/* Soft-FPU FXRSTOR synchronizes only host rounding.  Exception flags and
- * enables live in sse_status and must not be overwritten in the host FCSR. */
+/* Match the legacy FXRSTOR lazy update, including flags and causes. */
 static void ft_emit_lats_softfpu_mxcsr(uint32_t **out, int mxcsr)
 {
-    FT_LA_BSTRPICK_W_EMIT(out, la_t0, mxcsr, 14, 13);
-    FT_LA_ANDI_EMIT(out, la_t2, la_t0, 1);
-    FT_LA_SLLI_W_EMIT(out, la_t2, la_t2, 1);
-    FT_LA_XOR_EMIT(out, la_t0, la_t0, la_t2);
-    FT_LA_MOVFCSR2GR_EMIT(out, la_t2, 0);
-    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t0, FCSR_OFF_RM + 1, FCSR_OFF_RM);
-    FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t2);
+    FastBranchLabel done = {0};
+    FastBranchFixup skip;
+    if (option_lazy_mxcsr) {
+        ft_emit_load_env(out, la_t0, offsetof(CPUX86State, old_mxcsr),
+                         FT_LA_OPCODE_LD_WU);
+        ft_emit_store_env(out, mxcsr, offsetof(CPUX86State, old_mxcsr),
+                          FT_LA_OPCODE_ST_W);
+        ft_emit_branch_placeholder(out, &skip, FT_BRANCH_BEQ,
+                                   la_t0, mxcsr, &done);
+    }
+    ft_emit_lats_soft_fcsr_from_mxcsr(out, mxcsr);
+    if (option_lazy_mxcsr) {
+        ft_bind_branch_label(&done, *out);
+        ft_resolve_branch_fixup(&skip);
+    }
 }
 
 /* Match the software fields maintained by cpu_set_mxcsr and FXSAVE.
  * mxcsr is t1; keep the memory address in t4. */
 static void ft_soft_env_sse_status(uint32_t **out, bool restore)
 {
+    /* Legacy LATS fast FXSAVE saves MXCSR updated from hardware FCSR only.
+     * tcg_enabled() is also true for LATS; it cannot select that save policy.
+     * Retain the existing software-state update for FXRSTOR. */
+    if (!restore || !tcg_enabled()) return;
     int status = offsetof(CPUX86State, sse_status);
-    if (restore) {
-        if (!tcg_enabled()) return;
-        FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 14, 13);
-        ft_emit_store_env(out, la_t0, status + offsetof(float_status, float_rounding_mode), FT_LA_OPCODE_ST_B);
-        FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 5, 2);
-        FT_LA_SLLI_W_EMIT(out, la_t0, la_t0, 1);
-        FT_LA_BSTRINS_W_EMIT(out, la_t0, la_t1, 0, 0);
-        ft_emit_store_env(out, la_t0, status + offsetof(float_status, float_exception_flags), FT_LA_OPCODE_ST_H);
-        FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 6, 6);
-        ft_emit_store_env(out, la_t0, status + offsetof(float_status, flush_inputs_to_zero), FT_LA_OPCODE_ST_B);
-        FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 15, 15);
-        ft_emit_store_env(out, la_t0, status + offsetof(float_status, flush_to_zero), FT_LA_OPCODE_ST_B);
-    } else {
-        ft_emit_load_env(out, la_t0, status + offsetof(float_status, float_exception_flags), FT_LA_OPCODE_LD_BU);
-        FT_LA_ANDI_EMIT(out, la_t2, la_t0, 0x1e);
-        FT_LA_SLLI_W_EMIT(out, la_t2, la_t2, 1);
-        FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t0, 0, 0);
-        FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
-        FT_LA_ANDI_EMIT(out, la_t0, la_t0, float_flag_output_denormal);
-        FastBranchLabel done = {0};
-        FastBranchFixup fix;
-        ft_emit_branch_placeholder(out, &fix, FT_BRANCH_BEQ, la_t0, la_zero, &done);
-        FT_LA_ORI_EMIT(out, la_t1, la_t1, 0x30); /* MXCSR underflow/inexact */
-        ft_bind_branch_label(&done, *out);
-        ft_resolve_branch_fixup(&fix);
-    }
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 14, 13);
+    ft_emit_store_env(out, la_t0, status + offsetof(float_status, float_rounding_mode), FT_LA_OPCODE_ST_B);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 5, 2);
+    FT_LA_SLLI_W_EMIT(out, la_t0, la_t0, 1);
+    FT_LA_BSTRINS_W_EMIT(out, la_t0, la_t1, 0, 0);
+    ft_emit_store_env(out, la_t0, status + offsetof(float_status, float_exception_flags), FT_LA_OPCODE_ST_H);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 6, 6);
+    ft_emit_store_env(out, la_t0, status + offsetof(float_status, flush_inputs_to_zero), FT_LA_OPCODE_ST_B);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, la_t1, 15, 15);
+    ft_emit_store_env(out, la_t0, status + offsetof(float_status, flush_to_zero), FT_LA_OPCODE_ST_B);
 }
 
 static bool ft_emit_soft_environment(uint32_t **out, const FastTemplateFields *f,
@@ -276,7 +388,12 @@ static bool ft_emit_soft_environment(uint32_t **out, const FastTemplateFields *f
     FT_LA_ANDI_EMIT(out, la_t0, la_t4, 4095);
     ft_emit_li32(out, la_t1, 4096 - bytes);
     ft_soft_env_guard(out, s, FT_BRANCH_BLTU, la_t1, la_t0);
-    ft_emit_load_env(out, la_t0, ft_lsenv_offset_of_cr0(lsenv), FT_LA_OPCODE_LD_D);
+    if (restore && format == 1 &&
+        ft_offset_fits_imm12(ft_lsenv_offset_of_cr0(lsenv))) {
+        FT_LA_LD_D_EMIT(out, la_t0, la_s0, ft_lsenv_offset_of_cr0(lsenv));
+    } else {
+        ft_emit_load_env(out, la_t0, ft_lsenv_offset_of_cr0(lsenv), FT_LA_OPCODE_LD_D);
+    }
     FT_LA_ANDI_EMIT(out, la_t0, la_t0, CR0_NE_MASK);
     ft_soft_env_guard(out, s, FT_BRANCH_BEQ, la_t0, la_zero);
     if (fx) {
@@ -290,8 +407,12 @@ static bool ft_emit_soft_environment(uint32_t **out, const FastTemplateFields *f
         FT_LA_AND_EMIT(out, la_t0, la_t0, la_t1);
         ft_soft_env_guard(out, s, FT_BRANCH_BNE, la_t0, la_zero);
     }
-    ft_soft_env_header(out, restore, fx, data32);
-    if (format) ft_soft_env_regs(out, restore, fx, fx ? 32 : 14 << data32);
+    if (fx && restore) {
+        ft_soft_env_fxrestore_fpu(out);
+    } else {
+        ft_soft_env_header(out, restore, fx, data32, format == 1);
+        if (format) ft_soft_env_regs(out, restore, fx, fx ? 32 : 14 << data32);
+    }
     if (fx) {
         if (restore) {
             FT_LA_LD_WU_EMIT(out, la_t1, la_t4, 24);

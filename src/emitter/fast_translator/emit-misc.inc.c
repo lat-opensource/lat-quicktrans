@@ -4,14 +4,53 @@
  * SPDX-License-Identifier: MIT
  */
 
+/* Zero words are success only for legacy LATS no-code instructions.
+ * Keep this check on the zero-result branch of callers: ordinary emitters
+ * still return zero on failure. LATU keeps its existing one-word NOPs.
+ */
+static inline bool ft_emit_zero_code_allowed(const FastTemplateFields *fields)
+{
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    switch (fields->kind) {
+    case FT_ENDBR32:
+    case FT_ENDBR64:
+        return true;
+    case FT_PAUSE:
+        return option_pause != 0;
+    case FT_NOP_MULTI:
+        if (fields->id == dt_X86_INS_FSETPM) {
+            return true;
+        }
+        /* FNOP shares this template, but its soft-FPU legacy handler
+         * performs an exception check. Do not classify it as no-code.
+         */
+        if (fields->id != dt_X86_INS_NOP) {
+            return false;
+        }
+#ifdef CONFIG_LATX_TU
+        return option_pause != 0;
+#else
+        return true;
+#endif
+    default:
+        return false;
+    }
+#else
+    (void)fields;
+    return false;
+#endif
+}
+
 static int ft_emit_nop_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
 
-    (void)fields;
     (void)tb;
     (void)pc;
 
+    if (ft_emit_zero_code_allowed(fields)) {
+        return 0;
+    }
     FT_LA_ORI_EMIT(&out, la_zero, la_zero, 0);
     return (out - code);
 }

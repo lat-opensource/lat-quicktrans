@@ -506,6 +506,86 @@ static void ft_x87_helper_compare_reg(CPUX86State *env, int st_index, int mode)
     }
 }
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+/* Match the legacy classifier's order: an ST0 NaN precedes checking the
+ * second operand for an invalid encoding. Quiet comparisons still check
+ * both operands for sNaN. Only fast-mode comparison wrappers call this. */
+static int ft_x87_legacy_unordered_kind(floatx80 x)
+{
+    unsigned exponent = x.high & 0x7fff;
+    if (exponent && !(x.low >> 63)) return 2;
+    return exponent == 0x7fff && (x.low << 1) != 0;
+}
+
+static bool ft_x87_legacy_snan(floatx80 x)
+{
+    return (x.high & 0x7fff) == 0x7fff &&
+           !(x.low & (UINT64_C(1) << 62)) && (x.low << 2) != 0;
+}
+
+static bool ft_x87_fast_unordered(CPUX86State *env, floatx80 a,
+                                   floatx80 b, bool quiet, bool flags)
+{
+    int kind = ft_x87_legacy_unordered_kind(a);
+    if (!kind) kind = ft_x87_legacy_unordered_kind(b);
+    if (!kind) return false;
+    if (flags) {
+        env->cc_src |= CC_C | CC_P | CC_Z;
+#ifdef CONFIG_LATX_OPT_EFLAGS
+        __lbt_mtflag_all(env->cc_src);
+#endif
+    } else {
+        env->fpus |= 0x4500;
+    }
+    if (!quiet || kind == 2 || ft_x87_legacy_snan(a) || ft_x87_legacy_snan(b)) {
+        env->fp_status.float_exception_flags |= 1;
+        env->fpus |= 1;
+        if (!(env->fpuc & 1)) env->fpus |= 0x8080;
+    }
+    return true;
+}
+#endif
+
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+/* Keep the same load/compare helpers, but enter host context only once.
+ * Pop remains generated code after the comparison returns, like LATS. */
+static void ft_x87_helper_compare_m32_fast(CPUX86State *env, uint32_t bits)
+{
+    helper_flds_FT0(env, bits);
+    if (!ft_x87_fast_unordered(env, env->fpregs[env->fpstt].d, env->ft0, false, false))
+        helper_fcom_ST0_FT0(env);
+}
+
+static void ft_x87_helper_compare_m64_fast(CPUX86State *env, uint64_t bits)
+{
+    helper_fldl_FT0(env, bits);
+    if (!ft_x87_fast_unordered(env, env->fpregs[env->fpstt].d, env->ft0, false, false))
+        helper_fcom_ST0_FT0(env);
+}
+
+static void ft_x87_helper_compare_int_fast(CPUX86State *env, int32_t value)
+{
+    helper_fildl_FT0(env, value);
+    if (!ft_x87_fast_unordered(env, env->fpregs[env->fpstt].d, env->ft0, false, false))
+        helper_fcom_ST0_FT0(env);
+}
+
+static void ft_x87_helper_compare_reg_fast(CPUX86State *env, int st_index, int mode)
+{
+    unsigned top = env->fpstt;
+    if (ft_x87_fast_unordered(env, env->fpregs[top].d,
+                             env->fpregs[(top + st_index) & 7].d,
+                             mode & 1, false)) {
+        for (int pops = mode >> 1; pops; --pops) helper_fpop(env);
+        return;
+    }
+    unsigned c1 = env->fpus & (1u << 9);
+    ft_x87_helper_compare_reg(env, st_index, mode);
+    /* The legacy fast comparison preserves C1, including its invalid path. */
+    env->fpus = (env->fpus & ~(1u << 9)) | c1;
+}
+#endif
+
 static void ft_x87_helper_unary(CPUX86State *env, int negate)
 {
     if (env->fptags[env->fpstt]) {
@@ -646,6 +726,27 @@ static void ft_x87_helper_fcomi(CPUX86State *env, int st_index, int mode)
     }
 #undef FT_X87_FLAGS
 }
+
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+static void ft_x87_helper_ftst_fast(CPUX86State *env)
+{
+    floatx80 zero = { .low = 0, .high = 0 };
+    if (!ft_x87_fast_unordered(env, env->fpregs[env->fpstt].d, zero, false, false))
+        ft_x87_helper_ftst(env);
+}
+
+static void ft_x87_helper_fcomi_fast(CPUX86State *env, int st_index, int mode)
+{
+    unsigned top = env->fpstt;
+    if (ft_x87_fast_unordered(env, env->fpregs[top].d,
+                             env->fpregs[(top + st_index) & 7].d,
+                             mode & 1, true)) {
+        if (mode & 2) helper_fpop(env);
+        return;
+    }
+    ft_x87_helper_fcomi(env, st_index, mode);
+}
+#endif
 
 static double ft_x87_hard_get_st(CPUX86State *env, unsigned int st_index)
 {

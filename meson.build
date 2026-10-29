@@ -265,3 +265,33 @@ code_space_threads_test = executable(
   dependencies: dependency('threads'),
 )
 test('quicktrans_code_space_threads', code_space_threads_test)
+
+test(
+  'quicktrans_x87_fast_policy',
+  python,
+  args: [files('tests/test-x87-fast-policy.py')],
+)
+
+test(
+  'quicktrans_lats_fast_masked_v',
+  python,
+  args: [files('tests/test-lats-fast-masked-v.py')],
+)
+
+test(
+  'quicktrans_lats_zero_code',
+  python,
+  args: [files('tests/test-lats-zero-code.py')],
+)
+
+test('x87-env-transfer', python,
+  args: [files('tests/test-x87-env-transfer.py')],
+)
+
+test('static-helper-call', python,
+  args: [files('tests/test-static-helper-call.py')],
+)
+
+test('x87-integer-inline-context', python,
+  args: [files('tests/test-x87-integer-inline-context.py')],
+)

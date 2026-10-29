@@ -320,8 +320,40 @@ static bool ft_emit_fast_system_syscall(uint32_t **out, TranslationBlock *tb,
 }
 #endif
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+/* LATS soft-FPU keeps guest masks in hflags. Hardware enables are zero,
+ * except V when its masked-invalid recovery option is enabled.
+ * Clobbers t0/t2/t3, preserving the environment memory address in t4. */
+static void ft_emit_lats_soft_fcsr_from_mxcsr(uint32_t **out, int mxcsr)
+{
+    FT_LA_BSTRPICK_W_EMIT(out, la_t0, mxcsr, 14, 13);
+    FT_LA_ANDI_EMIT(out, la_t2, la_t0, 1);
+    FT_LA_SLLI_W_EMIT(out, la_t2, la_t2, 1);
+    FT_LA_XOR_EMIT(out, la_t0, la_t0, la_t2);
+    FT_LA_SLLI_W_EMIT(out, la_t2, la_t0, FCSR_OFF_RM);
+    FT_LA_SLLI_W_EMIT(out, la_t3, mxcsr, 2);
+    FT_LA_BITREV_4B_EMIT(out, la_t3, la_t3);
+    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, 27, 24);
+    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, 19, 16);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 0, 0);
+    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, 28, 28);
+    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, 20, 20);
+    if (ft_fast_masked_v_enabled()) {
+        FT_LA_ORI_EMIT(out, la_t2, la_t2, 1u << FCSR_OFF_EN_V);
+    }
+    FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t2);
+}
+#endif
+
 static void ft_emit_fcsr_from_mxcsr(uint32_t **out, int mxcsr)
 {
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (option_soft_fpu) {
+        ft_emit_lats_soft_fcsr_from_mxcsr(out, mxcsr);
+        return;
+    }
+#endif
+
     FT_LA_MOVFCSR2GR_EMIT(out, la_t2, 0);
     FT_LA_BSTRINS_W_EMIT(out, la_t2, la_zero, FCSR_OFF_EN_V,
                          FCSR_OFF_EN_I);
@@ -449,6 +481,17 @@ static void ft_emit_mxcsr_flags_from_fcsr(uint32_t **out, int mxcsr)
                           FCSR_OFF_FLAGS_I);
     FT_LA_SLLI_D_EMIT(out, la_t4, la_t4, 5);
     FT_LA_OR_EMIT(out, la_t3, la_t3, la_t4);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    if (option_soft_fpu) {
+        /* Legacy FXSAVE/STMXCSR replace the hardware-backed flag bits.
+         * OR would retain a software IE set by masked-invalid recovery
+         * after the handler has cleared the hardware flag. Preserve DE. */
+        FT_LA_BSTRINS_W_EMIT(out, mxcsr, la_t3, 0, 0);
+        FT_LA_SRLI_W_EMIT(out, la_t3, la_t3, 2);
+        FT_LA_BSTRINS_W_EMIT(out, mxcsr, la_t3, 5, 2);
+        return;
+    }
+#endif
     FT_LA_OR_EMIT(out, mxcsr, mxcsr, la_t3);
 }
 
@@ -490,7 +533,7 @@ static bool ft_emit_lats_static_helper_context(uint32_t **out,
         }
     }
 
-    ft_emit_lats_static_call(out, target, la_t0);
+    ft_emit_lats_static_call(out, target, la_t0, false);
     return true;
 }
 

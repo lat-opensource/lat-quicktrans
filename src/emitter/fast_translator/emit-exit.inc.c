@@ -181,7 +181,7 @@ static void ft_emit_lats_static_jump(uint32_t **out, ADDR target,
 }
 
 static void ft_emit_lats_static_call(uint32_t **out, ADDR target,
-                                     int scratch_reg)
+                                     int scratch_reg, bool patchable)
 {
     int64_t offset = ((intptr_t)target - (intptr_t)*out) >> 2;
 
@@ -193,8 +193,11 @@ static void ft_emit_lats_static_call(uint32_t **out, ADDR target,
         FT_LA_JIRL_EMIT(out, la_ra, scratch_reg, lower);
     } else {
         FT_LA_BL_EMIT(out, offset);
-        /* LATS link/unlink always saves and restores an eight-byte slot. */
-        FT_LA_NOP_EMIT(out);
+        if (patchable) {
+            /* TB link/unlink saves and restores an eight-byte slot.
+             * Fixed helper calls use the legacy one-instruction BL. */
+            FT_LA_NOP_EMIT(out);
+        }
     }
 }
 
@@ -244,7 +247,7 @@ static void ft_emit_lats_direct_link_exit(TranslationBlock *tb,
     tb->jmp_reset_offset[succ_id] = off + 8;
     if (option_link_opt) {
         tb->link_opt[succ_id] = 1;
-        ft_emit_lats_static_call(out, cs_target, scratch_reg);
+        ft_emit_lats_static_call(out, cs_target, scratch_reg, true);
     } else {
         FT_LA_B_EMIT(out, 2);
         FT_LA_NOP_EMIT(out);
