@@ -111,6 +111,44 @@ static void ft_emit_string_load_bytes(uint32_t **out, int dst, int addr,
     }
 }
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+static bool ft_string_lats_wide_access(int id)
+{
+    return id == dt_X86_INS_MOVSW ||
+           id == dt_X86_INS_MOVSD ||
+           id == dt_X86_INS_LODSQ ||
+           id == dt_X86_INS_STOSQ ||
+           id == dt_X86_INS_CMPSQ ||
+           id == dt_X86_INS_SCASQ;
+}
+
+/* HAMT uses native-width accesses in the legacy string translator too.
+ * Read the complete source before storing, including overlapping operands. */
+static void ft_emit_string_load_wide(uint32_t **out, int dst, int addr,
+                                     int bytes)
+{
+    if (bytes == 2) {
+        FT_LA_LD_HU_EMIT(out, dst, addr, 0);
+    } else if (bytes == 4) {
+        FT_LA_LD_WU_EMIT(out, dst, addr, 0);
+    } else {
+        FT_LA_LD_D_EMIT(out, dst, addr, 0);
+    }
+}
+
+static void ft_emit_string_store_wide(uint32_t **out, int src, int addr,
+                                      int bytes)
+{
+    if (bytes == 2) {
+        FT_LA_ST_H_EMIT(out, src, addr, 0);
+    } else if (bytes == 4) {
+        FT_LA_ST_W_EMIT(out, src, addr, 0);
+    } else {
+        FT_LA_ST_D_EMIT(out, src, addr, 0);
+    }
+}
+#endif
+
 static void ft_emit_string_store_acc(uint32_t **out, int bytes)
 {
     switch (bytes) {
@@ -194,40 +232,135 @@ static void ft_emit_string_adjust(uint32_t **out,
 
 static bool ft_emit_string_body(uint32_t **out,
                                 const FastTemplateFields *fields,
-                                int bytes)
+                                int bytes, TranslationBlock *tb)
 {
     int id = fields->id;
 
+    (void)tb;
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    /* Match the legacy HAMT MOVSQ access width.  Load the complete source
+     * before storing so overlapping operands retain MOVSQ semantics.
+     * Keep the user-mode mixed-page store handling on its existing path. */
+    if (id == dt_X86_INS_MOVSQ) {
+        bool long_mode = tb && (tb->flags & HF_CS64_MASK);
+        bool flat64 = long_mode && !fields->addr32;
+        int src = la_t3;
+        int dst = la_t4;
+
+        /* Long mode ignores DS/ES/SS/CS bases.  FS/GS still contribute
+         * their base after the address-size truncation. */
+        if (long_mode && fields->addr32) {
+            FT_LA_BSTRPICK_D_EMIT(out, src, ft_gpr(rsi_index), 31, 0);
+            if (fields->segment == fs_index || fields->segment == gs_index) {
+                int offset = offsetof(CPUX86State,
+                                      segs[fields->segment].base);
+                if (!ft_fits_simm12(offset)) {
+                    return false;
+                }
+                ft_emit_load_env(out, dst, offset, FT_LA_OPCODE_LD_D);
+                FT_LA_ADD_D_EMIT(out, src, src, dst);
+            }
+            FT_LA_LD_D_EMIT(out, la_t0, src, 0);
+            FT_LA_BSTRPICK_D_EMIT(out, dst, ft_gpr(rdi_index), 31, 0);
+            FT_LA_ST_D_EMIT(out, la_t0, dst, 0);
+            return true;
+        }
+        if (flat64 && fields->segment != fs_index &&
+            fields->segment != gs_index) {
+            src = ft_gpr(rsi_index);
+        } else if (!ft_emit_string_addr(out, src, ft_gpr(rsi_index),
+                                       fields->segment)) {
+            return false;
+        }
+        FT_LA_LD_D_EMIT(out, la_t0, src, 0);
+        if (flat64) {
+            dst = ft_gpr(rdi_index);
+        } else if (!ft_emit_string_addr(out, dst, ft_gpr(rdi_index),
+                                       es_index)) {
+            return false;
+        }
+        FT_LA_ST_D_EMIT(out, la_t0, dst, 0);
+        return true;
+    }
+#endif
+
+    int src_addr = la_t3;
+    int dst_addr = la_t4;
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    bool direct_addr = ft_string_lats_wide_access(id) && tb &&
+                       (tb->flags & HF_CS64_MASK) && !fields->addr32;
+
+    /* In long mode only FS/GS retain a source segment base.  Keep all
+     * other modes and address-size overrides on the existing path. */
+    if (direct_addr) {
+        if (fields->segment != fs_index && fields->segment != gs_index) {
+            src_addr = ft_gpr(rsi_index);
+        }
+        dst_addr = ft_gpr(rdi_index);
+    }
+#endif
+
     if (ft_string_is_movs(id) || ft_string_is_cmps(id) ||
         ft_string_is_lods(id)) {
-        if (!ft_emit_string_addr(out, la_t3, ft_gpr(rsi_index),
+        if (src_addr == la_t3 &&
+            !ft_emit_string_addr(out, src_addr, ft_gpr(rsi_index),
                                  fields->segment)) {
             return false;
         }
-        ft_emit_string_load_bytes(out, la_t0, la_t3, bytes);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (ft_string_lats_wide_access(id)) {
+            ft_emit_string_load_wide(out,
+                id == dt_X86_INS_LODSQ ? ft_gpr(rax_index) : la_t0,
+                src_addr, bytes);
+        } else
+#endif
+        ft_emit_string_load_bytes(out, la_t0, src_addr, bytes);
     }
 
     if (ft_string_is_movs(id) || ft_string_is_stos(id) ||
         ft_string_is_cmps(id) || ft_string_is_scas(id)) {
-        if (!ft_emit_string_addr(out, la_t4, ft_gpr(rdi_index), es_index)) {
+        if (dst_addr == la_t4 &&
+            !ft_emit_string_addr(out, dst_addr, ft_gpr(rdi_index), es_index)) {
             return false;
         }
     }
 
     if (ft_string_is_movs(id)) {
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (ft_string_lats_wide_access(id)) {
+            ft_emit_string_store_wide(out, la_t0, dst_addr, bytes);
+            return true;
+        }
+#endif
         return ft_emit_store_addr_bytes(out, fields->address, la_t4, 0,
                                         la_t0, bytes);
     }
     if (ft_string_is_stos(id)) {
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (ft_string_lats_wide_access(id)) {
+            ft_emit_string_store_wide(out, ft_gpr(rax_index), dst_addr, bytes);
+            return true;
+        }
+#endif
         return ft_emit_store_addr_bytes(out, fields->address, la_t4, 0,
                                         ft_gpr(rax_index), bytes);
     }
     if (ft_string_is_lods(id)) {
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (id == dt_X86_INS_LODSQ) {
+            return true;
+        }
+#endif
         ft_emit_string_store_acc(out, bytes);
         return true;
     }
     if (ft_string_is_cmps(id)) {
-        ft_emit_string_load_bytes(out, la_t1, la_t4, bytes);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (ft_string_lats_wide_access(id)) {
+            ft_emit_string_load_wide(out, la_t1, dst_addr, bytes);
+        } else
+#endif
+        ft_emit_string_load_bytes(out, la_t1, dst_addr, bytes);
         if (!fields->skip_flags) {
             ft_emit_raw(out, ft_gpr2(ft_string_x86sub_op(bytes), la_t0,
                                     la_t1));
@@ -236,11 +369,22 @@ static bool ft_emit_string_body(uint32_t **out,
         return true;
     }
     if (ft_string_is_scas(id)) {
-        ft_emit_string_load_bytes(out, la_t1, la_t4, bytes);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (ft_string_lats_wide_access(id)) {
+            ft_emit_string_load_wide(out, la_t1, dst_addr, bytes);
+        } else
+#endif
+        ft_emit_string_load_bytes(out, la_t1, dst_addr, bytes);
         if (!fields->skip_flags) {
             ft_emit_raw(out, ft_gpr2(ft_string_x86sub_op(bytes),
                                     ft_gpr(rax_index), la_t1));
         }
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (id == dt_X86_INS_SCASQ) {
+            FT_LA_XOR_EMIT(out, la_t0, ft_gpr(rax_index), la_t1);
+            return true;
+        }
+#endif
         ft_emit_string_load_acc_low(out, la_t0, bytes);
         FT_LA_XOR_EMIT(out, la_t0, la_t0, la_t1);
         return true;
@@ -289,7 +433,7 @@ static int ft_emit_string_template(const FastTemplateFields *fields, Translation
     }
 
     ft_bind_branch_label(&loop, out);
-    if (!ft_emit_string_body(&out, fields, bytes) ||
+    if (!ft_emit_string_body(&out, fields, bytes, tb) ||
         !ft_emit_string_step(&out, bytes)) {
         return 0;
     }

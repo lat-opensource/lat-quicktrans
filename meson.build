@@ -279,6 +279,12 @@ test(
 )
 
 test(
+  'quicktrans_movsq_address',
+  python,
+  args: [files('tests/test-movsq-address.py')],
+)
+
+test(
   'quicktrans_and_immediate',
   python,
   args: [files('tests/test-and-immediate.py')],
