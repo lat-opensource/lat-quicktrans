@@ -923,7 +923,16 @@ static bool ft_emit_li32(uint32_t **code, int rd, uint32_t value)
         return true;
     }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if ((int32_t)value >= -2048 && (int32_t)value < 0) {
+        FT_LA_ADDI_D_EMIT(code, rd, la_zero, (int32_t)value);
+        return true;
+    }
+#endif
     FT_LA_LU12I_W_EMIT(code, rd, ft_simm20_field(value >> 12));
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (value & 0xfff)
+#endif
     FT_LA_ORI_EMIT(code, rd, rd, value & 0xfff);
     return true;
 }

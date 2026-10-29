@@ -2820,7 +2820,14 @@ static bool ft_template_uses_mmx(const FastTemplateFields *fields)
     FastTemplateKind kind = fields->kind;
 
     if (kind == FT_PUNPCK_XMM_XMMM) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* UNPCKLPS/HPS (0f 14/15) have no 66 prefix but operate on XMM. */
+        return fields->prefix0 == 0 && fields->prefix2 == 0 &&
+               ((fields->opcode1 >= 0x60 && fields->opcode1 <= 0x62) ||
+                (fields->opcode1 >= 0x68 && fields->opcode1 <= 0x6a));
+#else
         return fields->prefix0 == 0 && fields->prefix2 == 0;
+#endif
     }
     if (kind == FT_SIMD_BIN_XMM_XMMM &&
         fields->prefix0 == 0 && fields->prefix2 == 0) {

@@ -375,6 +375,15 @@ static void ft_emit_x87_update_sw_by_fcsr(uint32_t **out, int sw, int fcsr,
                                           int tmp)
 {
     FT_LA_MOVFCSR2GR_EMIT(out, fcsr, 0);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* Reverse V/Z/O/U/I once, then leave the x87 denormal bit (bit 1)
+     * untouched while ORing the other five sticky exception flags. */
+    FT_LA_BITREV_W_EMIT(out, tmp, fcsr);
+    FT_LA_BSTRPICK_D_EMIT(out, tmp, tmp, 15, 11);
+    FT_LA_BSTRINS_D_EMIT(out, tmp, tmp, 5, 1);
+    FT_LA_ANDI_EMIT(out, tmp, tmp, 0x3d);
+    FT_LA_OR_EMIT(out, sw, sw, tmp);
+#else
     FT_LA_BITREV_W_EMIT(out, tmp, fcsr);
     FT_LA_SRLI_D_EMIT(out, tmp, tmp, 11);
     FT_LA_BSTRPICK_D_EMIT(out, tmp, tmp, 0, 0);
@@ -385,6 +394,8 @@ static void ft_emit_x87_update_sw_by_fcsr(uint32_t **out, int sw, int fcsr,
     FT_LA_BSTRPICK_D_EMIT(out, tmp, tmp, 4, 1);
     FT_LA_SLLI_D_EMIT(out, tmp, tmp, 2);
     FT_LA_OR_EMIT(out, sw, sw, tmp);
+
+#endif
 
     FT_LA_BSTRINS_W_EMIT(out, fcsr, la_zero, FCSR_OFF_FLAGS_V,
                          FCSR_OFF_FLAGS_I);

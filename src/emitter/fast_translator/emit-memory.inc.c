@@ -136,6 +136,42 @@ static bool ft_emit_load_rm16(uint32_t **out, const FastTemplateFields *fields,
     }
 }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Load a zero-extended word directly into the consumer's temporary.  Keep
+ * byte-wise loads for odd RIP-relative addresses, including fault behavior. */
+static bool ft_emit_load_rm16_zext(uint32_t **out,
+                                  const FastTemplateFields *fields,
+                                  target_ulong pc, int dst)
+{
+    int src;
+    int addr;
+
+    if (fields->modrm_mod == 3 ||
+        (ft_rip_relative_mem(fields) &&
+         ((pc + fields->size + fields->disp) & 1))) {
+        if (!ft_emit_load_rm16(out, fields, pc, &src)) {
+            return false;
+        }
+        FT_LA_BSTRPICK_D_EMIT(out, dst, src, 15, 0);
+        return true;
+    }
+    if (ft_rip_relative_mem(fields)) {
+        if (!ft_emit_guest_addr(out, la_t1,
+                               pc + fields->size + fields->disp)) {
+            return false;
+        }
+        FT_LA_LD_HU_EMIT(out, dst, la_t1, 0);
+    } else {
+        if (!ft_emit_mem_addr(out, fields, &addr)) {
+            return false;
+        }
+        FT_LA_LD_HU_EMIT(out, dst, addr,
+                        ft_mem_access_offset(fields, addr));
+    }
+    return true;
+}
+#endif
+
 static bool ft_emit_load_rm32(uint32_t **out, const FastTemplateFields *fields,
                               target_ulong pc, int *src_reg)
 {
@@ -182,6 +218,41 @@ static bool ft_emit_load_rm32(uint32_t **out, const FastTemplateFields *fields,
         return true;
     }
 }
+
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* Preserve the existing byte-wise RIP-relative unaligned access sequence. */
+static bool ft_emit_load_rm32_zext(uint32_t **out,
+                                  const FastTemplateFields *fields,
+                                  target_ulong pc, int dst)
+{
+    int src;
+    int addr;
+
+    if (fields->modrm_mod == 3 ||
+        (ft_rip_relative_mem(fields) &&
+         ((pc + fields->size + fields->disp) & 3))) {
+        if (!ft_emit_load_rm32(out, fields, pc, &src)) {
+            return false;
+        }
+        FT_LA_BSTRPICK_D_EMIT(out, dst, src, 31, 0);
+        return true;
+    }
+    if (ft_rip_relative_mem(fields)) {
+        if (!ft_emit_guest_addr(out, la_t1,
+                               pc + fields->size + fields->disp)) {
+            return false;
+        }
+        FT_LA_LD_WU_EMIT(out, dst, la_t1, 0);
+    } else {
+        if (!ft_emit_mem_addr(out, fields, &addr)) {
+            return false;
+        }
+        FT_LA_LD_WU_EMIT(out, dst, addr,
+                        ft_mem_access_offset(fields, addr));
+    }
+    return true;
+}
+#endif
 
 static bool ft_emit_load_rm8(uint32_t **out, const FastTemplateFields *fields,
                              target_ulong pc, int *src_reg)

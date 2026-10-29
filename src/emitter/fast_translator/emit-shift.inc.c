@@ -307,6 +307,23 @@ static int ft_emit_shift_imm_template(const FastTemplateFields *fields, Translat
         uint32_t x86_reg_op;
         uint32_t data_op;
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (ext == 5 && width < 32) {
+            if (width == 16) {
+                if (!ft_emit_load_rm16_zext(&out, fields, pc, result)) {
+                    return 0;
+                }
+            } else {
+                int addr;
+                if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                    return 0;
+                }
+                FT_LA_LD_BU_EMIT(&out, result, addr,
+                                ft_mem_access_offset(fields, addr));
+            }
+            src = result;
+        } else
+#endif
         switch (width) {
         case 8:
             if (!ft_emit_load_rm8(&out, fields, pc, &src)) {
@@ -387,10 +404,12 @@ static int ft_emit_shift_imm_template(const FastTemplateFields *fields, Translat
             ft_emit_raw(&out, ft_gpr3_imm12(data_op, result, src, count));
             break;
         case 5:
+#if !defined(QUICKTRANS_LATU) || defined(CONFIG_SOFTMMU)
             if (width < 32) {
                 FT_LA_BSTRPICK_D_EMIT(&out, result, src, width - 1, 0);
                 src = result;
             }
+#endif
             x86_op = width == 64 ? FT_LA_OPCODE_X86SRLI_D :
                      width == 32 ? FT_LA_OPCODE_X86SRLI_W :
                      width == 16 ? FT_LA_OPCODE_X86SRLI_H :
@@ -770,8 +789,16 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
             return 0;
         }
 
-        FT_LA_BSTRPICK_D_EMIT(&out, la_t1, ft_gpr(rcx_index), 7, 0);
-        count = la_t1;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (ext == 1 && width == 64) {
+            FT_LA_ANDI_EMIT(&out, la_t4, ft_gpr(rcx_index), 63);
+            count = la_t4;
+        } else
+#endif
+        {
+            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, ft_gpr(rcx_index), 7, 0);
+            count = la_t1;
+        }
         if (ext == 0 || ext == 1) {
             uint32_t rot_op;
             int count_mask = width == 64 ? 63 : 31;
@@ -801,15 +828,23 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
             default:
                 return 0;
             }
-            FT_LA_ANDI_EMIT(&out, la_t3, count, rotate_mask);
-            FT_LA_ANDI_EMIT(&out, la_t4, count, count_mask);
+            int rotate_reg = la_t3;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            if (ext == 1 && width == 64) {
+                rotate_reg = la_t4;
+            } else
+#endif
+            {
+                FT_LA_ANDI_EMIT(&out, la_t3, count, rotate_mask);
+                FT_LA_ANDI_EMIT(&out, la_t4, count, count_mask);
+            }
             count_zero_branch = out;
             FT_LA_BEQ_EMIT(&out, la_t4, la_zero, 0);
             FT_FLAG2(x86_op, src, count);
             if (ext == 0) {
                 FT_LA_SUB_D_EMIT(&out, la_t3, la_zero, la_t3);
             }
-            ft_emit_raw(&out, ft_gpr3(rot_op, result, src, la_t3));
+            ft_emit_raw(&out, ft_gpr3(rot_op, result, src, rotate_reg));
             if (!fields->skip_flags && width < 32) {
                 int cf_bit = ext == 0 ? 0 : width - 1;
 

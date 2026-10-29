@@ -39,11 +39,21 @@ static bool ft_emit_imul_unary(uint32_t **out,
             !ft_emit_load_rm16(out, fields, pc, &src)) {
             return false;
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->modrm_mod == 3 ||
+            (ft_rip_relative_mem(fields) &&
+             ((pc + fields->size + fields->disp) & 1))) {
+            FT_LA_EXT_W_H_EMIT(out, la_t1, src);
+            src = la_t1;
+        }
+#else
         FT_LA_EXT_W_H_EMIT(out, la_t1, src);
+        src = la_t1;
+#endif
         FT_LA_EXT_W_H_EMIT(out, la_t2, ft_gpr(rax_index));
         ft_emit_flag2_if_live(out, fields, FT_LA_OPCODE_X86MUL_H,
-                              la_t2, la_t1);
-        FT_LA_MUL_W_EMIT(out, la_t0, la_t2, la_t1);
+                              la_t2, src);
+        FT_LA_MUL_W_EMIT(out, la_t0, la_t2, src);
         FT_LA_SRLI_D_EMIT(out, la_t1, la_t0, 16);
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rdx_index), la_t1, 15, 0);
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), la_t0, 15, 0);
@@ -252,8 +262,53 @@ static bool ft_emit_xadd_rm(uint32_t **out, const FastTemplateFields *fields,
     int src = ft_modrm_reg_index(fields);
     int addr;
 
-    if (src >= GPR_NUM || fields->modrm_mod == 3 ||
-        !ft_emit_rmw_addr(out, fields, pc, &addr, la_t3)) {
+    if (src >= GPR_NUM || fields->modrm_mod == 3) {
+        return false;
+    }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (!is8 && fields->prefix0 != dt_X86_PREFIX_LOCK) {
+        int offset;
+
+        if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+            return false;
+        }
+        offset = ft_mem_access_offset(fields, addr);
+        if (addr == la_t1 || addr == la_t2) {
+            FT_LA_OR_EMIT(out, la_t4, addr, la_zero);
+            addr = la_t4;
+        }
+        if (width == 64) {
+            FT_LA_LD_D_EMIT(out, la_t1, addr, offset);
+        } else if (width == 32) {
+            FT_LA_LD_WU_EMIT(out, la_t1, addr, offset);
+        } else {
+            FT_LA_LD_HU_EMIT(out, la_t1, addr, offset);
+        }
+        FT_LA_ADD_D_EMIT(out, la_t2, la_t1, ft_gpr(src));
+        if (width == 64) {
+            FT_LA_ST_D_EMIT(out, la_t2, addr, offset);
+        } else if (width == 32) {
+            FT_LA_ST_W_EMIT(out, la_t2, addr, offset);
+        } else {
+            FT_LA_ST_H_EMIT(out, la_t2, addr, offset);
+        }
+        /* A faulting store must leave guest flags and the source unchanged.
+         * Delay the source writeback also when it forms the memory address. */
+        if (!fields->skip_flags) {
+            ft_emit_raw(out, ft_gpr2(width == 64 ? FT_LA_OPCODE_X86ADD_D :
+                                    width == 32 ? FT_LA_OPCODE_X86ADD_W :
+                                                  FT_LA_OPCODE_X86ADD_H,
+                                    la_t1, ft_gpr(src)));
+        }
+        if (width == 16) {
+            FT_LA_BSTRINS_D_EMIT(out, ft_gpr(src), la_t1, 15, 0);
+        } else {
+            FT_LA_OR_EMIT(out, ft_gpr(src), la_t1, la_zero);
+        }
+        return true;
+    }
+#endif
+    if (!ft_emit_rmw_addr(out, fields, pc, &addr, la_t3)) {
         return false;
     }
 
@@ -567,12 +622,21 @@ static bool ft_emit_cmpxchg_reg(uint32_t **out,
         } else {
             FT_LA_ANDI_EMIT(out, la_t1, ft_gpr(dst_base), 0xff);
         }
+        int src_value = la_t2;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (src_high8) {
+            FT_LA_SRLI_D_EMIT(out, la_t2, ft_gpr(src_base), 8);
+        } else {
+            src_value = ft_gpr(src_base);
+        }
+#else
         if (src_high8) {
             FT_LA_SRLI_D_EMIT(out, la_t2, ft_gpr(src_base), 8);
             FT_LA_ANDI_EMIT(out, la_t2, la_t2, 0xff);
         } else {
             FT_LA_ANDI_EMIT(out, la_t2, ft_gpr(src_base), 0xff);
         }
+#endif
         if (!fields->skip_flags) {
             FT_LA_X86SUB_B_EMIT(out, ft_gpr(rax_index), la_t1);
         }
@@ -582,13 +646,15 @@ static bool ft_emit_cmpxchg_reg(uint32_t **out,
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), la_t1, 7, 0);
         FT_LA_B_EMIT(out, 2);
         if (dst_high8) {
-            FT_LA_BSTRINS_D_EMIT(out, ft_gpr(dst_base), la_t2, 15, 8);
+            FT_LA_BSTRINS_D_EMIT(out, ft_gpr(dst_base), src_value, 15, 8);
         } else {
-            FT_LA_BSTRINS_D_EMIT(out, ft_gpr(dst_base), la_t2, 7, 0);
+            FT_LA_BSTRINS_D_EMIT(out, ft_gpr(dst_base), src_value, 7, 0);
         }
     } else if (is16) {
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(dst), 15, 0);
+#if !defined(QUICKTRANS_LATU) || defined(CONFIG_SOFTMMU)
         FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(src), 15, 0);
+#endif
         if (!fields->skip_flags) {
             FT_LA_X86SUB_H_EMIT(out, ft_gpr(rax_index), la_t1);
         }
@@ -597,8 +663,21 @@ static bool ft_emit_cmpxchg_reg(uint32_t **out,
         FT_LA_BEQ_EMIT(out, la_t3, la_zero, 3);
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), la_t1, 15, 0);
         FT_LA_B_EMIT(out, 2);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        FT_LA_BSTRINS_D_EMIT(out, ft_gpr(dst), ft_gpr(src), 15, 0);
+#else
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(dst), la_t2, 15, 0);
+#endif
     } else if (is64) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (!fields->skip_flags) {
+            FT_LA_X86SUB_D_EMIT(out, ft_gpr(rax_index), ft_gpr(dst));
+        }
+        FT_LA_BEQ_EMIT(out, ft_gpr(dst), ft_gpr(rax_index), 3);
+        FT_LA_OR_EMIT(out, ft_gpr(rax_index), ft_gpr(dst), la_zero);
+        FT_LA_B_EMIT(out, 2);
+        FT_LA_OR_EMIT(out, ft_gpr(dst), ft_gpr(src), la_zero);
+#else
         FT_LA_OR_EMIT(out, la_t1, ft_gpr(dst), la_zero);
         if (!fields->skip_flags) {
             FT_LA_X86SUB_D_EMIT(out, ft_gpr(rax_index), la_t1);
@@ -608,17 +687,24 @@ static bool ft_emit_cmpxchg_reg(uint32_t **out,
         FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
         FT_LA_B_EMIT(out, 2);
         FT_LA_OR_EMIT(out, ft_gpr(dst), ft_gpr(src), la_zero);
+#endif
     } else {
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(dst), 31, 0);
         if (!fields->skip_flags) {
             FT_LA_X86SUB_W_EMIT(out, ft_gpr(rax_index), la_t1);
         }
         FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index), 31, 0);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        FT_LA_BEQ_EMIT(out, la_t1, la_t3, 3);
+        /* t1 already holds the zero-extended low32 destination. */
+        FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
+#else
         FT_LA_XOR_EMIT(out, la_t3, la_t1, la_t3);
         FT_LA_BEQ_EMIT(out, la_t3, la_zero, 4);
         FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
         FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(rax_index),
                                ft_gpr(rax_index), 31, 0);
+#endif
         FT_LA_B_EMIT(out, 2);
         FT_LA_BSTRPICK_D_EMIT(out, ft_gpr(dst), ft_gpr(src), 31, 0);
     }
@@ -830,6 +916,12 @@ static bool ft_emit_div_rm32(uint32_t **out, const FastTemplateFields *fields,
 static bool ft_emit_div_rm16(uint32_t **out, const FastTemplateFields *fields,
                              target_ulong pc)
 {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (ft_rex_w(fields) || fields->modrm_reg != 6 ||
+        !ft_emit_load_rm16_zext(out, fields, pc, la_t0)) {
+        return false;
+    }
+#else
     int src;
 
     if (ft_rex_w(fields) || fields->modrm_reg != 6 ||
@@ -837,6 +929,7 @@ static bool ft_emit_div_rm16(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
     FT_LA_BSTRPICK_D_EMIT(out, la_t0, src, 15, 0);
+#endif
     {
         FastBranchLabel nonzero = { 0 };
         FastBranchFixup fixup;
@@ -874,11 +967,25 @@ static bool ft_emit_div_rm8(uint32_t **out, const FastTemplateFields *fields,
 {
     int src;
 
-    if (ft_rex_w(fields) || fields->modrm_reg != 6 ||
-        !ft_emit_load_rm8(out, fields, pc, &src)) {
+    if (ft_rex_w(fields) || fields->modrm_reg != 6) {
         return false;
     }
-    FT_LA_BSTRPICK_D_EMIT(out, la_t0, src, 7, 0);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (fields->modrm_mod != 3) {
+        int addr;
+        if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+            return false;
+        }
+        FT_LA_LD_BU_EMIT(out, la_t0, addr,
+                        ft_mem_access_offset(fields, addr));
+    } else
+#endif
+    {
+        if (!ft_emit_load_rm8(out, fields, pc, &src)) {
+            return false;
+        }
+        FT_LA_BSTRPICK_D_EMIT(out, la_t0, src, 7, 0);
+    }
     {
         FastBranchLabel nonzero = { 0 };
         FastBranchFixup fixup;
@@ -1149,6 +1256,9 @@ static bool ft_emit_div_rm64(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (src != la_t0)
+#endif
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     {
         FastBranchLabel nonzero = { 0 };
@@ -1182,6 +1292,9 @@ static bool ft_emit_idiv_rm64(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (src != la_t0)
+#endif
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     {
         FastBranchLabel nonzero = { 0 };

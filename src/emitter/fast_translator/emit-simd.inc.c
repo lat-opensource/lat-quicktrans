@@ -1049,7 +1049,7 @@ static int ft_emit_movdup_template(const FastTemplateFields *fields, Translation
     if (dst >= XMM_NUM) {
         return 0;
     }
-    if (!ft_emit_xmmm_src_bytes(&out, fields, pc,
+    if (!ft_emit_xmmm_low_src(&out, fields, pc,
                                 fields->id == dt_X86_INS_MOVDDUP ? 8 : 16,
                                 &src)) {
         return 0;
@@ -2982,7 +2982,7 @@ static int ft_emit_cvt_fp_xmm_template(const FastTemplateFields *fields, Transla
         break;
     case dt_X86_INS_CVTPS2PD:
         if (fields->prefix0 != 0 || fields->prefix2 != 0 ||
-            !ft_emit_xmmm_src_bytes(&out, fields, pc, 8, &src)) {
+            !ft_emit_xmmm_low_src(&out, fields, pc, 8, &src)) {
             return 0;
         }
         FT_LA_FCVT_D_S_EMIT(&out, ft_vscratch + 1, src);
@@ -2995,7 +2995,7 @@ static int ft_emit_cvt_fp_xmm_template(const FastTemplateFields *fields, Transla
         break;
     case dt_X86_INS_CVTSD2SS:
         if (fields->prefix0 != 0xf2 ||
-            !ft_emit_xmmm_src_bytes(&out, fields, pc, 8, &src)) {
+            !ft_emit_xmmm_low_src(&out, fields, pc, 8, &src)) {
             return 0;
         }
         FT_LA_FCVT_S_D_EMIT(&out, ft_vscratch, src);
@@ -3004,7 +3004,7 @@ static int ft_emit_cvt_fp_xmm_template(const FastTemplateFields *fields, Transla
         break;
     case dt_X86_INS_CVTSS2SD:
         if (fields->prefix0 != 0xf3 ||
-            !ft_emit_xmmm_src_bytes(&out, fields, pc, 4, &src)) {
+            !ft_emit_xmmm_low_src(&out, fields, pc, 4, &src)) {
             return 0;
         }
         FT_LA_FCVT_D_S_EMIT(&out, ft_vscratch, src);
@@ -3738,7 +3738,7 @@ static int ft_emit_round_xmm_template(const FastTemplateFields *fields, Translat
     }
 
     if (is_scalar) {
-        if (!ft_emit_xmmm_src_bytes(&out, fields, pc, is_double ? 8 : 4, &src)) {
+        if (!ft_emit_xmmm_low_src(&out, fields, pc, is_double ? 8 : 4, &src)) {
             return 0;
         }
         round_src = ft_vscratch + 1;

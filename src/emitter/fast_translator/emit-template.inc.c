@@ -472,11 +472,18 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 return 0;
             }
         } else if (is_16) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            if (ft_rex_w(fields) ||
+                !ft_emit_load_rm16_zext(&out, fields, pc, la_t2)) {
+                return 0;
+            }
+#else
             if (ft_rex_w(fields) ||
                 !ft_emit_load_rm16(&out, fields, pc, &src)) {
                 return 0;
             }
             FT_LA_BSTRPICK_D_EMIT(&out, la_t2, src, 15, 0);
+#endif
             src = la_t2;
         } else {
             if (ft_rex_w(fields) ||
@@ -574,6 +581,12 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
     }
     case FT_MUL_RM16:
     {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (ft_rex_w(fields) || fields->modrm_reg != 4 ||
+            !ft_emit_load_rm16_zext(&out, fields, pc, la_t1)) {
+            return 0;
+        }
+#else
         int src;
 
         if (ft_rex_w(fields) || fields->modrm_reg != 4 ||
@@ -581,6 +594,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             return 0;
         }
         FT_LA_BSTRPICK_D_EMIT(&out, la_t1, src, 15, 0);
+#endif
         FT_LA_BSTRPICK_D_EMIT(&out, la_t2, ft_gpr(rax_index), 15, 0);
         FT_FLAG2(FT_LA_OPCODE_X86MUL_HU, la_t2, la_t1);
         FT_LA_MUL_D_EMIT(&out, la_t0, la_t2, la_t1);
@@ -3924,10 +3938,15 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 if (high) {
                     FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr, offset);
                 } else {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+                    /* The MMX result interleaves only the low 32 source bits. */
+                    FT_LA_FLD_S_EMIT(&out, ft_vscratch, addr, offset);
+#else
                     FT_LA_VXOR_V_EMIT(&out, ft_vscratch, ft_vscratch,
                                       ft_vscratch);
                     FT_LA_LD_WU_EMIT(&out, la_t0, addr, offset);
                     FT_LA_VINSGR2VR_W_EMIT(&out, ft_vscratch, la_t0, 0);
+#endif
                 }
                 src = ft_vscratch;
             }
@@ -4850,9 +4869,13 @@ simd_bin_done:
         cueq = FCMP_COND_CUEQ + (qnan ? 1 : 0);
         cult = FCMP_COND_CULT + (qnan ? 1 : 0);
         lhs = ft_modrm_reg_index(fields);
-        if (lhs >= XMM_NUM ||
-            !ft_emit_xmmm_src_bytes(&out, fields, pc,
-                                    is_double ? 8 : 4, &rhs)) {
+        if (lhs >= XMM_NUM) {
+            return 0;
+        }
+        /* Keep the double-width load schedule: omitting its scratch clear
+         * reduced code size but regressed the measured execution latency. */
+        if (is_double ? !ft_emit_xmmm_src_bytes(&out, fields, pc, 8, &rhs)
+                      : !ft_emit_xmmm_low_src(&out, fields, pc, 4, &rhs)) {
             return 0;
         }
         if (is_double) {

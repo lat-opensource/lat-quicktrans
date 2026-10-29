@@ -42,6 +42,16 @@ static bool ft_count_bits_load_src(uint32_t **out,
     if (ft_rex_w(fields)) {
         return false;
     }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if ((width == 16 && fields->prefix2 != dt_X86_PREFIX_OPSIZE) ||
+        (width == 32 && fields->prefix2 == dt_X86_PREFIX_OPSIZE)) {
+        return false;
+    }
+    if (!(width == 16 ? ft_emit_load_rm16_zext(out, fields, pc, la_t1) :
+                       ft_emit_load_rm32_zext(out, fields, pc, la_t1))) {
+        return false;
+    }
+#else
     if (width == 16) {
         if (fields->prefix2 != dt_X86_PREFIX_OPSIZE ||
             !ft_emit_load_rm16(out, fields, pc, &value)) {
@@ -55,6 +65,7 @@ static bool ft_count_bits_load_src(uint32_t **out,
         }
         FT_LA_BSTRPICK_D_EMIT(out, la_t1, value, 31, 0);
     }
+#endif
     *src = la_t1;
     return true;
 }
@@ -90,12 +101,24 @@ static void ft_emit_popcnt_value(uint32_t **out, int result, int src,
                                  int width)
 {
     FT_LA_OR_EMIT(out, result, src, la_zero);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    ft_emit_li64(out, la_t4, width == 16 ? 0x5555ull :
+                               width == 32 ? 0x55555555ull :
+                                             0x5555555555555555ull);
+#else
     ft_emit_li64(out, la_t4, 0x5555555555555555ull);
+#endif
     FT_LA_SRLI_D_EMIT(out, la_t3, result, 1);
     FT_LA_AND_EMIT(out, la_t3, la_t3, la_t4);
     FT_LA_SUB_D_EMIT(out, result, result, la_t3);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    ft_emit_li64(out, la_t4, width == 16 ? 0x3333ull :
+                               width == 32 ? 0x33333333ull :
+                                             0x3333333333333333ull);
+#else
     ft_emit_li64(out, la_t4, 0x3333333333333333ull);
+#endif
     FT_LA_AND_EMIT(out, la_t3, result, la_t4);
     FT_LA_SRLI_D_EMIT(out, result, result, 2);
     FT_LA_AND_EMIT(out, result, result, la_t4);
@@ -103,13 +126,24 @@ static void ft_emit_popcnt_value(uint32_t **out, int result, int src,
 
     FT_LA_SRLI_D_EMIT(out, la_t3, result, 4);
     FT_LA_ADD_D_EMIT(out, result, result, la_t3);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    ft_emit_li64(out, la_t4, width == 16 ? 0x0f0full :
+                               width == 32 ? 0x0f0f0f0full :
+                                             0x0f0f0f0f0f0f0f0full);
+#else
     ft_emit_li64(out, la_t4, 0x0f0f0f0f0f0f0f0full);
+#endif
     FT_LA_AND_EMIT(out, result, result, la_t4);
 
     FT_LA_SRLI_D_EMIT(out, la_t3, result, 8);
     FT_LA_ADD_D_EMIT(out, result, result, la_t3);
-    FT_LA_SRLI_D_EMIT(out, la_t3, result, 16);
-    FT_LA_ADD_D_EMIT(out, result, result, la_t3);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (width != 16)
+#endif
+    {
+        FT_LA_SRLI_D_EMIT(out, la_t3, result, 16);
+        FT_LA_ADD_D_EMIT(out, result, result, la_t3);
+    }
     if (width == 64) {
         FT_LA_SRLI_D_EMIT(out, la_t3, result, 32);
         FT_LA_ADD_D_EMIT(out, result, result, la_t3);
@@ -586,8 +620,18 @@ static int ft_emit_pext_template(const FastTemplateFields *fields,
             return 0;
         }
     } else {
-        if (ft_rex_w(fields) ||
-            !ft_emit_load_rm32(&out, fields, pc, &mask)) {
+        if (ft_rex_w(fields)) {
+            return 0;
+        }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->modrm_mod != 3) {
+            if (!ft_emit_load_rm32_zext(&out, fields, pc, la_t0)) {
+                return 0;
+            }
+            mask = la_t0;
+        } else
+#endif
+        if (!ft_emit_load_rm32(&out, fields, pc, &mask)) {
             return 0;
         }
     }
@@ -598,6 +642,9 @@ static int ft_emit_pext_template(const FastTemplateFields *fields,
      * Word shifts consume only its low 32 bits. */
     value = ft_gpr(src);
     if (width == 32) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->modrm_mod == 3)
+#endif
         FT_LA_BSTRPICK_D_EMIT(&out, la_t0, mask, 31, 0);
     } else {
         FT_LA_OR_EMIT(&out, la_t0, mask, la_zero);

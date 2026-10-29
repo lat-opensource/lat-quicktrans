@@ -288,7 +288,10 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
             (fields->alu_form != FT_ALU_FORM_RM_R &&
              fields->alu_form != FT_ALU_FORM_R_RM)) {
 #endif
-#ifdef QUICKTRANS_LATU
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            if (result == lhs &&
+                (op != FT_ALU_SBB || !fields->skip_flags))
+#elif defined(QUICKTRANS_LATU)
             if (op != FT_ALU_ADC || result == lhs)
 #endif
             {
@@ -299,7 +302,11 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
         }
 #endif
         if (!fields->skip_flags &&
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            result == rhs) {
+#else
             (op == FT_ALU_SBB || (op == FT_ALU_ADC && result == rhs))) {
+#endif
             FT_LA_OR_EMIT(out, la_t4, rhs, la_zero);
             flag_rhs = la_t4;
         }
@@ -310,7 +317,11 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
         }
         if (op == FT_ALU_SBB && !fields->skip_flags) {
             /* LoongArch X86SBC does not provide the x86 auxiliary flag. */
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+            FT_LA_XOR_EMIT(out, la_t3, flag_lhs, flag_rhs);
+#else
             FT_LA_XOR_EMIT(out, la_t3, la_t3, la_t4);
+#endif
             FT_LA_XOR_EMIT(out, la_t3, la_t3, result);
             FT_LA_ANDI_EMIT(out, la_t3, la_t3, 0x10);
             FT_LA_X86MTFLAG_EMIT(out, la_t3, AF_USEDEF_BIT);
@@ -468,7 +479,11 @@ static bool ft_emit_and_imm_reg(uint32_t **out,
 
     if (fields->alu_op != FT_ALU_AND || !fields->skip_flags ||
         fields->prefix0 == dt_X86_PREFIX_LOCK ||
-        (width != 32 && width != 64)) {
+        (width != 32 && width != 64
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+         && width != 16
+#endif
+        )) {
         return false;
     }
     if (fields->alu_form == FT_ALU_FORM_ACC_IMM) {
@@ -483,6 +498,25 @@ static bool ft_emit_and_imm_reg(uint32_t **out,
         return false;
     }
     dst = ft_gpr(dst);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (width == 16) {
+        mask = (uint16_t)fields->imm;
+        if (mask == 0xffff) {
+            return false;
+        }
+        if ((mask & (mask + 1)) == 0) {
+            FT_LA_BSTRINS_D_EMIT(out, dst, la_zero, 15,
+                                mask ? 64 - __builtin_clzll(mask) : 0);
+            return true;
+        }
+        if (mask <= 0xfff) {
+            FT_LA_ANDI_EMIT(out, la_t2, dst, mask);
+            FT_LA_BSTRINS_D_EMIT(out, dst, la_t2, 15, 0);
+            return true;
+        }
+        return false;
+    }
+#endif
     mask = width == 32 ? (uint32_t)fields->imm : (uint64_t)fields->imm;
     if (mask <= 0xfff) {
         FT_LA_ANDI_EMIT(out, dst, dst, mask);
@@ -567,7 +601,11 @@ static bool ft_emit_addsub_imm_reg(uint32_t **out,
     int dst;
     int64_t addend;
 
-    if (!fields->skip_flags || (width != 32 && width != 64)) {
+    if (!fields->skip_flags || (width != 32 && width != 64
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        && width != 16
+#endif
+        )) {
         return false;
     }
     if (fields->alu_form == FT_ALU_FORM_ACC_IMM) {
@@ -584,6 +622,13 @@ static bool ft_emit_addsub_imm_reg(uint32_t **out,
         return false;
     }
     dst = ft_gpr(dst);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (width == 16) {
+        FT_LA_ADDI_W_EMIT(out, la_t2, dst, addend);
+        FT_LA_BSTRINS_D_EMIT(out, dst, la_t2, 15, 0);
+        return true;
+    }
+#endif
     if (width == 64) {
         FT_LA_ADDI_D_EMIT(out, dst, dst, addend);
     } else {
@@ -609,19 +654,20 @@ static bool ft_emit_carry_memory(uint32_t **out,
                                   const FastTemplateFields *fields,
                                   target_ulong pc)
 {
-    int addr, rhs;
+    int addr, rhs, offset;
     int width = fields->alu_width;
     uint32_t data_op = ft_alu_data_op(fields->alu_op, width);
 
-    if (!ft_emit_rmw_addr(out, fields, pc, &addr, la_t4)) {
+    if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
         return false;
     }
+    offset = ft_mem_access_offset(fields, addr);
     ft_preserve_cmpxchg_addr(out, &addr);
     switch (width) {
-    case 8: FT_LA_LD_BU_EMIT(out, la_t3, addr, 0); break;
-    case 16: FT_LA_LD_HU_EMIT(out, la_t3, addr, 0); break;
-    case 32: FT_LA_LD_WU_EMIT(out, la_t3, addr, 0); break;
-    case 64: FT_LA_LD_D_EMIT(out, la_t3, addr, 0); break;
+    case 8: FT_LA_LD_BU_EMIT(out, la_t3, addr, offset); break;
+    case 16: FT_LA_LD_HU_EMIT(out, la_t3, addr, offset); break;
+    case 32: FT_LA_LD_WU_EMIT(out, la_t3, addr, offset); break;
+    case 64: FT_LA_LD_D_EMIT(out, la_t3, addr, offset); break;
     default: return false;
     }
     if (fields->alu_form == FT_ALU_FORM_RM_R) {
@@ -633,10 +679,10 @@ static bool ft_emit_carry_memory(uint32_t **out,
     }
     ft_emit_raw(out, ft_gpr3(data_op, la_t2, la_t3, rhs));
     switch (width) {
-    case 8: FT_LA_ST_B_EMIT(out, la_t2, addr, 0); break;
-    case 16: FT_LA_ST_H_EMIT(out, la_t2, addr, 0); break;
-    case 32: FT_LA_ST_W_EMIT(out, la_t2, addr, 0); break;
-    case 64: FT_LA_ST_D_EMIT(out, la_t2, addr, 0); break;
+    case 8: FT_LA_ST_B_EMIT(out, la_t2, addr, offset); break;
+    case 16: FT_LA_ST_H_EMIT(out, la_t2, addr, offset); break;
+    case 32: FT_LA_ST_W_EMIT(out, la_t2, addr, offset); break;
+    case 64: FT_LA_ST_D_EMIT(out, la_t2, addr, offset); break;
     }
     if (!ft_emit_alu_flag(out, fields, fields->alu_op, width, la_t3, rhs)) {
         return false;
@@ -710,6 +756,38 @@ static bool ft_emit_alu_template(uint32_t **out,
         return true;
 
     case FT_ALU_FORM_RM_IMM:
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->skip_flags && fields->modrm_mod != 3) {
+            int64_t addend = op == FT_ALU_SUB ? -(int64_t)fields->imm :
+                                               (int64_t)fields->imm;
+            uint64_t imm = width == 64 ? (uint64_t)fields->imm :
+                           width == 32 ? (uint32_t)fields->imm :
+                           width == 16 ? (uint16_t)fields->imm :
+                                         (uint8_t)fields->imm;
+            bool addsub = (op == FT_ALU_ADD || op == FT_ALU_SUB) &&
+                          ft_fits_simm12(addend);
+            bool logic = (op == FT_ALU_AND || op == FT_ALU_OR ||
+                          op == FT_ALU_XOR) && imm <= 0xfff;
+            if (addsub || logic) {
+                if (!ft_emit_alu_load_rm(out, fields, pc, width, &lhs)) {
+                    return false;
+                }
+                if (addsub) {
+                    ft_emit_raw(out, ft_gpr3_imm12(width == 64 ?
+                        FT_LA_OPCODE_ADDI_D : FT_LA_OPCODE_ADDI_W,
+                        la_t2, lhs, addend));
+                } else if (op == FT_ALU_AND) {
+                    FT_LA_ANDI_EMIT(out, la_t2, lhs, imm);
+                } else if (op == FT_ALU_OR) {
+                    FT_LA_ORI_EMIT(out, la_t2, lhs, imm);
+                } else {
+                    FT_LA_XORI_EMIT(out, la_t2, lhs, imm);
+                }
+                return ft_emit_alu_store_rm(out, fields, pc, width, la_t2);
+            }
+        }
+#endif
+
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if ((op == FT_ALU_OR || op == FT_ALU_XOR) &&
             ft_emit_logic_imm_reg(out, fields)) {
