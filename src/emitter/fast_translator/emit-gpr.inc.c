@@ -407,6 +407,12 @@ static int ft_emit_movbe_template(const FastTemplateFields *fields, TranslationB
     }
 
     if (is_store) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (width == 32) {
+            /* ST.W consumes only the reversed low word. */
+            FT_LA_REVB_2W_EMIT(&out, la_t2, ft_gpr(reg));
+        } else
+#endif
         ft_emit_movbe_reverse(&out, la_t2, ft_gpr(reg), width);
         if (width == 64) {
             if (!ft_emit_store_rm64(&out, fields, pc, la_t2)) {
@@ -594,10 +600,17 @@ static int ft_emit_adx_template(const FastTemplateFields *fields,
         FT_LA_X86MTFLAG_EMIT(&out, la_t1, CF_USEDEF_BIT);
     }
     if (width == 64) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* Consume both original inputs for flags before overwriting dst. */
+        FT_LA_X86ADC_D_EMIT(&out, ft_gpr(dst), src);
+        FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), src);
+        FT_LA_ADD_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), la_t1);
+#else
         FT_LA_ADD_D_EMIT(&out, la_t3, ft_gpr(dst), src);
         FT_LA_ADD_D_EMIT(&out, la_t3, la_t3, la_t1);
         FT_LA_X86ADC_D_EMIT(&out, ft_gpr(dst), src);
         FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t3, la_zero);
+#endif
     } else {
         FT_LA_ADD_W_EMIT(&out, la_t3, ft_gpr(dst), src);
         FT_LA_ADD_W_EMIT(&out, la_t3, la_t3, la_t1);
@@ -1419,6 +1432,17 @@ static int ft_emit_not_template(const FastTemplateFields *fields, TranslationBlo
 
     switch (fields->kind) {
     case FT_NOT_RM8:
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->modrm_mod == 3 && !ft_modrm_rm_is_high8(fields)) {
+            dst = ft_modrm_rm_index(fields);
+            if (dst >= GPR_NUM) {
+                return 0;
+            }
+            /* Flip only the low byte, preserving the rest of the guest GPR. */
+            FT_LA_XORI_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 0xff);
+            break;
+        }
+#endif
         if (!ft_emit_load_rm8(&out, fields, pc, &dst)) {
             return 0;
         }

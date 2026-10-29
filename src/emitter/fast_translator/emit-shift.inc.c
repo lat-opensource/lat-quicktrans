@@ -148,8 +148,15 @@ static int ft_emit_rcl_rcr_template(const FastTemplateFields *fields, Translatio
     }
 
     if (is_cl) {
-        FT_LA_BSTRPICK_D_EMIT(&out, count_reg, ft_gpr(rcx_index), 7, 0);
-        FT_LA_ANDI_EMIT(&out, count_reg, count_reg, mask);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (is_mem || width >= 32) {
+            FT_LA_ANDI_EMIT(&out, count_reg, ft_gpr(rcx_index), mask);
+        } else
+#endif
+        {
+            FT_LA_BSTRPICK_D_EMIT(&out, count_reg, ft_gpr(rcx_index), 7, 0);
+            FT_LA_ANDI_EMIT(&out, count_reg, count_reg, mask);
+        }
         if (width < 32) {
             FT_LA_ORI_EMIT(&out, la_t4, la_zero, ring);
             FT_LA_MOD_DU_EMIT(&out, count_reg, count_reg, la_t4);
@@ -763,7 +770,25 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
         uint32_t x86_op;
         uint32_t data_op;
         uint32_t *count_zero_branch = NULL;
+        int count_zero_reg = la_t4;
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (ext == 5 && width < 32) {
+            if (width == 16) {
+                if (!ft_emit_load_rm16_zext(&out, fields, pc, result)) {
+                    return 0;
+                }
+            } else {
+                int addr;
+                if (!ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                    return 0;
+                }
+                FT_LA_LD_BU_EMIT(&out, result, addr,
+                                ft_mem_access_offset(fields, addr));
+            }
+            src = result;
+        } else
+#endif
         switch (width) {
         case 8:
             if (!ft_emit_load_rm8(&out, fields, pc, &src)) {
@@ -836,10 +861,15 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
 #endif
             {
                 FT_LA_ANDI_EMIT(&out, la_t3, count, rotate_mask);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+                if (width >= 32) {
+                    count_zero_reg = la_t3;
+                } else
+#endif
                 FT_LA_ANDI_EMIT(&out, la_t4, count, count_mask);
             }
             count_zero_branch = out;
-            FT_LA_BEQ_EMIT(&out, la_t4, la_zero, 0);
+            FT_LA_BEQ_EMIT(&out, count_zero_reg, la_zero, 0);
             FT_FLAG2(x86_op, src, count);
             if (ext == 0) {
                 FT_LA_SUB_D_EMIT(&out, la_t3, la_zero, la_t3);
@@ -854,14 +884,26 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
             }
         } else {
             if (width < 32 && ext == 5) {
+#if !defined(QUICKTRANS_LATU) || defined(CONFIG_SOFTMMU)
                 FT_LA_BSTRPICK_D_EMIT(&out, result, src, width - 1, 0);
                 src = result;
+#endif
             } else if (width == 8 && ext == 7) {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+                /* All byte memory loads above are already signed. */
+#else
                 FT_LA_EXT_W_B_EMIT(&out, result, src);
                 src = result;
+#endif
             } else if (width == 16 && ext == 7) {
-                FT_LA_EXT_W_H_EMIT(&out, result, src);
-                src = result;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+                if (ft_rip_relative_mem(fields) &&
+                    ((pc + fields->size + fields->disp) & 1))
+#endif
+                {
+                    FT_LA_EXT_W_H_EMIT(&out, result, src);
+                    src = result;
+                }
             }
             switch (width) {
             case 8:
@@ -928,7 +970,7 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
             return 0;
         }
         if (ext == 0 || ext == 1) {
-            *count_zero_branch = FT_LA_BEQ(la_t4, la_zero,
+            *count_zero_branch = FT_LA_BEQ(count_zero_reg, la_zero,
                                            out - count_zero_branch);
         }
         return (out - code);
@@ -953,6 +995,7 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
         uint32_t *count_zero_branch;
         uint32_t *count_zero_target = NULL;
         int count_mask = width == 64 ? 63 : 31;
+        int count_zero_reg = la_t3;
 
         FT_LA_BSTRPICK_D_EMIT(&out, la_t1, ft_gpr(rcx_index), 7, 0);
         if (width == 8 && ft_modrm_rm_is_high8(fields)) {
@@ -994,9 +1037,14 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
         default:
             return 0;
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (width >= 32) {
+            count_zero_reg = la_t2;
+        } else
+#endif
         FT_LA_ANDI_EMIT(&out, la_t3, la_t1, count_mask);
         count_zero_branch = out;
-        FT_LA_BEQ_EMIT(&out, la_t3, la_zero, 0);
+        FT_LA_BEQ_EMIT(&out, count_zero_reg, la_zero, 0);
         FT_FLAG2(x86_op, src, la_t1);
         if (ext == 0) {
             FT_LA_SUB_D_EMIT(&out, la_t2, la_zero, la_t2);
@@ -1024,7 +1072,7 @@ static int ft_emit_shift_cl_template(const FastTemplateFields *fields, Translati
                 FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
             }
         }
-        *count_zero_branch = FT_LA_BEQ(la_t3, la_zero,
+        *count_zero_branch = FT_LA_BEQ(count_zero_reg, la_zero,
                                        (width == 32 ? count_zero_target : out) -
                                        count_zero_branch);
         return (out - code);
@@ -1232,7 +1280,12 @@ static int ft_emit_shld_shrd_template(const FastTemplateFields *fields, Translat
     }
 
     x86_op = ft_shld_shrd_x86_op(is_shld, is_imm, width);
-    ft_emit_mask_to_width(&out, la_t0, dst_value, width);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (width != 64 || dst_value != la_t0)
+#endif
+    {
+        ft_emit_mask_to_width(&out, la_t0, dst_value, width);
+    }
     ft_emit_mask_to_width(&out, la_t1, ft_gpr(src), width);
 
     if (is_imm) {
@@ -1262,8 +1315,12 @@ static int ft_emit_shld_shrd_template(const FastTemplateFields *fields, Translat
             FT_LA_X86MTFLAG_EMIT(&out, la_t1, 0x21);
         }
     } else {
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        FT_LA_ANDI_EMIT(&out, la_t4, ft_gpr(rcx_index), mask);
+#else
         FT_LA_BSTRPICK_D_EMIT(&out, la_t3, ft_gpr(rcx_index), 7, 0);
         FT_LA_ANDI_EMIT(&out, la_t4, la_t3, mask);
+#endif
         count_zero_branch = out;
         FT_LA_BEQ_EMIT(&out, la_t4, la_zero, 0);
         FT_LA_ADDI_D_EMIT(&out, la_t3, la_zero, width);

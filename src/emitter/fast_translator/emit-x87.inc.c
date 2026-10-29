@@ -115,11 +115,23 @@ static int ft_emit_x87_state_template(const FastTemplateFields *fields, Translat
         }
 #endif
         FT_LA_X86MTTOP_EMIT(&out, 0);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* Little-endian adjacent SW/CW, as in legacy translate_fninit. */
+        QEMU_BUILD_BUG_ON(sizeof(((CPUX86State *)0)->fpus) != 2);
+        QEMU_BUILD_BUG_ON(sizeof(((CPUX86State *)0)->fpuc) != 2);
+        QEMU_BUILD_BUG_ON(offsetof(CPUX86State, fpuc) !=
+                          offsetof(CPUX86State, fpus) + 2);
+        QEMU_BUILD_BUG_ON(offsetof(CPUX86State, fpus) % 4 != 0);
+        ft_emit_li32(&out, la_t0, 0x037f0000);
+        ft_emit_store_env(&out, la_t0, lsenv_offset_of_status_word(lsenv),
+                          FT_LA_OPCODE_ST_W);
+#else
         FT_LA_ORI_EMIT(&out, la_t0, la_zero, 0x37f);
         ft_emit_store_env(&out, la_t0, lsenv_offset_of_control_word(lsenv),
                           FT_LA_OPCODE_ST_H);
         ft_emit_store_env(&out, la_zero, lsenv_offset_of_status_word(lsenv),
                           FT_LA_OPCODE_ST_H);
+#endif
         ft_emit_store_env(&out, la_zero, lsenv_offset_of_top(lsenv),
                           FT_LA_OPCODE_ST_W);
         ft_emit_li64(&out, la_t0, 0x0101010101010101ULL);
@@ -460,9 +472,17 @@ static bool ft_emit_x87_reload_control_status_fcsr(uint32_t **out)
  * A later LDMXCSR may clear the shared host FCSR before FNSTSW reads it. */
 static void ft_emit_latu_x87_div_status(uint32_t **out)
 {
+    FastBranchLabel done = { 0 };
+    FastBranchFixup done_fixup;
+
+    FT_LA_MOVFCSR2GR_EMIT(out, la_t1, 0);
+    FT_LA_BSTRPICK_D_EMIT(out, la_t2, la_t1, FCSR_OFF_CAUSE_V,
+                         FCSR_OFF_CAUSE_Z);
+    /* Leave sticky guest status untouched when neither cause is present. */
+    ft_emit_branch_placeholder(out, &done_fixup, FT_BRANCH_BEQ,
+                               la_t2, la_zero, &done);
     ft_emit_load_env(out, la_t0, lsenv_offset_of_status_word(lsenv),
                      FT_LA_OPCODE_LD_HU);
-    FT_LA_MOVFCSR2GR_EMIT(out, la_t1, 0);
     FT_LA_BSTRPICK_D_EMIT(out, la_t2, la_t1, FCSR_OFF_CAUSE_Z,
                          FCSR_OFF_CAUSE_Z);
     FT_LA_SLLI_D_EMIT(out, la_t2, la_t2, X87_SR_OFF_ZE);
@@ -472,6 +492,8 @@ static void ft_emit_latu_x87_div_status(uint32_t **out)
     FT_LA_OR_EMIT(out, la_t0, la_t0, la_t1);
     ft_emit_store_env(out, la_t0, lsenv_offset_of_status_word(lsenv),
                       FT_LA_OPCODE_ST_H);
+    ft_bind_branch_label(&done, *out);
+    ft_resolve_branch_fixup(&done_fixup);
 }
 #endif
 
@@ -3587,8 +3609,13 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         ft_bind_branch_label(&not_empty, out);
         ft_resolve_branch_fixup(&not_empty_fixup);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t3, la_t0, 62, 52);
+        FT_LA_ORI_EMIT(&out, la_t2, la_zero, 0x7ff);
+#else
         ft_emit_li64(&out, la_t2, 0x7ff0000000000000ULL);
         FT_LA_AND_EMIT(&out, la_t3, la_t0, la_t2);
+#endif
         ft_emit_branch_placeholder(&out, &inf_nan_fixup, FT_BRANCH_BEQ,
                                    la_t3, la_t2, &inf_nan);
         ft_emit_branch_placeholder(&out, &zero_denorm_fixup, FT_BRANCH_BEQ,
@@ -3599,8 +3626,12 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
 
         ft_bind_branch_label(&inf_nan, out);
         ft_resolve_branch_fixup(&inf_nan_fixup);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t3, la_t0, 51, 0);
+#else
         ft_emit_li64(&out, la_t2, 0x000fffffffffffffULL);
         FT_LA_AND_EMIT(&out, la_t3, la_t0, la_t2);
+#endif
         ft_emit_branch_placeholder(&out, &infinity_fixup, FT_BRANCH_BEQ,
                                    la_t3, la_zero, &infinity);
         FT_LA_ORI_EMIT(&out, la_t1, la_t1, 0x100);
@@ -3614,8 +3645,12 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
 
         ft_bind_branch_label(&zero_denorm, out);
         ft_resolve_branch_fixup(&zero_denorm_fixup);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t3, la_t0, 51, 0);
+#else
         ft_emit_li64(&out, la_t2, 0x000fffffffffffffULL);
         FT_LA_AND_EMIT(&out, la_t3, la_t0, la_t2);
+#endif
         ft_emit_branch_placeholder(&out, &zero_fixup, FT_BRANCH_BEQ, la_t3,
                                    la_zero, &zero);
         ft_emit_li64(&out, la_t2, 0x4400);

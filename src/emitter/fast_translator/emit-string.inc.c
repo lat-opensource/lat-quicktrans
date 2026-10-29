@@ -416,7 +416,14 @@ static bool ft_emit_string_body(uint32_t **out,
             ft_emit_raw(out, ft_gpr2(ft_string_x86sub_op(bytes), la_t0,
                                     la_t1));
         }
-        FT_LA_XOR_EMIT(out, la_t0, la_t0, la_t1);
+        /* Only REP/REPNE consumes an equality value for loop control. */
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        if (fields->prefix0 == dt_X86_PREFIX_REP ||
+            fields->prefix0 == dt_X86_PREFIX_REPNE)
+#endif
+        {
+            FT_LA_XOR_EMIT(out, la_t0, la_t0, la_t1);
+        }
         return true;
     }
     if (ft_string_is_scas(id)) {
@@ -430,6 +437,13 @@ static bool ft_emit_string_body(uint32_t **out,
             ft_emit_raw(out, ft_gpr2(ft_string_x86sub_op(bytes),
                                     ft_gpr(rax_index), la_t1));
         }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+        /* The accumulator extraction/XOR is not the flags calculation. */
+        if (fields->prefix0 != dt_X86_PREFIX_REP &&
+            fields->prefix0 != dt_X86_PREFIX_REPNE) {
+            return true;
+        }
+#endif
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
         if (id == dt_X86_INS_SCASQ) {
             FT_LA_XOR_EMIT(out, la_t0, ft_gpr(rax_index), la_t1);

@@ -157,6 +157,13 @@ static int ft_emit_movd_xmm_r32_template(const FastTemplateFields *fields, Trans
             return 0;
         }
         src = ft_gpr(src);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+        if (option_enable_lasx) {
+            FT_LA_MOVGR2FR_W_EMIT(&out, ft_vscratch, src);
+            FT_LA_XVPICKVE_W_EMIT(&out, ft_xmm(dst), ft_vscratch, 0);
+            return out - code;
+        }
+#endif
     } else if (!ft_emit_load_rm32(&out, fields, pc, &src)) {
         return 0;
     }
@@ -281,6 +288,19 @@ static int ft_emit_movd_rm32_mmx_template(const FastTemplateFields *fields,
         FT_LA_FST_S_EMIT(&out, ft_mmx(src), addr,
                          ft_mem_access_offset(fields, addr));
         return (out - code);
+    }
+#endif
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (fields->modrm_mod == 3) {
+        int dst = ft_modrm_rm_index(fields);
+        if (dst >= GPR_NUM) {
+            return 0;
+        }
+        FT_LA_MOVFR2GR_D_EMIT(&out, ft_gpr(dst), ft_mmx(src));
+        if (!ft_omit_gpr_zext32(fields)) {
+            FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+        }
+        return out - code;
     }
 #endif
     FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(src));
@@ -1222,6 +1242,26 @@ static int ft_emit_pmovx_template(const FastTemplateFields *fields, TranslationB
      * option_enable_lasx is gated by the host startup capability check. */
     if (option_enable_lasx) {
         switch (fields->id) {
+#ifdef QUICKTRANS_LATU
+        case dt_X86_INS_PMOVSXBW:
+            FT_LA_VEXT2XV_H_B_EMIT(&out, ft_xmm(dst), src);
+            return out - code;
+        case dt_X86_INS_PMOVZXBW:
+            FT_LA_VEXT2XV_HU_BU_EMIT(&out, ft_xmm(dst), src);
+            return out - code;
+        case dt_X86_INS_PMOVSXWD:
+            FT_LA_VEXT2XV_W_H_EMIT(&out, ft_xmm(dst), src);
+            return out - code;
+        case dt_X86_INS_PMOVZXWD:
+            FT_LA_VEXT2XV_WU_HU_EMIT(&out, ft_xmm(dst), src);
+            return out - code;
+        case dt_X86_INS_PMOVSXDQ:
+            FT_LA_VEXT2XV_D_W_EMIT(&out, ft_xmm(dst), src);
+            return out - code;
+        case dt_X86_INS_PMOVZXDQ:
+            FT_LA_VEXT2XV_DU_WU_EMIT(&out, ft_xmm(dst), src);
+            return out - code;
+#endif
         case dt_X86_INS_PMOVSXBD:
             FT_LA_VEXT2XV_W_B_EMIT(&out, ft_xmm(dst), src);
             return (out - code);
@@ -2716,6 +2756,10 @@ static int ft_emit_cvtpi2pd_template(const FastTemplateFields *fields, Translati
         src = ft_vscratch;
     }
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* Both signed dwords fit exactly in double precision. */
+    FT_LA_VFFINTL_D_W_EMIT(&out, ft_xmm(dst), src);
+#else
     FT_LA_FFINT_D_W_EMIT(&out, ft_vscratch + 1, src);
     ft_emit_lats_simd_fpe_check(&out, tb, pc);
     FT_LA_VSHUF4I_W_EMIT(&out, ft_vscratch, src, 0x55);
@@ -2723,6 +2767,7 @@ static int ft_emit_cvtpi2pd_template(const FastTemplateFields *fields, Translati
     ft_emit_lats_simd_fpe_check(&out, tb, pc);
     FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_vscratch + 1, 0);
     FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), ft_vscratch, 0x10);
+#endif
     return (out - code);
 }
 
@@ -2975,7 +3020,14 @@ static int ft_emit_cvt_fp_xmm_template(const FastTemplateFields *fields, Transla
         }
         FT_LA_VFCVT_S_D_EMIT(&out, result, src, src);
         ft_emit_lats_simd_fpe_check(&out, tb, pc);
-        FT_LA_VINSGR2VR_D_EMIT(&out, result, la_zero, 1);
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_AVX_OPT)
+        if (option_enable_lasx) {
+            FT_LA_XVPICKVE_D_EMIT(&out, result, result, 0);
+        } else
+#endif
+        {
+            FT_LA_VINSGR2VR_D_EMIT(&out, result, la_zero, 1);
+        }
         if (fpe) {
             FT_LA_VOR_V_EMIT(&out, ft_xmm(dst), result, result);
         }
@@ -4042,6 +4094,11 @@ static void ft_emit_pclmul_ctz_loop(uint32_t **out, int lhs, int rhs,
 
     ft_bind_branch_label(&loop, *out);
     FT_LA_CTZ_D_EMIT(out, shift, lhs);
+#ifdef QUICKTRANS_LATU
+    /* Schedule independent work before consuming the CTZ result. */
+    FT_LA_ADDI_D_EMIT(out, tmp, lhs, -1);
+    FT_LA_AND_EMIT(out, lhs, lhs, tmp);
+#endif
     FT_LA_SLL_D_EMIT(out, tmp, rhs, shift);
     FT_LA_XOR_EMIT(out, res_lo, res_lo, tmp);
     FT_LA_ADDI_D_EMIT(out, tmp, la_zero, 64);
@@ -4051,8 +4108,10 @@ static void ft_emit_pclmul_ctz_loop(uint32_t **out, int lhs, int rhs,
     FT_LA_SUB_D_EMIT(out, shift, la_zero, shift);
     FT_LA_AND_EMIT(out, tmp, tmp, shift);
     FT_LA_XOR_EMIT(out, res_hi, res_hi, tmp);
+#ifndef QUICKTRANS_LATU
     FT_LA_ADDI_D_EMIT(out, tmp, lhs, -1);
     FT_LA_AND_EMIT(out, lhs, lhs, tmp);
+#endif
     {
         FastBranchFixup loop_fixup;
 

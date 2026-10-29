@@ -871,7 +871,9 @@ static int ft_emit_xadd_reg_template(const FastTemplateFields *fields, Translati
 static bool ft_emit_div_rm32(uint32_t **out, const FastTemplateFields *fields,
                              target_ulong pc)
 {
+#if !defined(QUICKTRANS_LATU) || defined(CONFIG_SOFTMMU)
     int src;
+#endif
 
     if (ft_rex_w(fields) || fields->modrm_reg != 6) {
         return false;
@@ -882,6 +884,11 @@ static bool ft_emit_div_rm32(uint32_t **out, const FastTemplateFields *fields,
     }
 
     /* The skipped producer precedes all divisor addressing and faults. */
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (!ft_emit_load_rm32_zext(out, fields, pc, la_t0)) {
+        return false;
+    }
+#else
     if (!ft_emit_load_rm32(out, fields, pc, &src)) {
         return false;
     }
@@ -891,6 +898,7 @@ static bool ft_emit_div_rm32(uint32_t **out, const FastTemplateFields *fields,
 #else
     FT_LA_OR_EMIT(out, la_t0, src, la_zero);
     FT_LA_BSTRPICK_D_EMIT(out, la_t0, la_t0, 31, 0);
+#endif
 #endif
     {
         FastBranchLabel nonzero = { 0 };
