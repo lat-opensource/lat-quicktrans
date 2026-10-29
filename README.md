@@ -31,3 +31,8 @@ reference instruction descriptions. Keep generated code and references in sync.
 Quicktrans is distributed under the MIT License. Capstone-derived definitions
 retain their BSD-3-Clause terms. See `LICENSE`, `LICENSES/BSD-3-Clause.txt`, and
 `THIRD_PARTY_NOTICES.md`; all copyright and attribution notices are retained.
+
+## Host integration
+
+See [embedding instructions](docs/embedding-latx.md) and the
+[translator ABI](docs/translator-abi.md) for required host contracts.
