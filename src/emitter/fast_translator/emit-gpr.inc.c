@@ -558,14 +558,28 @@ static int ft_emit_rdtsc_template(const FastTemplateFields *fields,
         return 0;
     }
 
-    ft_emit_li64(&out, la_t0, pc);
-    ft_emit_store_env(&out, la_t0, lsenv_offset_of_eip(lsenv),
-                      FT_LA_OPCODE_ST_D);
-    if (!ft_emit_lats_nofp_helper(&out, (void *)helper_rdtsc)) {
-        ft_emit_helper_prologue(&out);
-        ft_emit_cpu_env_ptr(&out, la_a0);
-        ft_emit_host_call(&out, (void *)helper_rdtsc, 1u << 0);
-        ft_emit_helper_epilogue(&out);
+#if !defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_RR)
+    if (option_opt_rdtsc_rdtscp) {
+        /* Match the old LATS CONFIG_TSC_X25 scaling. */
+        FT_LA_RDTIME_D_EMIT(&out, la_t2, la_t3);
+        FT_LA_SLLI_D_EMIT(&out, la_t3, la_t2, 4);
+        FT_LA_ADD_D_EMIT(&out, la_t3, la_t3, la_t2);
+        FT_LA_SLLI_D_EMIT(&out, la_t2, la_t2, 3);
+        FT_LA_ADD_D_EMIT(&out, la_t2, la_t2, la_t3);
+        FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(edx_index), la_t2, 63, 32);
+        FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(eax_index), la_t2, 31, 0);
+    } else
+#endif
+    {
+        ft_emit_li64(&out, la_t0, pc);
+        ft_emit_store_env(&out, la_t0, lsenv_offset_of_eip(lsenv),
+                          FT_LA_OPCODE_ST_D);
+        if (!ft_emit_lats_nofp_helper(&out, (void *)helper_rdtsc)) {
+            ft_emit_helper_prologue(&out);
+            ft_emit_cpu_env_ptr(&out, la_a0);
+            ft_emit_host_call(&out, (void *)helper_rdtsc, 1u << 0);
+            ft_emit_helper_epilogue(&out);
+        }
     }
     if (fields->kind == FT_RDTSCP) {
         ft_emit_load_env(&out, ft_gpr(ecx_index),

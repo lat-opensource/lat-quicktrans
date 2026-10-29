@@ -17,13 +17,23 @@ def main():
 
     require(body, "#ifdef CONFIG_SOFTMMU",
             "RDTSC must have a system-mode implementation")
-    system_body, user_body = body.split("#else", 1)
+    system_body, user_body = body.rsplit("#else", 1)
     require(system_body, "helper_rdtsc",
-            "system-mode RDTSC must use the virtual TSC helper")
+            "system-mode RDTSC lost its helper fallback")
+    require(system_body, "option_opt_rdtsc_rdtscp",
+            "system-mode RDTSC is not controlled by the legacy option")
+    require(system_body, "CONFIG_TSC_X25 scaling",
+            "system-mode RDTSC lost the legacy x25 scale")
+    require(system_body, "FT_LA_SLLI_D_EMIT",
+            "system-mode RDTSC lost the x16 and x8 shifts")
+    require(system_body, "#if !defined(QUICKTRANS_LATU) && !defined(CONFIG_LATX_RR)",
+            "the LATS host-counter path must exclude LATU and record/replay")
+    require(system_body, "FT_LA_RDTIME_D_EMIT",
+            "enabled system-mode RDTSC must read the host counter")
+    require(system_body, "FT_LA_ADD_D_EMIT",
+            "enabled system-mode RDTSC lost the low frequency bit")
     require(system_body, "offsetof(CPUX86State, tsc_aux)",
             "system-mode RDTSCP must load TSC_AUX")
-    if "FT_LA_RDTIME_D_EMIT" in system_body:
-        raise SystemExit("system-mode RDTSC must not read the host counter")
     require(user_body, "FT_LA_RDTIME_D_EMIT",
             "non-system RDTSC lost its direct counter implementation")
 
