@@ -53,22 +53,25 @@ keys=['LATX_QUICKTRANS_STATS','LATX_TRANSLATOR_STATS','LATX_FT_TU_STATS',
 count=0
 with tempfile.TemporaryDirectory() as tmp:
  p=Path(tmp); (p/'test.c').write_text(head+body+tail)
- for soft,profile in [(0,0),(0,1),(1,0)]:
-  exe=p/('test-%s-%s'%(soft,profile))
-  subprocess.run(['cc','-O2','-pthread','-DPROFILE='+str(profile),
-       *(['-DCONFIG_SOFTMMU'] if soft else []),str(p/'test.c'),'-o',str(exe)],check=True)
-  for mask in range(128):
+ for debug in [False, True]:
+  for soft,profile in [(0,0),(0,1),(1,0)]:
+   exe=p/('test-%s-%s'%(soft,profile))
+   subprocess.run(['cc','-O2','-pthread','-DPROFILE='+str(profile),
+        *(['-DCONFIG_LATX_DEBUG'] if debug else []),
+        *(['-DCONFIG_SOFTMMU'] if soft else []),str(p/'test.c'),'-o',str(exe)],check=True)
+   for mask in range(128):
+    env=dict(os.environ)
+    for k in keys:env.pop(k,None)
+    for i,k in enumerate(keys):
+     if mask&(1<<i):env[k]='1' if i==0 else ''
+    expected=1 | (2 if not soft and (profile or mask&(15 if debug else 3)) else 0)
+    if debug:
+     expected |= (4 if mask&16 else 0)|(8 if mask&32 else 0)|(16 if mask&64 else 0)
+    subprocess.run([str(exe),str(expected),*(['threads'] if mask in (0,127) else [])],env=env,check=True)
+    count+=1
    env=dict(os.environ)
    for k in keys:env.pop(k,None)
-   for i,k in enumerate(keys):
-    if mask&(1<<i):env[k]='1' if i==0 else ''
-   expected=1 | (2 if not soft and (profile or mask&15) else 0)
-   expected |= (4 if mask&16 else 0)|(8 if mask&32 else 0)|(16 if mask&64 else 0)
-   subprocess.run([str(exe),str(expected),*(['threads'] if mask in (0,127) else [])],env=env,check=True)
+   env[keys[0]]='0'
+   subprocess.run([str(exe),str(3 if profile and not soft else 1)],env=env,check=True)
    count+=1
-  env=dict(os.environ)
-  for k in keys:env.pop(k,None)
-  env[keys[0]]='0'
-  subprocess.run([str(exe),str(3 if profile and not soft else 1)],env=env,check=True)
-  count+=1
 print('PASS',count,'startup configurations, cached repeats and concurrent first use')
