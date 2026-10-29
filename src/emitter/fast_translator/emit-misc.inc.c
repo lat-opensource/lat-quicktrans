@@ -48,6 +48,12 @@ static int ft_emit_nop_template(const FastTemplateFields *fields, TranslationBlo
     (void)tb;
     (void)pc;
 
+#ifdef QUICKTRANS_LATU
+    /* Legacy LATU rejects FSETPM in both hard- and soft-FPU modes. */
+    if (fields->id == dt_X86_INS_FSETPM) {
+        return 0;
+    }
+#endif
     if (ft_emit_zero_code_allowed(fields)) {
         return 0;
     }

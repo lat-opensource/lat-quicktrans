@@ -1443,6 +1443,44 @@ static const FastTemplateRuntimeInfo ft_template_runtime_table[FT_KIND_COUNT] = 
     [FT_X87_FNSTSW_M16] = { .uses_x87_top = true },
 };
 
+/* Apply legacy LATU no-op policy after shared decoding, before metadata. */
+static void ft_apply_latu_legacy_policy(FastDecodedFT *decoded)
+{
+#ifdef QUICKTRANS_LATU
+    if (!decoded->fields_valid || !decoded->tmpl) {
+        return;
+    }
+    switch (decoded->fields.id) {
+    case dt_X86_INS_INSD:
+#ifdef CONFIG_LATX_TU
+        decoded->tmpl = NULL;
+        decoded->fields_valid = false;
+        return;
+#endif
+        /* Without TU the legacy handler succeeds without side effects. */
+        /* fall through */
+    case dt_X86_INS_INT1:
+    case dt_X86_INS_LCALL:
+    case dt_X86_INS_ARPL:
+    case dt_X86_INS_CLI:
+    case dt_X86_INS_STI:
+    case dt_X86_INS_SIDT:
+    case dt_X86_INS_SLDT:
+    case dt_X86_INS_INSB:
+    case dt_X86_INS_OUTSB:
+    case dt_X86_INS_OUTSD:
+        decoded->fields.kind = FT_NOP_MULTI;
+        decoded->tmpl = &fast_templates[FT_NOP_MULTI];
+        decoded->is_tb_ending = false;
+        break;
+    default:
+        break;
+    }
+#else
+    (void)decoded;
+#endif
+}
+
 static bool latx_fast_translate_sample_for_bench_impl(CPUArchState *env,
                                           TranslationBlock *tb,
                                           const uint8_t *bytes,
@@ -1483,6 +1521,7 @@ static bool latx_fast_translate_sample_for_bench_impl(CPUArchState *env,
         stats->decode_ns += ft_bench_now_ns() - stage_start;
     }
 
+    ft_apply_latu_legacy_policy(&decoded);
     tmpl = decoded.tmpl;
     meta = ft_template_runtime_info(tmpl ? tmpl->kind : FT_UNSUPPORTED);
     if (!tmpl || (ft_template_is_helper(tmpl->kind) &&
@@ -3283,6 +3322,7 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
             return false;
         }
 
+        ft_apply_latu_legacy_policy(&decoded);
         tmpl = decoded.tmpl;
         meta = ft_template_runtime_info(tmpl ? tmpl->kind : FT_UNSUPPORTED);
         if (!tmpl || (ft_template_is_helper(tmpl->kind) &&
@@ -3737,6 +3777,7 @@ static bool latx_fast_decode_translate_tb_primary_ex_impl(CPUArchState *env,
                 max_insn_len, 0, FT_UNSUPPORTED, icount);
         }
 
+        ft_apply_latu_legacy_policy(&decoded);
         tmpl = decoded.tmpl;
         meta = ft_template_runtime_info(tmpl ? tmpl->kind : FT_UNSUPPORTED);
         if (!tmpl || (ft_template_is_helper(tmpl->kind) &&

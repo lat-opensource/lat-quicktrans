@@ -207,8 +207,7 @@ static void ft_emit_x87_update_fcsr_by_cw(uint32_t **out, int cw)
                              FCSR_OFF_EN_I);
     }
 
-    FT_LA_BSTRINS_W_EMIT(out, la_t1, la_zero, FCSR_OFF_RM + 1,
-                         FCSR_OFF_RM);
+    /* The final BSTRINS replaces both RM bits on either branch. */
     FT_LA_BSTRPICK_W_EMIT(out, la_t2, cw, X87_CR_OFF_RC + 1,
                           X87_CR_OFF_RC);
     FT_LA_ANDI_EMIT(out, la_t3, la_t2, 1);
@@ -266,9 +265,7 @@ static void ft_emit_x87_fcom_status(uint32_t **out, int lhs, int rhs,
 
     ft_emit_load_env(out, la_t0, fpus_offset, FT_LA_OPCODE_LD_HU);
     FT_LA_BSTRINS_D_EMIT(out, la_t0, la_zero, 14, 14);
-    FT_LA_BSTRINS_D_EMIT(out, la_t0, la_zero, 10, 10);
-    FT_LA_BSTRINS_D_EMIT(out, la_t0, la_zero, 9, 9);
-    FT_LA_BSTRINS_D_EMIT(out, la_t0, la_zero, 8, 8);
+    FT_LA_BSTRINS_D_EMIT(out, la_t0, la_zero, 10, 8);
     ft_emit_raw(out, ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0, lhs, rhs,
                                   signal_all_nans ? 0x09 : 0x08));
     FT_LA_MOVCF2GR_EMIT(out, la_t1, 0);
@@ -299,12 +296,10 @@ static void ft_emit_x87_fcom_status(uint32_t **out, int lhs, int rhs,
 static bool ft_emit_x87_fcomi_flags(uint32_t **out, int src, int st0,
                                     bool signal_all_nans)
 {
-    FT_LA_OR_EMIT(out, la_t2, la_zero, la_zero);
-
     ft_emit_raw(out, ft_fcmp_cond(FT_LA_OPCODE_FCMP_COND_D, 0, src, st0,
                                   signal_all_nans ? 0x09 : 0x08));
     FT_LA_MOVCF2GR_EMIT(out, la_t0, 0);
-    FT_LA_OR_EMIT(out, la_t2, la_t2, la_t0);
+    FT_LA_OR_EMIT(out, la_t2, la_zero, la_t0);
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t0, 2);
     FT_LA_OR_EMIT(out, la_t2, la_t2, la_t1);
     FT_LA_SLLI_D_EMIT(out, la_t1, la_t0, 6);
@@ -440,8 +435,12 @@ static void ft_emit_x87_mark_st_tag(uint32_t **out, unsigned int st_index,
                                     int tag)
 {
     ft_emit_x87_st_tag_addr(out, la_t3, la_t2, st_index);
-    FT_LA_ORI_EMIT(out, la_t0, la_zero, tag);
-    FT_LA_ST_B_EMIT(out, la_t0, la_t3, 0);
+    if (tag == 0) {
+        FT_LA_ST_B_EMIT(out, la_zero, la_t3, 0);
+    } else {
+        FT_LA_ORI_EMIT(out, la_t0, la_zero, tag);
+        FT_LA_ST_B_EMIT(out, la_t0, la_t3, 0);
+    }
 }
 
 static void ft_emit_x87_mark_current_tag(uint32_t **out, int tag)
@@ -478,13 +477,11 @@ static void ft_emit_x87_load_int_to_freg(uint32_t **out, int addr, int offset,
         FT_LA_FFINT_D_W_EMIT(out, freg, freg);
         break;
     case 32:
-        FT_LA_LD_W_EMIT(out, la_t0, addr, offset);
-        FT_LA_MOVGR2FR_D_EMIT(out, freg, la_t0);
+        FT_LA_FLD_S_EMIT(out, freg, addr, offset);
         FT_LA_FFINT_D_W_EMIT(out, freg, freg);
         break;
     case 64:
-        FT_LA_LD_D_EMIT(out, la_t0, addr, offset);
-        FT_LA_MOVGR2FR_D_EMIT(out, freg, la_t0);
+        FT_LA_FLD_D_EMIT(out, freg, addr, offset);
         FT_LA_FFINT_D_L_EMIT(out, freg, freg);
         break;
     default:
@@ -681,6 +678,34 @@ static void ft_emit_x87_soft_store(uint32_t **out, int addr_reg,
 
 static void ft_emit_x87_call_fsincos(uint32_t **out)
 {
+#ifdef QUICKTRANS_LATU
+    /* Keep both results on the host stack until guest FPRs are restored.
+     * The caller then pushes: old ST0 becomes ST1 (sin), old ST7 becomes
+     * the new ST0 (cos). Match legacy LATU's unconditional C2 clearing. */
+    ft_emit_load_env(out, la_t0, lsenv_offset_of_status_word(lsenv),
+                     FT_LA_OPCODE_LD_HU);
+    FT_LA_BSTRINS_D_EMIT(out, la_t0, la_zero, 10, 10);
+    ft_emit_store_env(out, la_t0, lsenv_offset_of_status_word(lsenv),
+                      FT_LA_OPCODE_ST_H);
+    FT_LA_FMOV_D_EMIT(out, ft_vscratch, ft_mmx(0));
+    ft_emit_save_gprs_to_env(out);
+    ft_emit_save_fprs_to_env(out);
+    ft_emit_save_xmms_to_env(out);
+    FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, -16);
+    FT_LA_FMOV_D_EMIT(out, 0, ft_vscratch);
+    FT_LA_OR_EMIT(out, la_a0, la_sp, la_zero);
+    FT_LA_ADDI_D_EMIT(out, la_a1, la_sp, 8);
+    ft_emit_host_call(out, (void *)sincos, 0x3);
+    ft_emit_load_xmms_from_env(out);
+    ft_emit_load_fprs_from_env(out);
+    FT_LA_FLD_D_EMIT(out, ft_mmx(0), la_sp, 0);
+    FT_LA_FLD_D_EMIT(out, ft_mmx(7), la_sp, 8);
+    FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, 16);
+    for (int i = 0; i < GPR_NUM; i++) {
+        ft_emit_load_env(out, ft_gpr(i), lsenv_offset_of_gpr(lsenv, i),
+                         FT_LA_OPCODE_LD_D);
+    }
+#else
     ft_emit_host_stack_begin(out);
     FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, -16);
     FT_LA_FST_D_EMIT(out, ft_mmx(0), la_sp, 0);
@@ -694,6 +719,7 @@ static void ft_emit_x87_call_fsincos(uint32_t **out)
     ft_emit_x87_call_unary_double(out, (void *)cos);
     FT_LA_FMOV_D_EMIT(out, ft_mmx(7), ft_mmx(0));
     FT_LA_FMOV_D_EMIT(out, ft_mmx(0), ft_vscratch + 1);
+#endif
 }
 
 static void ft_emit_x87_helper(uint32_t **out, void *func)
@@ -2391,7 +2417,6 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
 
         int status_offset = lsenv_offset_of_status_word(lsenv);
-        FastBranchLabel not_sign = { 0 };
         FastBranchLabel not_empty = { 0 };
         FastBranchLabel empty_done = { 0 };
         FastBranchLabel inf_nan = { 0 };
@@ -2402,7 +2427,6 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         FastBranchLabel infinity_done = { 0 };
         FastBranchLabel zero = { 0 };
         FastBranchLabel denorm_done = { 0 };
-        FastBranchFixup not_sign_fixup;
         FastBranchFixup not_empty_fixup;
         FastBranchFixup empty_done_fixup;
         FastBranchFixup inf_nan_fixup;
@@ -2424,13 +2448,9 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         ft_emit_li64(&out, la_t2, 0xb8ff);
         FT_LA_AND_EMIT(&out, la_t1, la_t1, la_t2);
 
-        ft_emit_li64(&out, la_t2, 0x8000000000000000ULL);
-        FT_LA_AND_EMIT(&out, la_t3, la_t0, la_t2);
-        ft_emit_branch_placeholder(&out, &not_sign_fixup, FT_BRANCH_BNE,
-                                   la_t3, la_t2, &not_sign);
-        FT_LA_ORI_EMIT(&out, la_t1, la_t1, 0x200);
-        ft_bind_branch_label(&not_sign, out);
-        ft_resolve_branch_fixup(&not_sign_fixup);
+        /* C1 is exactly the sign bit, including empty and NaN inputs. */
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t3, la_t0, 63, 63);
+        FT_LA_BSTRINS_D_EMIT(&out, la_t1, la_t3, 9, 9);
 
         ft_emit_x87_load_current_tag(&out, la_t4);
         ft_emit_branch_placeholder(&out, &not_empty_fixup, FT_BRANCH_BEQ,
@@ -2504,6 +2524,10 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             ft_emit_x87_soft_unary(&out, true);
             break;
         }
+#ifdef QUICKTRANS_LATU
+        /* Match the legacy LATU sequence, including negative zero and NaNs. */
+        FT_LA_FSQRT_D_EMIT(&out, ft_mmx(0), ft_mmx(0));
+#else
         FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(0));
         FT_LA_SRAI_D_EMIT(&out, la_t1, la_t0, 63);
         FT_LA_FSQRT_D_EMIT(&out, ft_mmx(0), ft_mmx(0));
@@ -2513,6 +2537,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         FT_LA_ANDN_EMIT(&out, la_t2, la_t2, la_t1);
         FT_LA_OR_EMIT(&out, la_t2, la_t2, la_t3);
         FT_LA_MOVGR2FR_D_EMIT(&out, ft_mmx(0), la_t2);
+#endif
         break;
     case FT_X87_FIST_M16:
     {
