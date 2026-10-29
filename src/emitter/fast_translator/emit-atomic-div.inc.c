@@ -383,9 +383,20 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
     bool is8 = fields->kind == FT_CMPXCHG_RM8_R8;
     int src = ft_modrm_reg_index(fields);
     int addr;
+    int offset = 0;
 
-    if (src >= GPR_NUM || fields->modrm_mod == 3 ||
-        !ft_emit_rmw_addr(out, fields, pc, &addr, la_t4)) {
+    if (src >= GPR_NUM || fields->modrm_mod == 3) {
+        return false;
+    }
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if ((is8 || is16 || is64) && fields->prefix0 != dt_X86_PREFIX_LOCK) {
+        if (!ft_emit_rip_or_mem_addr(out, fields, pc, &addr)) {
+            return false;
+        }
+        offset = ft_mem_access_offset(fields, addr);
+    } else
+#endif
+    if (!ft_emit_rmw_addr(out, fields, pc, &addr, la_t4)) {
         return false;
     }
     ft_preserve_cmpxchg_addr(out, &addr);
@@ -402,22 +413,25 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
             value = la_t2;
         }
         ft_emit_raw(out, ft_gpr3_imm12(is8 ? FT_LA_OPCODE_LD_BU :
-                                     FT_LA_OPCODE_LD_HU, la_t1, addr, 0));
+                                     FT_LA_OPCODE_LD_HU, la_t1, addr, offset));
         FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index),
                               is8 ? 7 : 15, 0);
-        FT_LA_BNE_EMIT(out, la_t1, la_t3, 3);
+        FT_LA_BNE_EMIT(out, la_t1, la_t3, fields->skip_flags ? 3 : 4);
         ft_emit_raw(out, ft_gpr3_imm12(is8 ? FT_LA_OPCODE_ST_B :
-                                     FT_LA_OPCODE_ST_H, value, addr, 0));
-        FT_LA_B_EMIT(out, 2);
-        /* A failed comparison still performs a write access. */
-        ft_emit_raw(out, ft_gpr3_imm12(is8 ? FT_LA_OPCODE_ST_B :
-                                     FT_LA_OPCODE_ST_H, la_t1, addr, 0));
+                                     FT_LA_OPCODE_ST_H, value, addr, offset));
         if (!fields->skip_flags) {
-            if (is8) {
-                FT_LA_X86SUB_B_EMIT(out, ft_gpr(rax_index), la_t1);
-            } else {
-                FT_LA_X86SUB_H_EMIT(out, ft_gpr(rax_index), la_t1);
-            }
+            ft_emit_raw(out, ft_gpr2(is8 ? FT_LA_OPCODE_X86SUB_B :
+                                    FT_LA_OPCODE_X86SUB_H,
+                                    ft_gpr(rax_index), la_t1));
+        }
+        FT_LA_B_EMIT(out, fields->skip_flags ? 3 : 4);
+        /* Complete the write access before changing flags or the accumulator. */
+        ft_emit_raw(out, ft_gpr3_imm12(is8 ? FT_LA_OPCODE_ST_B :
+                                     FT_LA_OPCODE_ST_H, la_t1, addr, offset));
+        if (!fields->skip_flags) {
+            ft_emit_raw(out, ft_gpr2(is8 ? FT_LA_OPCODE_X86SUB_B :
+                                    FT_LA_OPCODE_X86SUB_H,
+                                    ft_gpr(rax_index), la_t1));
         }
         FT_LA_BSTRINS_D_EMIT(out, ft_gpr(rax_index), la_t1,
                              is8 ? 7 : 15, 0);
@@ -427,13 +441,13 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
         fields->prefix0 != dt_X86_PREFIX_LOCK) {
         /* Reuse the compare branch for the RAX write decision.  Both
          * paths finish their write cycle before changing guest state. */
-        FT_LA_LD_WU_EMIT(out, la_t1, addr, 0);
+        FT_LA_LD_WU_EMIT(out, la_t1, addr, offset);
         FT_LA_BSTRPICK_D_EMIT(out, la_t3, ft_gpr(rax_index), 31, 0);
         FT_LA_BNE_EMIT(out, la_t1, la_t3, 4);
-        FT_LA_ST_W_EMIT(out, ft_gpr(src), addr, 0);
+        FT_LA_ST_W_EMIT(out, ft_gpr(src), addr, offset);
         FT_LA_X86SUB_W_EMIT(out, ft_gpr(rax_index), la_t1);
         FT_LA_B_EMIT(out, 4);
-        FT_LA_ST_W_EMIT(out, la_t1, addr, 0);
+        FT_LA_ST_W_EMIT(out, la_t1, addr, offset);
         FT_LA_X86SUB_W_EMIT(out, ft_gpr(rax_index), la_t1);
         FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
         return true;
@@ -441,11 +455,12 @@ static bool ft_emit_cmpxchg_rm(uint32_t **out,
     if (is64 && fields->prefix0 != dt_X86_PREFIX_LOCK) {
         /* Non-LOCK CMPXCHG needs no atomic RMW.  Keep the write cycle on
          * mismatch too, and do not change guest state before it succeeds. */
-        FT_LA_LD_D_EMIT(out, la_t1, addr, 0);
-        FT_LA_BNE_EMIT(out, la_t1, ft_gpr(rax_index), 3);
-        FT_LA_ST_D_EMIT(out, ft_gpr(src), addr, 0);
-        FT_LA_B_EMIT(out, 2);
-        FT_LA_ST_D_EMIT(out, la_t1, addr, 0);
+        FT_LA_LD_D_EMIT(out, la_t1, addr, offset);
+        FT_LA_BNE_EMIT(out, la_t1, ft_gpr(rax_index), 4);
+        FT_LA_ST_D_EMIT(out, ft_gpr(src), addr, offset);
+        FT_LA_X86SUB_D_EMIT(out, ft_gpr(rax_index), la_t1);
+        FT_LA_B_EMIT(out, 4);
+        FT_LA_ST_D_EMIT(out, la_t1, addr, offset);
         FT_LA_X86SUB_D_EMIT(out, ft_gpr(rax_index), la_t1);
         FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
         return true;
