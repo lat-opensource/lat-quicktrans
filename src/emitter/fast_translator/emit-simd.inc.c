@@ -92,9 +92,8 @@ static int ft_emit_pextrw_r32_mmx_imm8_template(const FastTemplateFields *fields
     }
 
     /* PEXTRW with no 66 prefix reads an MMX register; REX.W is ignored. */
-    FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(src));
-    FT_LA_SRLI_D_EMIT(&out, la_t0, la_t0, (fields->imm & 3) * 16);
-    FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), la_t0, 15, 0);
+    FT_LA_VPICKVE2GR_HU_EMIT(&out, ft_gpr(dst), ft_mmx(src),
+                             fields->imm & 3);
     return out - code;
 }
 
@@ -105,7 +104,6 @@ static int ft_emit_pinsrw_mmx_rm16_imm8_template(
     uint32_t *out = code;
     int dst;
     int src;
-    int value;
 
     (void)tb;
 
@@ -120,12 +118,7 @@ static int ft_emit_pinsrw_mmx_rm16_imm8_template(
     }
 
     /* REX.W is ignored, but REX.X/B were used while decoding the address. */
-    value = src == la_t0 ? la_t1 : la_t0;
-    FT_LA_MOVFR2GR_D_EMIT(&out, value, ft_mmx(dst));
-    FT_LA_BSTRINS_D_EMIT(&out, value, src,
-                          ((fields->imm & 3) * 16) + 15,
-                          (fields->imm & 3) * 16);
-    FT_LA_MOVGR2FR_D_EMIT(&out, ft_mmx(dst), value);
+    FT_LA_VINSGR2VR_H_EMIT(&out, ft_mmx(dst), src, fields->imm & 3);
     return out - code;
 }
 
@@ -316,7 +309,7 @@ static int ft_emit_pmovmskb_r32_xmm_template(const FastTemplateFields *fields, T
     }
     ft_emit_raw(&out, FT_LA_OPCODE_MOVFR2GR_D | ft_gpr(dst) |
                 (ft_vscratch << 5));
-    FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
+    /* VMSKLTZ zeroes the bits above its 2/4/16-bit sign mask. */
     return (out - code);
 }
 
@@ -639,24 +632,22 @@ static int ft_emit_palignr_mmx_template(const FastTemplateFields *fields,
     }
 
     if (imm >= 8) {
-        FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(dst));
-        FT_LA_SRLI_D_EMIT(&out, la_t0, la_t0, (imm - 8) * 8);
-        FT_LA_MOVGR2FR_D_EMIT(&out, ft_mmx(dst), la_t0);
+        FT_LA_VINSGR2VR_D_EMIT(&out, ft_mmx(dst), la_zero, 1);
+        FT_LA_VBSRL_V_EMIT(&out, ft_mmx(dst), ft_mmx(dst), imm - 8);
         return out - code;
     }
     if (!ft_emit_mmxm64_src(&out, fields, pc, &src)) {
         return 0;
     }
-    if (imm != 0) {
-        FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(dst));
+    if (imm == 0) {
+        FT_LA_FMOV_D_EMIT(&out, ft_mmx(dst), src);
+    } else {
+        int joined = ft_vscratch + 1;
+
+        FT_LA_VOR_V_EMIT(&out, joined, src, src);
+        FT_LA_VEXTRINS_D_EMIT(&out, joined, ft_mmx(dst), 0x10);
+        FT_LA_VBSRL_V_EMIT(&out, ft_mmx(dst), joined, imm);
     }
-    FT_LA_MOVFR2GR_D_EMIT(&out, la_t1, src);
-    if (imm != 0) {
-        FT_LA_SRLI_D_EMIT(&out, la_t1, la_t1, imm * 8);
-        FT_LA_SLLI_D_EMIT(&out, la_t0, la_t0, (8 - imm) * 8);
-        FT_LA_OR_EMIT(&out, la_t1, la_t1, la_t0);
-    }
-    FT_LA_MOVGR2FR_D_EMIT(&out, ft_mmx(dst), la_t1);
     return out - code;
 }
 
@@ -971,7 +962,9 @@ static int ft_emit_movdup_template(const FastTemplateFields *fields, Translation
     if (dst >= XMM_NUM) {
         return 0;
     }
-    if (!ft_emit_xmmm_src(&out, fields, pc, &src)) {
+    if (!ft_emit_xmmm_src_bytes(&out, fields, pc,
+                                fields->id == dt_X86_INS_MOVDDUP ? 8 : 16,
+                                &src)) {
         return 0;
     }
 
@@ -1283,12 +1276,17 @@ static int ft_emit_extractps_template(const FastTemplateFields *fields, Translat
         return 0;
     }
 
-    FT_LA_VXOR_V_EMIT(&out, ft_vscratch, ft_vscratch, ft_vscratch);
-    FT_LA_VEXTRINS_W_EMIT(&out, ft_vscratch, ft_xmm(src), imm);
-    FT_LA_MOVFR2GR_S_EMIT(&out, la_t1, ft_vscratch);
-    FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t1, 31, 0);
-    if (!ft_emit_store_rm32(&out, fields, pc, la_t1, true)) {
-        return 0;
+    if (fields->modrm_mod == 3) {
+        int dst = ft_modrm_rm_index(fields);
+        if (dst >= GPR_NUM) {
+            return 0;
+        }
+        FT_LA_VPICKVE2GR_WU_EMIT(&out, ft_gpr(dst), ft_xmm(src), imm);
+    } else {
+        FT_LA_VPICKVE2GR_WU_EMIT(&out, la_t1, ft_xmm(src), imm);
+        if (!ft_emit_store_rm32(&out, fields, pc, la_t1, false)) {
+            return 0;
+        }
     }
     return (out - code);
 }
@@ -1986,8 +1984,8 @@ static int ft_emit_psra_mmx_template(const FastTemplateFields *fields,
     uint32_t *out = code;
     int dst = fields->modrm_reg;
     int src;
-    int count_src = ft_vscratch + 3;
-    int valid_count = ft_vscratch;
+    /* Preserve a memory source in scratch until count replication. */
+    int valid_count = ft_vscratch + 3;
     int count = ft_vscratch + 1;
     int sign = ft_vscratch + 2;
     bool is_psrad = fields->id == dt_X86_INS_PSRAD;
@@ -2017,16 +2015,15 @@ static int ft_emit_psra_mmx_template(const FastTemplateFields *fields,
         src = ft_vscratch;
     }
 
-    FT_LA_VOR_V_EMIT(&out, count_src, src, src);
-    FT_LA_VREPLVEI_D_EMIT(&out, valid_count, count_src, 0);
+    FT_LA_VREPLVEI_D_EMIT(&out, valid_count, src, 0);
     FT_LA_VSLEI_DU_EMIT(&out, valid_count, valid_count,
                         is_psrad ? 31 : 15);
     if (is_psrad) {
-        FT_LA_VREPLVEI_W_EMIT(&out, count, count_src, 0);
+        FT_LA_VREPLVEI_W_EMIT(&out, count, src, 0);
         FT_LA_VSRAI_W_EMIT(&out, sign, ft_mmx(dst), 31);
         FT_LA_VSRA_W_EMIT(&out, ft_mmx(dst), ft_mmx(dst), count);
     } else {
-        FT_LA_VREPLVEI_H_EMIT(&out, count, count_src, 0);
+        FT_LA_VREPLVEI_H_EMIT(&out, count, src, 0);
         FT_LA_VSRAI_H_EMIT(&out, sign, ft_mmx(dst), 15);
         FT_LA_VSRA_H_EMIT(&out, ft_mmx(dst), ft_mmx(dst), count);
     }
@@ -2495,8 +2492,7 @@ static int ft_emit_phminposuw_template(const FastTemplateFields *fields, Transla
         return 0;
     }
 
-    FT_LA_VORI_B_EMIT(&out, temp, src, 0);
-    FT_LA_VSRLI_D_EMIT(&out, temp, temp, 0x10);
+    FT_LA_VSRLI_D_EMIT(&out, temp, src, 0x10);
     FT_LA_VMIN_HU_EMIT(&out, temp, temp, src);
     FT_LA_VSRLI_D_EMIT(&out, temp, temp, 0x10);
     FT_LA_VMIN_HU_EMIT(&out, temp, temp, src);

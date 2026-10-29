@@ -3915,8 +3915,8 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
              (fields->opcode1 == 0xf3 &&
               fields->id == dt_X86_INS_PSLLQ))) {
             int mmx_dst = ft_modrm_reg_index(fields);
-            int count_src = ft_vscratch + 3;
-            int mask = ft_vscratch;
+            /* Keep the mask separate from a memory source in scratch. */
+            int mask = ft_vscratch + 3;
             int count = ft_vscratch + 1;
             bool is_left = fields->opcode1 >= 0xf1;
             bool is_word = fields->opcode1 == 0xd1 ||
@@ -3944,12 +3944,11 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                                  ft_mem_access_offset(fields, addr));
                 src = ft_vscratch;
             }
-            FT_LA_VOR_V_EMIT(&out, count_src, src, src);
-            FT_LA_VREPLVEI_D_EMIT(&out, mask, count_src, 0);
+            FT_LA_VREPLVEI_D_EMIT(&out, mask, src, 0);
             if (is_word) {
                 FT_LA_VSLEI_DU_EMIT(&out, mask, mask, 15);
                 ft_emit_raw(&out, FT_LA_OPCODE_VREPLVEI_H | count |
-                            (count_src << 5));
+                            (src << 5));
                 ft_emit_raw(&out, ft_gpr3(is_left ? FT_LA_OPCODE_VSLL_H :
                                                      FT_LA_OPCODE_VSRL_H,
                                           ft_mmx(mmx_dst), ft_mmx(mmx_dst),
@@ -3957,7 +3956,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             } else if (is_dword) {
                 FT_LA_VSLEI_DU_EMIT(&out, mask, mask, 31);
                 ft_emit_raw(&out, FT_LA_OPCODE_VREPLVEI_W | count |
-                            (count_src << 5));
+                            (src << 5));
                 ft_emit_raw(&out, ft_gpr3(is_left ? FT_LA_OPCODE_VSLL_W :
                                                      FT_LA_OPCODE_VSRL_W,
                                           ft_mmx(mmx_dst), ft_mmx(mmx_dst),
@@ -3966,7 +3965,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 FT_LA_VSRLI_D_EMIT(&out, mask, mask, 6);
                 FT_LA_VSEQI_D_EMIT(&out, mask, mask, 0);
                 ft_emit_raw(&out, FT_LA_OPCODE_VREPLVEI_D | count |
-                            (count_src << 5));
+                            (src << 5));
                 ft_emit_raw(&out, ft_gpr3(is_left ? FT_LA_OPCODE_VSLL_D :
                                                      FT_LA_OPCODE_VSRL_D,
                                           ft_mmx(mmx_dst), ft_mmx(mmx_dst),
@@ -4118,8 +4117,8 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             id == dt_X86_INS_PSLLQ || id == dt_X86_INS_PSRLW ||
             id == dt_X86_INS_PSRLD || id == dt_X86_INS_PSRLQ ||
             id == dt_X86_INS_PSRAW || id == dt_X86_INS_PSRAD) {
-            int count_src = ft_vscratch + 3;
-            int mask = ft_vscratch;
+            /* Keep the mask separate from a memory source in scratch. */
+            int mask = ft_vscratch + 3;
             int count = ft_vscratch + 1;
             int sign = ft_vscratch + 2;
             int max_count = (id == dt_X86_INS_PSLLW ||
@@ -4136,8 +4135,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             uint32_t sign_op = (max_count == 15) ? FT_LA_OPCODE_VSRAI_H :
                                (max_count == 31) ? FT_LA_OPCODE_VSRAI_W : 0;
 
-            FT_LA_VOR_V_EMIT(&out, count_src, src, src);
-            FT_LA_VREPLVEI_D_EMIT(&out, mask, count_src, 0);
+            FT_LA_VREPLVEI_D_EMIT(&out, mask, src, 0);
             if (max_count == 63) {
                 /* VSLEI.DU has only a 5-bit immediate.  A qword shift
                  * count is valid iff its bits above bit 5 are all zero. */
@@ -4146,7 +4144,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             } else {
                 FT_LA_VSLEI_DU_EMIT(&out, mask, mask, max_count);
             }
-            ft_emit_raw(&out, repl_op | count | (count_src << 5));
+            ft_emit_raw(&out, repl_op | count | (src << 5));
             if (is_arith) {
                 ft_emit_raw(&out, sign_op | sign | (ft_xmm(dst) << 5) |
                             (((uint32_t)max_count) << 10));
@@ -4183,13 +4181,10 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         }
         if (id == dt_X86_INS_PABSB || id == dt_X86_INS_PABSW ||
             id == dt_X86_INS_PABSD) {
-            if (src == ft_xmm(dst)) {
-                FT_LA_VOR_V_EMIT(&out, ft_vscratch, src, src);
-                src = ft_vscratch;
-            }
-            FT_LA_VANDI_B_EMIT(&out, ft_xmm(dst), ft_xmm(dst), 0);
-            ft_emit_raw(&out, ft_gpr3(la_opcode, ft_xmm(dst), src,
-                                      ft_xmm(dst)));
+            /* A separate zero preserves an aliased source without a copy. */
+            int zero = ft_vscratch + 1;
+            FT_LA_VANDI_B_EMIT(&out, zero, zero, 0);
+            ft_emit_raw(&out, ft_gpr3(la_opcode, ft_xmm(dst), src, zero));
             goto simd_bin_done;
         }
         if (simd_fpe) {
@@ -4331,13 +4326,12 @@ simd_bin_done:
             int keep = ft_vscratch + 1;
 
             FT_LA_VOR_V_EMIT(&out, keep, src, src);
-            FT_LA_VOR_V_EMIT(&out, ft_xmm(dst), src, src);
             if (fields->id == dt_X86_INS_PSHUFLW) {
                 FT_LA_VBSRL_V_EMIT(&out, keep, keep, 8);
-                FT_LA_VSHUF4I_H_EMIT(&out, ft_xmm(dst), ft_xmm(dst), imm);
+                FT_LA_VSHUF4I_H_EMIT(&out, ft_xmm(dst), src, imm);
                 FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), keep, 0x1 << 4);
             } else {
-                FT_LA_VSHUF4I_H_EMIT(&out, ft_xmm(dst), ft_xmm(dst), imm);
+                FT_LA_VSHUF4I_H_EMIT(&out, ft_xmm(dst), src, imm);
                 FT_LA_VEXTRINS_D_EMIT(&out, ft_xmm(dst), keep, 0);
             }
             break;
@@ -4597,8 +4591,7 @@ simd_bin_done:
                     return 0;
                 }
             } else {
-                FT_LA_VPICKVE2GR_WU_EMIT(&out, value, ft_xmm(src), 0);
-                FT_LA_ST_W_EMIT(&out, value, addr, offset);
+                FT_LA_FST_S_EMIT(&out, ft_xmm(src), addr, offset);
             }
         }
         break;
@@ -4755,7 +4748,6 @@ simd_bin_done:
                                     is_double ? 8 : 4, &rhs)) {
             return 0;
         }
-        FT_LA_OR_EMIT(&out, unordered, la_zero, la_zero);
         if (is_double) {
             FT_LA_FCMP_COND_D_EMIT(&out, 0, ft_xmm(lhs), rhs, cueq);
         } else {

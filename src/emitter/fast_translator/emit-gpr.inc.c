@@ -1084,13 +1084,12 @@ static int ft_emit_xlat_template(const FastTemplateFields *fields,
 
     FT_LA_BSTRPICK_D_EMIT(&out, la_t0, ft_gpr(rax_index), 7, 0);
     if (fields->addr32) {
-        FT_LA_BSTRPICK_D_EMIT(&out, la_t1, ft_gpr(rbx_index), 31, 0);
-        FT_LA_ADD_D_EMIT(&out, la_t0, la_t1, la_t0);
-        FT_LA_BSTRPICK_D_EMIT(&out, la_t0, la_t0, 31, 0);
-    } else {
         FT_LA_ADD_D_EMIT(&out, la_t0, ft_gpr(rbx_index), la_t0);
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t0, la_t0, 31, 0);
+        FT_LA_LD_BU_EMIT(&out, la_t0, la_t0, 0);
+    } else {
+        FT_LA_LDX_BU_EMIT(&out, la_t0, ft_gpr(rbx_index), la_t0);
     }
-    FT_LA_LD_BU_EMIT(&out, la_t0, la_t0, 0);
     FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(rax_index), la_t0, 7, 0);
     return (out - code);
 }
