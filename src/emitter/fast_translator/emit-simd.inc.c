@@ -2654,12 +2654,17 @@ static int ft_emit_cvtsx2si_template(const FastTemplateFields *fields, Translati
 
     ft_emit_cvtsx2si_convert(&out, is_double, is_64, trunc, src);
     ft_emit_lats_simd_fpe_check(&out, tb, pc);
-    FT_LA_MOVFCSR2GR_EMIT(&out, la_t0, 0);
-    FT_LA_BSTRPICK_D_EMIT(&out, la_t0, la_t0, 28, 28);
-    FT_LA_SLLI_D_EMIT(&out, la_t1, la_t0, is_64 ? 63 : 31);
-    FT_LA_MOVFR2GR_D_EMIT(&out, ft_gpr(dst), ft_vscratch);
-    FT_LA_MASKNEZ_EMIT(&out, la_t0, ft_gpr(dst), la_t0);
-    FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t1, la_t0);
+    if (ft_fast_masked_v_enabled()) {
+        /* LATS handles invalid conversions in its masked-V exception path. */
+        FT_LA_MOVFR2GR_D_EMIT(&out, ft_gpr(dst), ft_vscratch);
+    } else {
+        FT_LA_MOVFCSR2GR_EMIT(&out, la_t0, 0);
+        FT_LA_BSTRPICK_D_EMIT(&out, la_t0, la_t0, 28, 28);
+        FT_LA_SLLI_D_EMIT(&out, la_t1, la_t0, is_64 ? 63 : 31);
+        FT_LA_MOVFR2GR_D_EMIT(&out, ft_gpr(dst), ft_vscratch);
+        FT_LA_MASKNEZ_EMIT(&out, la_t0, ft_gpr(dst), la_t0);
+        FT_LA_OR_EMIT(&out, ft_gpr(dst), la_t1, la_t0);
+    }
     if (!is_64) {
         FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
     }
@@ -2905,6 +2910,48 @@ static int ft_emit_cvtpi2ps_template(const FastTemplateFields *fields, Translati
     return (out - code);
 }
 
+/* Match the legacy per-element conversions: a masked invalid lane must
+ * not suppress precision flags raised by another, valid lane. */
+static void ft_emit_cvt_fp2i_lanes(uint32_t **out, TranslationBlock *tb,
+                                  target_ulong pc, int src, int dst,
+                                  bool is_double, bool trunc, int lanes)
+{
+    int result = ft_vscratch + 1;
+    int input = ft_vscratch + 2;
+    int converted = ft_vscratch + 3;
+
+    for (int lane = 0; lane < lanes; ++lane) {
+        int operand = src;
+        int lane_result = lane ? converted : result;
+        if (lane) {
+            if (is_double) {
+                FT_LA_VREPLVEI_D_EMIT(out, input, src, lane);
+            } else {
+                FT_LA_VREPLVEI_W_EMIT(out, input, src, lane);
+            }
+            operand = input;
+        }
+        if (is_double) {
+            if (trunc) {
+                FT_LA_FTINTRZ_W_D_EMIT(out, lane_result, operand);
+            } else {
+                FT_LA_FTINT_W_D_EMIT(out, lane_result, operand);
+            }
+        } else if (trunc) {
+            FT_LA_FTINTRZ_W_S_EMIT(out, lane_result, operand);
+        } else {
+            FT_LA_FTINT_W_S_EMIT(out, lane_result, operand);
+        }
+        ft_emit_lats_simd_fpe_check(out, tb, pc);
+        /* Lane zero is already in place; later lanes overwrite the
+         * remaining words before the architectural destination is updated. */
+        if (lane) {
+            FT_LA_VEXTRINS_W_EMIT(out, result, converted, lane << 4);
+        }
+    }
+    FT_LA_VAND_V_EMIT(out, dst, result, result);
+}
+
 static bool ft_emit_cvt_fp2i_core(uint32_t **out,
                                   const FastTemplateFields *fields,
                                   TranslationBlock *tb, target_ulong pc,
@@ -2920,6 +2967,17 @@ static bool ft_emit_cvt_fp2i_core(uint32_t **out,
                  fields->id == dt_X86_INS_CVTTPS2PI;
     int temp = ft_vscratch + 1;
 
+    if (ft_fast_masked_v_enabled() &&
+        fields->id != dt_X86_INS_CVTPS2DQ) {
+        bool mmx = fields->id == dt_X86_INS_CVTPS2PI ||
+                   fields->id == dt_X86_INS_CVTTPS2PI ||
+                   fields->id == dt_X86_INS_CVTPD2PI ||
+                   fields->id == dt_X86_INS_CVTTPD2PI;
+        ft_emit_cvt_fp2i_lanes(out, tb, pc, src, dst_vec,
+                               is_double, trunc, (is_double || mmx) ? 2 : 4);
+        return true;
+    }
+
     if (is_double) {
         if (trunc) {
             FT_LA_VFTINTRZ_W_D_EMIT(out, temp, src, src);
@@ -2933,7 +2991,9 @@ static bool ft_emit_cvt_fp2i_core(uint32_t **out,
     }
 
     ft_emit_lats_simd_fpe_check(out, tb, pc);
-    ft_emit_cvt_fp2i_fix_invalid(out, temp, src, is_double, trunc);
+    if (!ft_fast_masked_v_enabled()) {
+        ft_emit_cvt_fp2i_fix_invalid(out, temp, src, is_double, trunc);
+    }
     FT_LA_VAND_V_EMIT(out, dst_vec, temp, temp);
     return true;
 }
@@ -2979,10 +3039,17 @@ static int ft_emit_cvt_fp2i_mmx_template(const FastTemplateFields *fields, Trans
           fields->id == dt_X86_INS_CVTTPS2PI)) {
         return 0;
     }
-    ft_emit_store_env(&out, la_zero, lsenv_offset_of_top(lsenv),
-                      FT_LA_OPCODE_ST_W);
-    FT_LA_X86MTTOP_EMIT(&out, 0);
-    FT_LA_X86SETTM_EMIT(&out);
+    /* The LATS soft-FPU entry already initializes TOP/tag and loads MMX.
+     * Hardware x87 TOP/tag instructions are redundant in that mode. */
+#if defined(CONFIG_LATX_OPT_NOFP) && !defined(QUICKTRANS_LATU)
+    if (!(option_soft_fpu && ft_fast_masked_v_enabled()))
+#endif
+    {
+        ft_emit_store_env(&out, la_zero, lsenv_offset_of_top(lsenv),
+                          FT_LA_OPCODE_ST_W);
+        FT_LA_X86MTTOP_EMIT(&out, 0);
+        FT_LA_X86SETTM_EMIT(&out);
+    }
     if (!ft_emit_xmmm_src_bytes(&out, fields, pc, is_double ? 16 : 8, &src)) {
         return 0;
     }

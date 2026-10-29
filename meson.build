@@ -279,6 +279,12 @@ test(
 )
 
 test(
+  'quicktrans_simd_fast_masked_v',
+  python,
+  args: [files('tests/test-simd-fast-masked-v.py')],
+)
+
+test(
   'quicktrans_lats_ldmxcsr_lazy',
   python,
   args: [files('tests/test-lats-ldmxcsr-lazy.py')],

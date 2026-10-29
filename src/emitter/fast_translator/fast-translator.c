@@ -391,13 +391,15 @@ static bool ft_lazy_mxcsr_enabled(void)
 }
 #endif
 
-#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
 /* Translation-time mapping of the LATS option; no guest-side option load. */
 static bool ft_fast_masked_v_enabled(void)
 {
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
     return option_fast_masked_v != 0;
-}
+#else
+    return false;
 #endif
+}
 
 static int ft_lsenv_offset_of_tr_selector(ENV *env)
 {
