@@ -230,9 +230,6 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
                 MIN((size_t)fields->size, sizeof(inst_cache)), fields->id,
                 tmpl->kind, icount);
         }
-        fields->skip_flags = false;
-        fields->omit_zext32 = false;
-        fields->scalar_direct_dst = false;
         fields->atomic_no_barrier = atomic_no_barrier;
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
         /* POPF can enable TF inside this TB, after the entry check above. */
