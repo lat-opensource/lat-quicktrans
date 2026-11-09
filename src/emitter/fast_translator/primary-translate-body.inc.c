@@ -81,7 +81,7 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
     rsp_merge_enabled = analyze_gpr_high && !debug_skip && !debug_split &&
         !(env_cpu(env)->tcg_cflags & CF_PARALLEL) &&
         !(tb_cflags(tb) & CF_PARALLEL) &&
-        !(page_get_flags(start_pc) & PAGE_ANON);
+        !(fetch_page_flags & PAGE_ANON);
 #endif
 
 #ifndef QUICKTRANS_LATU
