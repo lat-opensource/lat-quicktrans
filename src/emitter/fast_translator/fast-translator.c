@@ -7,6 +7,13 @@
 #include "quicktrans/detail/fast-translator.h"
 #include "quicktrans/stats.h"
 
+/* Newer LATS stores TU metadata separately from the hot TB header. */
+#ifdef QUICKTRANS_LATS_SPLIT_TB_ABI
+#define FT_TU_DATA(tb) ((tb)->s_data)
+#else
+#define FT_TU_DATA(tb) (tb)
+#endif
+
 static bool ft_primary_fail(QuickTransFailure *failure,
                             QuickTransFailureStage stage,
                             QuickTransFailureReason reason,
@@ -3630,8 +3637,8 @@ static void ft_primary_update_last_info(TranslationBlock *tb,
     tb->s_data->next_pc = next_pc;
     tb->s_data->target_pc = target_pc;
 #else
-    tb->x86_next_pc = next_pc;
-    tb->x86_target_pc = target_pc;
+    FT_TU_DATA(tb)->x86_next_pc = next_pc;
+    FT_TU_DATA(tb)->x86_target_pc = target_pc;
 #endif
     tb->s_data->last_ir1_type = last_ir1_type;
 #else
@@ -4047,14 +4054,14 @@ bool latx_fast_patch_tu_tb_branches(TranslationBlock *tb)
         TranslationBlock *successor;
         uint32_t *branch;
 
-        if (tb->tu_jmp[index] == TB_JMP_RESET_OFFSET_INVALID) {
+        if (FT_TU_DATA(tb)->tu_jmp[index] == TB_JMP_RESET_OFFSET_INVALID) {
             continue;
         }
         successor = tb->s_data->next_tb[index];
         if (!successor || !successor->tc.ptr) {
             return false;
         }
-        branch = (uint32_t *)((uintptr_t)tb->tc.ptr + tb->tu_jmp[index]);
+        branch = (uint32_t *)((uintptr_t)tb->tc.ptr + FT_TU_DATA(tb)->tu_jmp[index]);
         if (!ft_patch_lats_tu_branch(branch, (uint32_t *)successor->tc.ptr)) {
             return false;
         }

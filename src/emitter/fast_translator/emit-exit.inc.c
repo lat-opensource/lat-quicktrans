@@ -81,7 +81,11 @@ static bool ft_tu_mode_enabled(void)
     }
     return enabled;
 #else
+#ifdef QUICKTRANS_LATS_SPLIT_TB_ABI
+    return jit_tu_enabled();
+#else
     return option_tu != 0;
+#endif
 #endif
 }
 
@@ -390,7 +394,9 @@ static void ft_emit_jrra_call_metadata(TranslationBlock *tb, uint32_t **out,
 #ifndef QUICKTRANS_LATS_RAS_DEST_ABI
         tb->return_target_ptr = (unsigned long *)*out;
 #endif
+#ifndef QUICKTRANS_LATS_SPLIT_TB_ABI
         tb->next_86_pc = next_pc;
+#endif
         if (direct_call) {
             FT_LA_NOP_EMIT(out);
         } else {
@@ -405,7 +411,9 @@ static void ft_emit_jrra_call_metadata(TranslationBlock *tb, uint32_t **out,
 #ifndef QUICKTRANS_LATS_RAS_DEST_ABI
         tb->return_target_ptr = (unsigned long *)*out;
 #endif
+#ifndef QUICKTRANS_LATS_SPLIT_TB_ABI
         tb->next_86_pc = next_pc;
+#endif
         FT_LA_NOP_EMIT(out);
         FT_LA_NOP_EMIT(out);
         FT_LA_NOP_EMIT(out);
@@ -434,7 +442,9 @@ static void ft_emit_tu_native_return_metadata(TranslationBlock *tb,
 #ifndef QUICKTRANS_LATS_RAS_DEST_ABI
     tb->return_target_ptr = (unsigned long *)*out;
 #endif
+#ifndef QUICKTRANS_LATS_SPLIT_TB_ABI
     tb->next_86_pc = next_pc;
+#endif
     FT_LA_NOP_EMIT(out);
     FT_LA_NOP_EMIT(out);
 #else
@@ -457,13 +467,20 @@ static void ft_prepare_ret_indirect_goto(TranslationBlock *tb, uint32_t *code)
     if (tb->s_data) {
         tb->s_data->sys_eob_is_indir = 1;
     }
+#ifndef QUICKTRANS_LATS_SPLIT_TB_ABI
     tb->jmp_indirect = ((uintptr_t)code - (uintptr_t)tb->tc.ptr) + 8;
+#endif
 #endif
 }
 
 #ifndef QUICKTRANS_LATU
 static bool ft_lats_soft_ras_enabled(TranslationBlock *tb)
 {
+#ifdef QUICKTRANS_LATS_SPLIT_TB_ABI
+    /* The host patches TP-based RAS sites, not the legacy slow-RAS layout. */
+    (void)tb;
+    return false;
+#endif
     if (!option_soft_ras || !tb) {
         return false;
     }
@@ -693,6 +710,10 @@ static int ft_emit_lats_indirect_lookup_exit(TranslationBlock *tb,
                                    scratch_reg, la_zero, &interrupt);
     }
 #endif
+#ifdef QUICKTRANS_LATS_SPLIT_TB_ABI
+    /* Current LATS lookup entries take the guest target in a1. */
+    FT_LA_OR_EMIT(out, la_a1, target_reg, la_zero);
+#endif
     ft_emit_lats_static_jump(out, ft_intb_lookup_target(tb), scratch_reg);
 #ifdef CONFIG_SOFTMMU
     if (check_interrupt) {
@@ -865,8 +886,8 @@ static int ft_emit_tu_jcc_compare(TranslationBlock *tb,
     if (!ft_tu_direct_jcc_enabled() || !tb || !tb->s_data ||
         !tb->s_data->next_tb[TU_TB_INDEX_NEXT] ||
         !tb->s_data->next_tb[TU_TB_INDEX_TARGET] ||
-        tb->tu_jmp[TU_TB_INDEX_NEXT] == TB_JMP_RESET_OFFSET_INVALID ||
-        tb->tu_jmp[TU_TB_INDEX_TARGET] == TB_JMP_RESET_OFFSET_INVALID) {
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] == TB_JMP_RESET_OFFSET_INVALID ||
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] == TB_JMP_RESET_OFFSET_INVALID) {
         if (stats_enabled) {
             ft_tu_direct_emit_stats.jcc_ineligible++;
         }
@@ -877,7 +898,7 @@ static int ft_emit_tu_jcc_compare(TranslationBlock *tb,
     } else {
         FT_LA_BNE_EMIT(out, lhs, rhs, 0);
     }
-    tb->tu_jmp[TU_TB_INDEX_TARGET] =
+    FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] =
         (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
 #ifndef QUICKTRANS_LATU_MINIMAL_HOST
     if (tu_bcc_jmp_retrying()) {
@@ -885,7 +906,7 @@ static int ft_emit_tu_jcc_compare(TranslationBlock *tb,
     }
 #endif
     FT_LA_B_EMIT(out, 0);
-    tb->tu_jmp[TU_TB_INDEX_NEXT] =
+    FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] =
         (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
     FT_LA_NOP_EMIT(out);
     tb->tu_unlink.stub_offset = (uintptr_t)*out - (uintptr_t)tb->tc.ptr;
@@ -921,9 +942,9 @@ static int ft_emit_tu_jcc_compare(TranslationBlock *tb,
         return 0;
     }
     has_next = tb->s_data->next_tb[TU_TB_INDEX_NEXT] != NULL &&
-               tb->tu_jmp[TU_TB_INDEX_NEXT] != TB_JMP_RESET_OFFSET_INVALID;
+               FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] != TB_JMP_RESET_OFFSET_INVALID;
     has_target = tb->s_data->next_tb[TU_TB_INDEX_TARGET] != NULL &&
-                 tb->tu_jmp[TU_TB_INDEX_TARGET] != TB_JMP_RESET_OFFSET_INVALID;
+                 FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] != TB_JMP_RESET_OFFSET_INVALID;
 #ifdef CONFIG_SOFTMMU
     if (has_target && option_int_opt == 2 && fields->imm64 <= tb->pc) {
         has_target = false;
@@ -941,10 +962,10 @@ static int ft_emit_tu_jcc_compare(TranslationBlock *tb,
     } else {
         FT_LA_BNE_EMIT(out, lhs, rhs, 0);
     }
-    tb->tu_jmp[TU_TB_INDEX_TARGET] =
+    FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] =
         (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
     FT_LA_B_EMIT(out, 0);
-    tb->tu_jmp[TU_TB_INDEX_NEXT] =
+    FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] =
         (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
     if (stats_enabled) {
         ft_tu_direct_emit_stats.jcc_emitted++;
@@ -975,8 +996,8 @@ static int ft_emit_tu_jcc_partial_compare(TranslationBlock *tb,
 #if defined(CONFIG_LATX_TU)
 #ifdef QUICKTRANS_LATU
     if (tb) {
-        tb->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
-        tb->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
     }
     return 0;
 #else
@@ -987,15 +1008,15 @@ static int ft_emit_tu_jcc_partial_compare(TranslationBlock *tb,
 
     if (!ft_tu_direct_jcc_enabled() || !tb || !tb->s_data) {
         if (tb) {
-            tb->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
-            tb->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
+            FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
+            FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
         }
         return 0;
     }
     has_next = tb->s_data->next_tb[TU_TB_INDEX_NEXT] != NULL &&
-               tb->tu_jmp[TU_TB_INDEX_NEXT] != TB_JMP_RESET_OFFSET_INVALID;
+               FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] != TB_JMP_RESET_OFFSET_INVALID;
     has_target = tb->s_data->next_tb[TU_TB_INDEX_TARGET] != NULL &&
-                 tb->tu_jmp[TU_TB_INDEX_TARGET] != TB_JMP_RESET_OFFSET_INVALID;
+                 FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] != TB_JMP_RESET_OFFSET_INVALID;
 #ifdef CONFIG_SOFTMMU
     if (has_target && option_int_opt == 2 && fields->imm64 <= tb->pc) {
         has_target = false;
@@ -1003,8 +1024,8 @@ static int ft_emit_tu_jcc_partial_compare(TranslationBlock *tb,
 #endif
     if (has_next == has_target) {
         if (!has_next) {
-            tb->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
-            tb->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
+            FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
+            FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
         }
         return 0;
     }
@@ -1013,7 +1034,7 @@ static int ft_emit_tu_jcc_partial_compare(TranslationBlock *tb,
         FastBranchKind taken_kind = taken_if_equal ? FT_BRANCH_BEQ :
                                                     FT_BRANCH_BNE;
 
-        tb->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
         dispatch_branch = *out;
         if (taken_if_equal) {
             FT_LA_BEQ_EMIT(out, lhs, rhs, 0);
@@ -1021,7 +1042,7 @@ static int ft_emit_tu_jcc_partial_compare(TranslationBlock *tb,
             FT_LA_BNE_EMIT(out, lhs, rhs, 0);
         }
         FT_LA_B_EMIT(out, 0);
-        tb->tu_jmp[TU_TB_INDEX_NEXT] =
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] =
             (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
         dispatch = *out;
         ft_patch_branch_to(dispatch_branch, taken_kind, lhs, rhs,
@@ -1031,7 +1052,7 @@ static int ft_emit_tu_jcc_partial_compare(TranslationBlock *tb,
         FastBranchKind not_taken_kind = taken_if_equal ? FT_BRANCH_BNE :
                                                         FT_BRANCH_BEQ;
 
-        tb->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_NEXT] = TB_JMP_RESET_OFFSET_INVALID;
         dispatch_branch = *out;
         if (taken_if_equal) {
             FT_LA_BNE_EMIT(out, lhs, rhs, 0);
@@ -1039,7 +1060,7 @@ static int ft_emit_tu_jcc_partial_compare(TranslationBlock *tb,
             FT_LA_BEQ_EMIT(out, lhs, rhs, 0);
         }
         FT_LA_B_EMIT(out, 0);
-        tb->tu_jmp[TU_TB_INDEX_TARGET] =
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] =
             (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
         dispatch = *out;
         ft_patch_branch_to(dispatch_branch, not_taken_kind, lhs, rhs,
@@ -1076,14 +1097,14 @@ static int ft_emit_tu_jmp_branch_or_zero(TranslationBlock *tb,
     }
     if (!ft_tu_direct_jmp_enabled() || !tb || !tb->s_data ||
         !tb->s_data->next_tb[TU_TB_INDEX_TARGET] ||
-        tb->tu_jmp[TU_TB_INDEX_TARGET] == TB_JMP_RESET_OFFSET_INVALID) {
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] == TB_JMP_RESET_OFFSET_INVALID) {
         if (stats_enabled) {
             ft_tu_direct_emit_stats.jmp_ineligible++;
         }
         return 0;
     }
     FT_LA_B_EMIT(out, 0);
-    tb->tu_jmp[TU_TB_INDEX_TARGET] =
+    FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] =
         (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
     FT_LA_NOP_EMIT(out);
     tb->tu_unlink.stub_offset = (uintptr_t)*out - (uintptr_t)tb->tc.ptr;
@@ -1107,9 +1128,9 @@ static int ft_emit_tu_jmp_branch_or_zero(TranslationBlock *tb,
     }
     if (!ft_tu_direct_jmp_enabled() || !tb || !tb->s_data ||
         !tb->s_data->next_tb[TU_TB_INDEX_TARGET] ||
-        tb->tu_jmp[TU_TB_INDEX_TARGET] == TB_JMP_RESET_OFFSET_INVALID) {
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] == TB_JMP_RESET_OFFSET_INVALID) {
         if (tb) {
-            tb->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
+            FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
         }
         if (stats_enabled) {
             ft_tu_direct_emit_stats.jmp_ineligible++;
@@ -1118,7 +1139,7 @@ static int ft_emit_tu_jmp_branch_or_zero(TranslationBlock *tb,
     }
 #ifdef CONFIG_SOFTMMU
     if (option_int_opt == 2 && target <= tb->pc) {
-        tb->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
+        FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] = TB_JMP_RESET_OFFSET_INVALID;
         if (stats_enabled) {
             ft_tu_direct_emit_stats.jmp_ineligible++;
         }
@@ -1126,7 +1147,7 @@ static int ft_emit_tu_jmp_branch_or_zero(TranslationBlock *tb,
     }
 #endif
     FT_LA_B_EMIT(out, 0);
-    tb->tu_jmp[TU_TB_INDEX_TARGET] =
+    FT_TU_DATA(tb)->tu_jmp[TU_TB_INDEX_TARGET] =
         (uintptr_t)(*out - 1) - (uintptr_t)tb->tc.ptr;
     if (stats_enabled) {
         ft_tu_direct_emit_stats.jmp_emitted++;
