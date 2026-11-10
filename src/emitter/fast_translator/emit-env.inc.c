@@ -385,7 +385,13 @@ static void ft_emit_save_fprs_for_exception(uint32_t **out)
                      FT_LA_OPCODE_LD_W);
     ft_emit_branch_placeholder(out, &inactive_fixup, FT_BRANCH_BEQ, nofp,
                                la_zero, &inactive);
-    ft_emit_save_fprs_to_env(out);
+    /* Active MMX aliases exist even when x87 uses software arithmetic.
+     * The generic FPR saver skips soft-FPU mode, so save these directly
+     * before clearing nofp and transferring control to the guest kernel. */
+    for (int i = 0; i < 8; i++) {
+        ft_emit_store_env(out, ft_mmx(i), lsenv_offset_of_mmx(lsenv, i),
+                          FT_LA_OPCODE_FST_D);
+    }
     FT_LA_ADDI_D_EMIT(out, nofp, la_zero, -1);
     for (int i = 0; i < 8; i++) {
         /* FXSAVE represents an active MMX register with exponent 0xffff. */
