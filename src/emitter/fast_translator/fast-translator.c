@@ -2766,7 +2766,10 @@ static void ft_analyze_direct_xxcc(
         FastDirectBranchKind kind;
         int first;
 
+        /* A faulting consumer can resume in a new TB without its producer.
+         * Keep the architectural flags for memory SETcc/CMOVcc operands. */
         if (!ft_is_xxcc_consumer(&fields[tail]) ||
+            fields[tail].modrm_mod != 3 ||
             !ft_direct_xxcc_kind(&fields[tail], &kind)) {
             continue;
         }
@@ -2929,6 +2932,21 @@ static bool ft_direct_gap_is_safe(
 {
     FastTemplateEflagMasks masks = ft_template_eflag_masks(fields, meta);
 
+    /* Folding may make the producer's flags dead. A memory fault in the
+     * gap can restart at that access in a new TB, where the consumer needs
+     * the architectural flags again. LEA does not access memory. */
+    switch (fields->kind) {
+    case FT_MOV_R64_RM64:
+    case FT_MOV_R32_RM32:
+    case FT_MOV_RM64_R64:
+    case FT_MOV_RM32_R32:
+        if (fields->modrm_mod != 3) {
+            return false;
+        }
+        break;
+    default:
+        break;
+    }
     if (masks.use || masks.def || (meta && meta->terminal_exit)) {
         return false;
     }
