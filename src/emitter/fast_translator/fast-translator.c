@@ -2758,6 +2758,31 @@ static bool ft_direct_gap_is_safe(
     const FastTemplateFields *fields, const FastTemplateRuntimeInfo *meta,
     int lhs, int rhs);
 
+/* Legacy condition chains contain only consecutive SETcc/CMOVcc.
+ * Require each intervening consumer to use the same comparison and leave
+ * its operands intact. Memory consumers remain excluded for faults.
+ */
+static bool ft_xxcc_gap_is_safe(const FastTemplateFields *fields,
+                                int lhs, int rhs)
+{
+    int dst;
+
+    if (!ft_is_xxcc_consumer(fields) || fields->modrm_mod != 3 ||
+        fields->direct_cmp_lhs_gpr != lhs ||
+        fields->direct_cmp_rhs_gpr != rhs) {
+        return false;
+    }
+    if (fields->kind == FT_SETCC_RM8) {
+        if (ft_modrm_rm_is_high8(fields)) {
+            return false;
+        }
+        dst = fields->modrm_rm_index;
+    } else {
+        dst = fields->modrm_reg_index;
+    }
+    return dst != lhs && (rhs < 0 || dst != rhs);
+}
+
 static void ft_analyze_direct_xxcc(
     FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
     int count)
@@ -2883,8 +2908,7 @@ static void ft_analyze_direct_xxcc(
                 break;
             }
             for (int gap = head + 1; gap < tail; ++gap) {
-                if (!ft_direct_gap_is_safe(&fields[gap], meta[gap],
-                                           lhs, rhs)) {
+                if (!ft_xxcc_gap_is_safe(&fields[gap], lhs, rhs)) {
                     safe = false;
                     break;
                 }

@@ -340,3 +340,12 @@ test(
   python,
   args: [files('tests/test-startup-env-cache.py')],
 )
+
+test(
+  'quicktrans_xxcc_gap',
+  python,
+  args: [
+    files('tests/test-xxcc-gap.py'),
+    files('src/emitter/fast_translator/fast-translator.c'),
+  ],
+)
