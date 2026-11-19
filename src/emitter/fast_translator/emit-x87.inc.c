@@ -493,7 +493,7 @@ static bool ft_emit_x87_sync_status_from_fcsr(uint32_t **out)
     return true;
 }
 
-static bool ft_emit_x87_reload_control_clear_fcsr(uint32_t **out)
+static bool ft_emit_x87_reload_control_flags(uint32_t **out, int sticky_flags)
 {
     int fpuc_offset = lsenv_offset_of_control_word(lsenv);
 
@@ -503,7 +503,7 @@ static bool ft_emit_x87_reload_control_clear_fcsr(uint32_t **out)
     ft_emit_load_env(out, la_t0, fpuc_offset, FT_LA_OPCODE_LD_HU);
     ft_emit_x87_update_fcsr_by_cw(out, la_t0);
     FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 0);
-    FT_LA_BSTRINS_W_EMIT(out, la_t0, la_zero, FCSR_OFF_FLAGS_V,
+    FT_LA_BSTRINS_W_EMIT(out, la_t0, sticky_flags, FCSR_OFF_FLAGS_V,
                          FCSR_OFF_FLAGS_I);
     FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t0);
     return true;
@@ -1002,13 +1002,14 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
     int addr;
     int offset;
     int stack_bytes = 16;
+    bool preserve_hard_fcsr = false;
     bool save_address = true;
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
-    save_address = !option_soft_fpu;
+    preserve_hard_fcsr = !option_soft_fpu;
+    save_address = preserve_hard_fcsr;
 #endif
-    bool preserve_hard_fxsave = false;
+    bool preserve_hard_fxsave = preserve_hard_fcsr && !restore;
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
-    preserve_hard_fxsave = !restore && !option_soft_fpu;
     QEMU_BUILD_BUG_ON(sizeof(((CPUX86State *)0)->fpregs) != 128);
     if (preserve_hard_fxsave) {
         stack_bytes += 128;
@@ -1049,7 +1050,7 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
         ft_emit_host_stack_begin(out);
         FT_LA_ADDI_D_EMIT(out, la_sp, la_sp, -stack_bytes);
         FT_LA_ST_D_EMIT(out, la_a1, la_sp, 0);
-        if (preserve_hard_fxsave) {
+        if (preserve_hard_fcsr) {
             FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 0);
             FT_LA_ST_W_EMIT(out, la_t0, la_sp, 8);
         }
@@ -1151,7 +1152,19 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
         ft_emit_cpu_env_ptr(out, la_a0);
         ft_emit_host_call(out, (void *)ft_convert_fpregs_x80_to_64,
                           1u << 0);
-        if (!ft_emit_x87_reload_control_clear_fcsr(out)) {
+        /* Legacy LATU keeps pending native exceptions across FXRSTOR. Carry
+         * only the sticky flags across the register conversion helpers so
+         * the restored control word still selects masks and rounding. */
+        int flags = la_zero;
+        if (preserve_hard_fcsr) {
+            ft_emit_host_stack_begin(out);
+            FT_LA_LD_WU_EMIT(out, la_t4, la_sp, 8);
+            ft_emit_host_stack_end(out);
+            FT_LA_BSTRPICK_W_EMIT(out, la_t4, la_t4, FCSR_OFF_FLAGS_V,
+                                  FCSR_OFF_FLAGS_I);
+            flags = la_t4;
+        }
+        if (!ft_emit_x87_reload_control_flags(out, flags)) {
             return 0;
         }
     }
@@ -1264,7 +1277,7 @@ static int ft_emit_xsave_restore_helper(uint32_t **out,
         ft_emit_cpu_env_ptr(out, la_a0);
         ft_emit_host_call(out, (void *)ft_convert_fpregs_x80_to_64,
                           1u << 0);
-        if (!ft_emit_x87_reload_control_clear_fcsr(out)) {
+        if (!ft_emit_x87_reload_control_flags(out, la_zero)) {
             return 0;
         }
     }
