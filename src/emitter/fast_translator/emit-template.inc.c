@@ -3962,8 +3962,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         int src;
         int scratch;
 
-        if (ft_rex_w(fields) || fields->prefix0 != 0 ||
-            fields->prefix2 != dt_X86_PREFIX_OPSIZE) {
+        if (fields->prefix0 != 0 || fields->prefix2 != dt_X86_PREFIX_OPSIZE) {
             return 0;
         }
         dst = ft_modrm_reg_index(fields);

@@ -577,8 +577,7 @@ static bool fast_template_emit_constraints_ok(const FastTemplateFields *fields)
                 fields->id == dt_X86_INS_PACKUSWB ||
                 fields->id == dt_X86_INS_PACKUSDW);
     case FT_SIMD_MADD_XMM_XMM:
-        return !ft_rex_w(fields) &&
-               fields->prefix0 == 0 &&
+        return fields->prefix0 == 0 &&
                fields->prefix2 == dt_X86_PREFIX_OPSIZE &&
                (fields->modrm_mod == 3 ||
                 ft_supported_base_disp_or_rip_addr(fields->rex,
