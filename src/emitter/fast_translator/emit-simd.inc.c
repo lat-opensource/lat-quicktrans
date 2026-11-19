@@ -1961,27 +1961,13 @@ static int ft_emit_psadbw_mmx_template(const FastTemplateFields *fields,
     int src;
 
     (void)tb;
-    (void)pc;
 
     if (fields->id != dt_X86_INS_PSADBW || fields->prefix0 != 0 ||
         fields->prefix2 != 0 || dst >= 8) {
         return 0;
     }
-    if (fields->modrm_mod == 3) {
-        src = fields->modrm_rm;
-        if (src >= 8) {
-            return 0;
-        }
-        src = ft_mmx(src);
-    } else {
-        int addr;
-
-        if (!ft_emit_mem_addr(&out, fields, &addr)) {
-            return 0;
-        }
-        FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
-                         ft_mem_access_offset(fields, addr));
-        src = ft_vscratch;
+    if (!ft_emit_mmxm64_src(&out, fields, pc, &src)) {
+        return 0;
     }
 
     FT_LA_VABSD_BU_EMIT(&out, ft_mmx(dst), ft_mmx(dst), src);
@@ -2104,27 +2090,13 @@ static int ft_emit_pmullw_mmx_template(const FastTemplateFields *fields,
     int src;
 
     (void)tb;
-    (void)pc;
 
     if (fields->id != dt_X86_INS_PMULLW || fields->prefix0 != 0 ||
         fields->prefix2 != 0 || dst >= 8) {
         return 0;
     }
-    if (fields->modrm_mod == 3) {
-        src = fields->modrm_rm;
-        if (src >= 8) {
-            return 0;
-        }
-        src = ft_mmx(src);
-    } else {
-        int addr;
-
-        if (!ft_emit_mem_addr(&out, fields, &addr)) {
-            return 0;
-        }
-        FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
-                         ft_mem_access_offset(fields, addr));
-        src = ft_vscratch;
+    if (!ft_emit_mmxm64_src(&out, fields, pc, &src)) {
+        return 0;
     }
 
     FT_LA_VMUL_H_EMIT(&out, ft_mmx(dst), ft_mmx(dst), src);
@@ -2141,7 +2113,6 @@ static int ft_emit_pmulh_mmx_template(const FastTemplateFields *fields,
     bool is_unsigned = fields->kind == FT_PMULHUW_MMX_MMXM64;
 
     (void)tb;
-    (void)pc;
 
     if (fields->id != (is_unsigned ? dt_X86_INS_PMULHUW :
                                      dt_X86_INS_PMULHW) ||
@@ -2149,21 +2120,8 @@ static int ft_emit_pmulh_mmx_template(const FastTemplateFields *fields,
         fields->prefix2 != 0 || dst >= 8) {
         return 0;
     }
-    if (fields->modrm_mod == 3) {
-        src = fields->modrm_rm;
-        if (src >= 8) {
-            return 0;
-        }
-        src = ft_mmx(src);
-    } else {
-        int addr;
-
-        if (!ft_emit_mem_addr(&out, fields, &addr)) {
-            return 0;
-        }
-        FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
-                         ft_mem_access_offset(fields, addr));
-        src = ft_vscratch;
+    if (!ft_emit_mmxm64_src(&out, fields, pc, &src)) {
+        return 0;
     }
 
     if (is_unsigned) {
@@ -2188,28 +2146,14 @@ static int ft_emit_psra_mmx_template(const FastTemplateFields *fields,
     bool is_psrad = fields->id == dt_X86_INS_PSRAD;
 
     (void)tb;
-    (void)pc;
 
     if ((fields->id != dt_X86_INS_PSRAW && !is_psrad) ||
         fields->prefix0 != 0 ||
         fields->prefix2 != 0 || dst >= 8) {
         return 0;
     }
-    if (fields->modrm_mod == 3) {
-        src = fields->modrm_rm;
-        if (src >= 8) {
-            return 0;
-        }
-        src = ft_mmx(src);
-    } else {
-        int addr;
-
-        if (!ft_emit_mem_addr(&out, fields, &addr)) {
-            return 0;
-        }
-        FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
-                         ft_mem_access_offset(fields, addr));
-        src = ft_vscratch;
+    if (!ft_emit_mmxm64_src(&out, fields, pc, &src)) {
+        return 0;
     }
 
     FT_LA_VREPLVEI_D_EMIT(&out, valid_count, src, 0);
@@ -2350,27 +2294,13 @@ static int ft_emit_pmaddwd_mmx_template(const FastTemplateFields *fields,
     int src;
 
     (void)tb;
-    (void)pc;
 
     if (fields->id != dt_X86_INS_PMADDWD || fields->prefix0 != 0 ||
         fields->prefix2 != 0 || dst >= 8) {
         return 0;
     }
-    if (fields->modrm_mod == 3) {
-        src = fields->modrm_rm;
-        if (src >= 8) {
-            return 0;
-        }
-        src = ft_mmx(src);
-    } else {
-        int addr;
-
-        if (!ft_emit_mem_addr(&out, fields, &addr)) {
-            return 0;
-        }
-        FT_LA_FLD_D_EMIT(&out, ft_vscratch, addr,
-                         ft_mem_access_offset(fields, addr));
-        src = ft_vscratch;
+    if (!ft_emit_mmxm64_src(&out, fields, pc, &src)) {
+        return 0;
     }
 
 #ifdef QUICKTRANS_LATU
