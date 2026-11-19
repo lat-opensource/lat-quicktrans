@@ -233,6 +233,22 @@ static void ft_emit_lats_direct_link_exit(TranslationBlock *tb,
         ft_emit_tu_indirect_dispatch_exit(tb, out, la_a5, la_a6);
         return;
     }
+    /* A direct patch is valid only while the destination has the same
+     * physical backing. A different virtual page can change independently
+     * of this TB (e.g. a process-private copy of a shared code page).
+     * Dispatch through the current mapping until QT emits page-check stubs.
+     */
+    if (((target ^ tb->pc) & TARGET_PAGE_MASK) ||
+        ((target ^ (target + 15)) & TARGET_PAGE_MASK) ||
+        !lsenv->tr_data->can_link) {
+        tb->jmp_reset_offset[succ_id] = TB_JMP_OFFSET_INVALID;
+        tb->jmp_insn_offset[succ_id] = TB_JMP_OFFSET_INVALID;
+        ft_emit_li64(out, la_a5, target);
+        ft_emit_store_env(out, la_a5, lsenv_offset_of_eip(lsenv),
+                          FT_LA_OPCODE_ST_D);
+        ft_emit_jump_epilogue(out, ft_context_switch_ret0_target(), scratch_reg);
+        return;
+    }
 #endif
     if (!option_lazypc) {
         /*
