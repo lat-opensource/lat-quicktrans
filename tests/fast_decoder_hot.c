@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "fast_decoder.h"
+#include "../src/emitter/fast_translator/lats-pattern-gap.h"
 
 static int failures;
 
@@ -34,6 +35,35 @@ static FastDecodedFT decode32(const uint8_t *code, size_t size, uint64_t pc,
 
     *matched = fast_decoder_get_ft(code, size, pc, &decoded, 0);
     return decoded;
+}
+
+/* Legacy disassembly distinguishes these encodings even where the fast
+ * decoder gives them the same MOV or NOP instruction ID. */
+static void test_lats_pattern_gap(void)
+{
+    static const struct {
+        uint8_t code[10];
+        unsigned size;
+        bool allowed;
+    } cases[] = {
+        {{0x90}, 1, true},
+        {{0x0f, 0x1f, 0x00}, 3, true},
+        {{0x89, 0xc8}, 2, true},
+        {{0x48, 0xb8}, 10, false},
+        {{0xa1}, 9, false},
+        {{0x67, 0xa1}, 6, true},
+        {{0xf3, 0x0f, 0x1e, 0xfa}, 4, false},
+        {{0xf3, 0x0f, 0x1e, 0xfb}, 4, false},
+        {{0xf3, 0x0f, 0x1e, 0xc8}, 4, false},
+        {{0xf3, 0x90}, 2, false},
+        {{0xf7, 0xd0}, 2, false},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int matched;
+        FastDecodedFT f = decode(cases[i].code, cases[i].size, 0x1000, &matched);
+        CHECK(matched && ft_lats_pattern_gap(&f.fields) == cases[i].allowed,
+              "LATS block-end pattern gap differs from legacy disassembly");
+    }
 }
 
 /* The absence of 0x67 does not imply 64-bit addressing in an ELF32 TB. */
@@ -3232,6 +3262,7 @@ int main(void)
 {
     test_ft_reused_status();
     test_default_32bit_address_size();
+    test_lats_pattern_gap();
     test_sse_partial_displacements();
     test_short_inc_dec();
     test_hot_gpr();

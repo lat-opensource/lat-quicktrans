@@ -315,6 +315,39 @@ static FastJccDirectExitLayout ft_prepare_jcc_direct_exit(TranslationBlock *tb,
 #endif
 
 #ifdef CONFIG_SOFTMMU
+#ifdef CONFIG_LATX_TU
+static bool ft_tu_direct_jcc_enabled(void);
+#endif
+
+/* Ordinary TB link slots accept native ordered branches. TU patches use
+ * BEQ/BNE slots, so keep their existing integer predicate encoding. */
+static bool ft_lats_native_order(const TranslationBlock *tb,
+                                 const FastTemplateFields *f)
+{
+#ifdef CONFIG_LATX_TU
+    if (tb && tb->s_data && ft_tu_direct_jcc_enabled()) return false;
+#endif
+    return f->direct_cmp_lhs_gpr >= 0 &&
+           f->direct_branch_kind >= FT_DIRECT_BRANCH_LT &&
+           f->direct_branch_kind <= FT_DIRECT_BRANCH_GTU;
+}
+
+static uint32_t ft_lats_order_branch(FastDirectBranchKind kind, int lhs,
+                                     int rhs, int offset)
+{
+    switch (kind) {
+    case FT_DIRECT_BRANCH_LT:  return FT_LA_BLT(lhs, rhs, offset);
+    case FT_DIRECT_BRANCH_GE:  return FT_LA_BGE(lhs, rhs, offset);
+    case FT_DIRECT_BRANCH_LTU: return FT_LA_BLTU(lhs, rhs, offset);
+    case FT_DIRECT_BRANCH_GEU: return FT_LA_BGEU(lhs, rhs, offset);
+    case FT_DIRECT_BRANCH_LE:  return FT_LA_BGE(rhs, lhs, offset);
+    case FT_DIRECT_BRANCH_GT:  return FT_LA_BLT(rhs, lhs, offset);
+    case FT_DIRECT_BRANCH_LEU: return FT_LA_BGEU(rhs, lhs, offset);
+    case FT_DIRECT_BRANCH_GTU: return FT_LA_BLTU(rhs, lhs, offset);
+    default: g_assert_not_reached();
+    }
+}
+
 static int ft_float_branch_fcc(FastDirectBranchKind kind)
 {
     /* FCC2 holds unordered-or-less. FCC0 holds the other predicates. */
@@ -377,9 +410,12 @@ static int ft_emit_jcc_exit_or_self_loop(TranslationBlock *tb, uint32_t *code,
     }
 
     taken_branch = (*out)++;
-    ft_emit_lats_direct_link_exit(tb, out, 0, next, lhs);
+    ft_emit_lats_direct_link_exit(tb, out, 0, next, la_a4);
 #ifdef CONFIG_SOFTMMU
-    if (fields->direct_float_xx) {
+    if (ft_lats_native_order(tb, fields)) {
+        *taken_branch = ft_lats_order_branch(fields->direct_branch_kind, lhs, rhs,
+                                             *out - taken_branch);
+    } else if (fields->direct_float_xx && lhs != la_zero) {
         int fcc = ft_float_branch_fcc(fields->direct_branch_kind);
         int offset = *out - taken_branch;
 
@@ -392,7 +428,7 @@ static int ft_emit_jcc_exit_or_self_loop(TranslationBlock *tb, uint32_t *code,
     } else {
         *taken_branch = FT_LA_BNE(lhs, rhs, *out - taken_branch);
     }
-    ft_emit_lats_direct_link_exit(tb, out, 1, target, lhs);
+    ft_emit_lats_direct_link_exit(tb, out, 1, target, la_a4);
     return *out - code;
 #endif
 }

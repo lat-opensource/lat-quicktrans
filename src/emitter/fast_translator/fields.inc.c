@@ -1093,6 +1093,7 @@ bool fast_template_fill_fields_from_info(const FastTemplateDesc *tmpl,
     fields->direct_bit_index_gpr = -1;
     fields->direct_bit_index_imm = -1;
     fields->instptn_div_kind = 0;
+    fields->pattern_inputs = 0;
     fields->instptn_skip = false;
     fields->atomic_no_barrier = false;
     fields->direct_float_result = false;

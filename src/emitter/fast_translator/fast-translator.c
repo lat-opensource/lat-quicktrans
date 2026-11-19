@@ -837,7 +837,8 @@ static FtEmitCacheKey ft_emit_cache_key(const FastTemplateFields *fields)
                 ((uint64_t)fields->direct_float_result << 9) |
                 ((uint64_t)fields->direct_float_xx << 10) |
                 ((uint64_t)fields->omit_zext32 << 11) |
-                ((uint64_t)fields->scalar_direct_dst << 12),
+                ((uint64_t)fields->scalar_direct_dst << 12) |
+                ((uint64_t)fields->pattern_inputs << 13),
         },
     };
 
@@ -1185,6 +1186,20 @@ static int ft_emit_helper_indirect_exit(uint32_t **out, TranslationBlock *tb,
 
 #include "emit-grp1.inc.c"
 
+#ifdef CONFIG_SOFTMMU
+enum {
+    FT_CC_O, FT_CC_NO, FT_CC_B, FT_CC_AE, FT_CC_E, FT_CC_NE, FT_CC_BE, FT_CC_A,
+    FT_CC_S, FT_CC_NS, FT_CC_P, FT_CC_NP, FT_CC_L, FT_CC_GE, FT_CC_LE, FT_CC_G,
+};
+
+static int ft_pattern_cc(const FastTemplateFields *f)
+{
+    return (f->kind == FT_JCC_REL && f->opcode0 != 0x0f ?
+            f->opcode0 : f->opcode1) & 15;
+}
+
+#include "emit-lats-instptn.inc.c"
+#endif
 #include "emit-alu.inc.c"
 
 #include "emit-bit.inc.c"
@@ -2309,19 +2324,27 @@ static bool ft_instptn_enabled(uint64_t bit)
 #endif
 }
 
+static void ft_analyze_div_patterns(FastTemplateFields *fields, int count);
+#ifndef CONFIG_SOFTMMU
 static void ft_analyze_direct_jcc_gap(
     FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
     int count);
 static void ft_analyze_direct_xxcc(
     FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
     int count);
-static void ft_analyze_div_patterns(FastTemplateFields *fields, int count);
+#endif
 static void ft_analyze_float_jcc(FastTemplateFields *fields, int count);
 static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
                                     const FastTemplateRuntimeInfo **meta,
                                     int count);
 static void ft_analyze_ucomisd_seta(FastTemplateFields *fields, int count);
 static void ft_analyze_cmp_sbb(FastTemplateFields *fields, int count);
+#ifdef CONFIG_SOFTMMU
+#include "lats-pattern-gap.h"
+static void ft_lats_analyze_jcc(FastTemplateFields *fields,
+                                const FastTemplateRuntimeInfo **meta, int count);
+static void ft_lats_analyze_conditions(FastTemplateFields *fields, int count);
+#endif
 
 enum {
     FT_ANALYZE_XXCC = 1,
@@ -2374,6 +2397,11 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
     /* One TB-level gate avoids scans when all patterns are disabled. */
     if (option_instptn) {
 #endif
+#ifdef CONFIG_SOFTMMU
+    if (option_instptn && count > 1 && fields[count - 1].kind == FT_JCC_REL) {
+        ft_lats_analyze_jcc(fields, meta, count);
+    }
+#else
     if (count > 1 && fields[count - 1].kind == FT_JCC_REL) {
         ft_analyze_direct_jcc_pair(&fields[count - 2], &fields[count - 1],
                                    false);
@@ -2384,6 +2412,7 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
     if (candidates & FT_ANALYZE_XXCC) {
         ft_analyze_direct_xxcc(fields, meta, count);
     }
+#endif
     if (candidates & FT_ANALYZE_DIV) {
         ft_analyze_div_patterns(fields, count);
     }
@@ -2397,6 +2426,11 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
     if (candidates & FT_ANALYZE_SBB) {
         ft_analyze_cmp_sbb(fields, count);
     }
+#ifdef CONFIG_SOFTMMU
+    if (option_instptn && (candidates & (FT_ANALYZE_XXCC | FT_ANALYZE_SBB))) {
+        ft_lats_analyze_conditions(fields, count);
+    }
+#endif
 #ifdef QUICKTRANS_LATU
     }
 #endif
@@ -2438,6 +2472,13 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
 #else
         fields[i].scalar_direct_dst = false;
 #endif
+#ifdef CONFIG_SOFTMMU
+        if (fields[i].pattern_inputs == FT_PATTERN_SAVE_CMP ||
+            fields[i].pattern_inputs == FT_PATTERN_SAVE_TEST ||
+            fields[i].pattern_inputs == FT_PATTERN_SAVE_RESULT) {
+            fields[i].skip_flags = false;
+        }
+#endif
         if (trace_opt) {
             fprintf(stderr,
                     "[FT-OPT] pc=0x%lx id=%d kind=%d alu=%u form=%u "
@@ -2468,6 +2509,9 @@ static uint8_t ft_analyze_tb_flags(FastTemplateFields *fields,
         }
         pending &= ~masks.def;
         pending |= masks.use;
+#ifdef CONFIG_SOFTMMU
+        if (fields[i].pattern_inputs == FT_PATTERN_FLAGS) pending |= FT_EFLAGS_ALL;
+#endif
     }
     return pending;
 }
@@ -2492,12 +2536,17 @@ static bool ft_direct_jcc_kind(int id, FastDirectBranchKind *kind)
 static bool ft_direct_alu_reg_operands(const FastTemplateFields *alu,
                                        int *lhs, int *rhs)
 {
-    if (alu->alu_form == FT_ALU_FORM_RM_R && alu->modrm_mod == 3 &&
+    if ((alu->alu_form == FT_ALU_FORM_RM_R
+#ifdef CONFIG_SOFTMMU
+         || alu->alu_form == FT_ALU_FORM_R_RM
+#endif
+        ) && alu->modrm_mod == 3 &&
         alu->modrm_rm_index < GPR_NUM && alu->modrm_reg_index < GPR_NUM &&
         !(alu->alu_width == 8 &&
           (ft_modrm_rm_is_high8(alu) || ft_modrm_reg_is_high8(alu)))) {
-        *lhs = alu->modrm_rm_index;
-        *rhs = alu->modrm_reg_index;
+        bool reverse = alu->alu_form == FT_ALU_FORM_R_RM;
+        *lhs = reverse ? alu->modrm_reg_index : alu->modrm_rm_index;
+        *rhs = reverse ? alu->modrm_rm_index : alu->modrm_reg_index;
         return true;
     }
     return false;
@@ -2545,7 +2594,11 @@ static void ft_analyze_ucomisd_seta(FastTemplateFields *fields, int count)
             continue;
         }
         head->direct_branch_kind = FT_DIRECT_BRANCH_GTU;
+#ifdef CONFIG_SOFTMMU
+        head->direct_float_xx = tail->direct_float_xx = true;
+#else
         tail->direct_float_result = true;
+#endif
     }
 }
 
@@ -2558,6 +2611,13 @@ static bool ft_float_jcc_kind(int id, FastDirectBranchKind *kind)
     case dt_X86_INS_JAE: *kind = FT_DIRECT_BRANCH_GEU; return true;
     case dt_X86_INS_JBE: *kind = FT_DIRECT_BRANCH_LEU; return true;
     case dt_X86_INS_JA:  *kind = FT_DIRECT_BRANCH_GTU; return true;
+#ifdef CONFIG_SOFTMMU
+    /* COMIS clears SF and OF, so LE and G depend only on ZF. */
+    case dt_X86_INS_JLE: *kind = FT_DIRECT_BRANCH_EQ; return true;
+    case dt_X86_INS_JG:  *kind = FT_DIRECT_BRANCH_NE; return true;
+    case dt_X86_INS_JL:  *kind = FT_DIRECT_BRANCH_NEVER; return true;
+    case dt_X86_INS_JGE: *kind = FT_DIRECT_BRANCH_ALWAYS; return true;
+#endif
     /* The LATS end-of-block scanner does not admit JP or JNP. */
     default: return false;
     }
@@ -2584,7 +2644,12 @@ static void ft_analyze_float_jcc(FastTemplateFields *fields, int count)
     }
     if (!ft_instptn_enabled(bit)) return;
     head->direct_branch_kind = kind;
+#ifdef CONFIG_SOFTMMU
+    head->direct_float_xx = tail->direct_float_xx = true;
+    tail->direct_branch_kind = kind;
+#else
     tail->direct_float_result = true;
+#endif
 }
 
 static bool ft_float_gap_preserves_fcc(const FastTemplateFields *f)
@@ -2619,12 +2684,15 @@ static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
     FastDirectBranchKind kind;
     if (jcc->kind != FT_JCC_REL || !ft_float_jcc_kind(jcc->id, &kind))
         return;
-    int first = tail > 4 ? tail - 4 : 0;
+    if (!ft_lats_pattern_gap(&fields[tail - 1])) return;
+    int first = 0;
     for (int head = tail - 2; head >= first; --head) {
         FastTemplateFields *cmp = &fields[head];
         bool is_double, qnan;
         int id;
         uint64_t bit;
+        if (cmp->kind != FT_SIMD_SCALAR_CMP_XMM_XMMM &&
+            !ft_lats_pattern_gap(cmp)) break;
         if (cmp->kind != FT_SIMD_SCALAR_CMP_XMM_XMMM ||
             !ft_simd_scalar_cmp_opcode_info(cmp->prefix0, cmp->prefix2,
                                              cmp->opcode1, &is_double,
@@ -2638,7 +2706,7 @@ static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
         default: continue;
         }
         if (!ft_instptn_enabled(bit))
-            continue;
+            break;
         (void)is_double;
         (void)qnan;
         bool safe = true;
@@ -2650,8 +2718,11 @@ static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
                 break;
             }
         }
-        if (!safe)
-            continue;
+        if (!safe) {
+            /* A SIMD instruction in the interval may need the same FCC. */
+            cmp->pattern_inputs = FT_PATTERN_SAVE_FCC;
+            jcc->pattern_inputs = FT_PATTERN_FCC;
+        }
         /*
          * The comparison still runs here, including its exception check.
          * The integer instructions in the gap preserve the floating-point
@@ -2779,6 +2850,7 @@ static bool ft_xxcc_gap_is_safe(const FastTemplateFields *fields,
     return dst != lhs && (rhs < 0 || dst != rhs);
 }
 
+#ifndef CONFIG_SOFTMMU
 static void ft_analyze_direct_xxcc(
     FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
     int count)
@@ -2794,49 +2866,6 @@ static void ft_analyze_direct_xxcc(
             !ft_direct_xxcc_kind(&fields[tail], &kind)) {
             continue;
         }
-#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
-        /* This QT extension uses the default full pattern mask only. Reuse
-         * an adjacent 64-bit integer result, never a scratch register or a
-         * deferred RSP value. No new TB scan or memory dependency is needed.
-         */
-        if (tail + 1 < count && fields[tail].kind == FT_SETCC_RM8 &&
-            fields[tail].modrm_mod == 3 && fields[tail].prefix0 == 0 &&
-            (kind == FT_DIRECT_BRANCH_EQ || kind == FT_DIRECT_BRANCH_NE) &&
-            (uint32_t)option_instptn == 0x3ffffffu) {
-            const FastTemplateFields *producer = &fields[tail - 1];
-            const FastTemplateFields *kill = &fields[tail + 1];
-            int result = -1;
-
-            /* Bound newly dead flags to three non-faulting instructions.
-             * A memory/helper gap must not expose omitted flags to a signal.
-             */
-            bool kills_flags = kill->prefix0 == 0 &&
-                (kill->alu_width == 32 || kill->alu_width == 64) &&
-                (kill->alu_form == FT_ALU_FORM_ACC_IMM ||
-                 kill->modrm_mod == 3) &&
-                (kill->alu_op == FT_ALU_ADD || kill->alu_op == FT_ALU_SUB ||
-                 kill->alu_op == FT_ALU_AND || kill->alu_op == FT_ALU_OR ||
-                 kill->alu_op == FT_ALU_XOR || kill->alu_op == FT_ALU_CMP ||
-                 kill->alu_op == FT_ALU_TEST);
-            if (kills_flags && producer->prefix0 == 0 &&
-                producer->alu_width == 64 &&
-                (producer->alu_form == FT_ALU_FORM_ACC_IMM ||
-                 producer->modrm_mod == 3) &&
-                (producer->alu_op == FT_ALU_ADD ||
-                 producer->alu_op == FT_ALU_SUB ||
-                 producer->alu_op == FT_ALU_AND ||
-                 producer->alu_op == FT_ALU_OR ||
-                 producer->alu_op == FT_ALU_XOR) &&
-                ft_direct_alu_result_gpr(producer, &result) &&
-                result != rsp_index) {
-                fields[tail].direct_cmp_lhs_gpr = result;
-                fields[tail].direct_cmp_rhs_gpr = -1;
-                fields[tail].direct_cmp_width = 64;
-                fields[tail].direct_branch_kind = kind;
-                continue;
-            }
-        }
-#endif
         first = tail > 4 ? tail - 4 : 0;
         for (int head = tail - 1; head >= first; --head) {
             FastTemplateFields *alu = &fields[head];
@@ -2920,11 +2949,17 @@ static void ft_analyze_direct_xxcc(
     }
 }
 
+#endif
+
 static bool ft_gap_writes_gpr(const FastTemplateFields *fields, int reg)
 {
     int dst = -1;
 
     switch (fields->kind) {
+#ifdef CONFIG_SOFTMMU
+    case FT_NOP_MULTI:
+        return fields->id != dt_X86_INS_NOP;
+#endif
     case FT_MOV_R32_IMM32:
         dst = fields->reg;
         break;
@@ -2974,6 +3009,7 @@ static bool ft_direct_gap_is_safe(
            (rhs < 0 || !ft_gap_writes_gpr(fields, rhs));
 }
 
+#ifndef CONFIG_SOFTMMU
 static void ft_analyze_direct_jcc_gap(
     FastTemplateFields *fields, const FastTemplateRuntimeInfo **meta,
     int count)
@@ -3024,6 +3060,8 @@ static void ft_analyze_direct_jcc_gap(
         }
     }
 }
+
+#endif
 
 static void ft_analyze_direct_jcc_pair(FastTemplateFields *alu,
                                        FastTemplateFields *jcc, bool gap)
@@ -3130,9 +3168,25 @@ static void ft_analyze_direct_jcc_pair(FastTemplateFields *alu,
         case FT_INSTPTN_BT_JCC: option_bit = FT_INSTPTN_BT_XX_JCC; break;
         case FT_INSTPTN_OR_JCC: option_bit = FT_INSTPTN_OR_XX_JCC; break;
         case FT_INSTPTN_XOR_JCC: option_bit = FT_INSTPTN_XOR_XX_JCC; break;
-        case FT_INSTPTN_AND_JCC: option_bit = FT_INSTPTN_AND_XX_JCC; break;
-        case FT_INSTPTN_SUB_JCC: option_bit = FT_INSTPTN_SUB_XX_JCC; break;
-        case FT_INSTPTN_SHR_JCC: option_bit = FT_INSTPTN_SHR_XX_JCC; break;
+        case FT_INSTPTN_AND_JCC:
+            if (jcc->id != dt_X86_INS_JE && jcc->id != dt_X86_INS_JNE) {
+                return;
+            }
+            option_bit = FT_INSTPTN_AND_XX_JCC;
+            break;
+        case FT_INSTPTN_SUB_JCC:
+            if ((jcc->id != dt_X86_INS_JS && jcc->id != dt_X86_INS_JNS) ||
+                (alu->alu_form == FT_ALU_FORM_R_RM && alu->modrm_mod != 3)) {
+                return;
+            }
+            option_bit = FT_INSTPTN_SUB_XX_JCC;
+            break;
+        case FT_INSTPTN_SHR_JCC:
+            if (jcc->id != dt_X86_INS_JE) {
+                return;
+            }
+            option_bit = FT_INSTPTN_SHR_XX_JCC;
+            break;
         default: option_bit = 0; break;
         }
     }
@@ -3159,6 +3213,10 @@ static void ft_analyze_direct_jcc_pair(FastTemplateFields *alu,
     }
     jcc->direct_branch_kind = kind;
 }
+
+#ifdef CONFIG_SOFTMMU
+#include "lats-instptn.inc.c"
+#endif
 
 static bool ft_template_uses_x87_top(FastTemplateKind kind)
 {

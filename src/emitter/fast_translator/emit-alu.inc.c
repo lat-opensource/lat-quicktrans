@@ -275,6 +275,17 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
     int flag_rhs = rhs;
 
     if (!ft_alu_writes_dst(op)) {
+#ifdef CONFIG_SOFTMMU
+        if (fields->pattern_inputs == FT_PATTERN_SAVE_REGS) {
+            /* The immediately following Jcc has no intervening emitter. */
+            FT_LA_OR_EMIT(out, la_a1, lhs, la_zero);
+            FT_LA_OR_EMIT(out, la_a2, rhs, la_zero);
+        } else if (fields->pattern_inputs) {
+            ft_emit_pattern_addr(out);
+            FT_LA_ST_D_EMIT(out, lhs, la_a0, 0);
+            FT_LA_ST_D_EMIT(out, rhs, la_a0, 8);
+        }
+#endif
         return ft_emit_alu_flag(out, fields, op, width, lhs, rhs);
     }
     if (!data_op) {
@@ -332,6 +343,12 @@ static bool ft_emit_alu_data(uint32_t **out, const FastTemplateFields *fields,
         return false;
     }
     ft_emit_raw(out, ft_gpr3(data_op, result, lhs, rhs));
+#ifdef CONFIG_SOFTMMU
+    if (fields->pattern_inputs == FT_PATTERN_SAVE_RESULT) {
+        ft_emit_pattern_addr(out);
+        FT_LA_ST_D_EMIT(out, result, la_a0, 0);
+    }
+#endif
     return true;
 }
 
@@ -471,6 +488,9 @@ static bool ft_emit_locked_alu(uint32_t **out,
 static bool ft_emit_and_imm_reg(uint32_t **out,
                                 const FastTemplateFields *fields)
 {
+#ifdef CONFIG_SOFTMMU
+    if (fields->pattern_inputs == FT_PATTERN_SAVE_RESULT) return false;
+#endif
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     int width = fields->alu_width;
     int dst;
@@ -554,6 +574,9 @@ static bool ft_emit_and_imm_reg(uint32_t **out,
 static bool ft_emit_logic_imm_reg(uint32_t **out,
                               const FastTemplateFields *fields)
 {
+#ifdef CONFIG_SOFTMMU
+    if (fields->pattern_inputs == FT_PATTERN_SAVE_RESULT) return false;
+#endif
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     int width = fields->alu_width;
     int dst;
@@ -600,6 +623,9 @@ static bool ft_emit_logic_imm_reg(uint32_t **out,
 static bool ft_emit_addsub_imm_reg(uint32_t **out,
                                   const FastTemplateFields *fields)
 {
+#ifdef CONFIG_SOFTMMU
+    if (fields->pattern_inputs == FT_PATTERN_SAVE_RESULT) return false;
+#endif
 #if defined(CONFIG_SOFTMMU) || defined(QUICKTRANS_LATU)
     int width = fields->alu_width;
     int dst;

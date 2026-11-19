@@ -64,7 +64,7 @@ if not re.search(r'cmp->direct_float_xx = true;.*?jcc->direct_float_xx = true;',
           file=sys.stderr)
     sys.exit(1)
 exits = (pathlib.Path(sys.argv[1]).parent / 'emit-exit.inc.c').read_text()
-if not re.search(r'if \(fields->direct_float_xx\).*?FT_LA_BCEQZ\(fcc, offset\).*?'
+if not re.search(r'if \(fields->direct_float_xx(?: && lhs != la_zero)?\).*?FT_LA_BCEQZ\(fcc, offset\).*?'
                  r'FT_LA_BCNEZ\(fcc, offset\)', exits, re.S):
     sys.exit('float XX Jcc must branch on the floating condition register')
 if not re.search(r'#ifdef CONFIG_SOFTMMU\s+int tmp0 = la_a0;\s+'

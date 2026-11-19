@@ -86,7 +86,8 @@ static bool ft_inst_pattern_key(const FastTemplateFields *fields,
         ((uint64_t)(uint8_t)fields->direct_bit_index_gpr << 32) |
         ((uint64_t)(uint8_t)fields->direct_bit_index_imm << 40) |
         ((uint64_t)fields->instptn_div_kind << 48) |
-        ((uint64_t)fields->instptn_skip << 56);
+        ((uint64_t)fields->instptn_skip << 56) |
+        ((uint64_t)fields->pattern_inputs << 57);
     return true;
 }
 

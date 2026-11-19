@@ -743,6 +743,22 @@ typedef enum FastDirectBranchKind {
     FT_DIRECT_BRANCH_BIT_CLEAR,
 } FastDirectBranchKind;
 
+typedef enum FastPatternInputs {
+    FT_PATTERN_NONE,
+    FT_PATTERN_SAVE_CMP,
+    FT_PATTERN_SAVE_TEST,
+    FT_PATTERN_CMP,
+    FT_PATTERN_TEST,
+    FT_PATTERN_FLAGS,
+    FT_PATTERN_SAVE_RESULT,
+    FT_PATTERN_RESULT,
+    FT_PATTERN_SAVE_REGS,
+    FT_PATTERN_CMP_REGS,
+    FT_PATTERN_TEST_REGS,
+    FT_PATTERN_SAVE_FCC,
+    FT_PATTERN_FCC,
+} FastPatternInputs;
+
 typedef enum FastInstptnDivKind {
     FT_INSTPTN_DIV_NONE,
     FT_INSTPTN_DIV_CQO_IDIV64,
@@ -784,6 +800,8 @@ typedef struct FastTemplateFields {
     int8_t direct_bit_index_imm;
     uint8_t direct_cmp_width;
     uint8_t instptn_div_kind;
+    /* LATS uses saved CMP/TEST inputs when a consumer cannot reread GPRs. */
+    uint8_t pattern_inputs;
     bool instptn_skip;
     bool direct_float_result;
     bool direct_float_xx;

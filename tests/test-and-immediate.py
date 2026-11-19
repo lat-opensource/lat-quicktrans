@@ -15,8 +15,9 @@ header = r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+enum {FT_PATTERN_SAVE_RESULT=1};
 enum {FT_ALU_AND,FT_ALU_ADD,FT_ALU_FORM_ACC_IMM,FT_ALU_FORM_RM_IMM,FT_ALU_FORM_RM_R,dt_X86_PREFIX_LOCK=0xf0,GPR_NUM=16,rax_index=0,la_t2=24,la_zero=31};
-typedef struct {int alu_op,alu_width,alu_form,modrm_mod,rm,prefix0;bool skip_flags;int64_t imm;} FastTemplateFields;
+typedef struct {int alu_op,alu_width,alu_form,modrm_mod,rm,prefix0,pattern_inputs;bool skip_flags;int64_t imm;} FastTemplateFields;
 static uint64_t r[32];static int n;
 #define ft_modrm_rm_index(f) ((f)->rm)
 #define ft_gpr(x) (x)

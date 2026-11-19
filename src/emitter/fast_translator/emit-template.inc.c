@@ -26,6 +26,10 @@ static bool ft_emit_direct_condition(uint32_t **out,
     int tmp2 = la_t2;
 #endif
 
+#ifdef CONFIG_SOFTMMU
+    if (fields->pattern_inputs)
+        return ft_emit_lats_pattern_condition(out, fields, result);
+#endif
     if (fields->direct_cmp_lhs_gpr < 0 || width == 0) {
         return false;
     }
@@ -144,7 +148,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         return out - code;
     }
     if (fields->alu_op == FT_ALU_SBB &&
-        fields->direct_cmp_lhs_gpr >= 0) {
+        (fields->direct_cmp_lhs_gpr >= 0 || fields->pattern_inputs == FT_PATTERN_CMP)) {
         int width = fields->alu_width;
         int dst = fields->modrm_rm_index;
 #ifdef CONFIG_SOFTMMU
@@ -171,9 +175,9 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         } else if (width == 16) {
             FT_LA_SUB_D_EMIT(&out, value, la_zero, result);
             FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), value, 15, 0);
-        } else if (width == 8 && !ft_modrm_rm_is_high8(fields)) {
+        } else if (width == 8) {
             FT_LA_SUB_D_EMIT(&out, value, la_zero, result);
-            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), value, 7, 0);
+            if (!ft_emit_store_rm8(&out, fields, pc, value)) return 0;
         } else {
             return 0;
         }
@@ -393,7 +397,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         }
 #endif
         if (fields->kind == FT_CMOV_R32_RM32) {
-            if (fields->direct_cmp_lhs_gpr >= 0) {
+            if (fields->direct_cmp_lhs_gpr >= 0 || fields->pattern_inputs) {
                 if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
             } else {
                 direct_result = la_t2;
@@ -403,7 +407,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             FT_LA_OR_EMIT(&out, ft_gpr(dst), src, la_zero);
             FT_LA_BSTRPICK_D_EMIT(&out, ft_gpr(dst), ft_gpr(dst), 31, 0);
         } else if (fields->kind == FT_CMOV_R16_RM16) {
-            if (fields->direct_cmp_lhs_gpr >= 0) {
+            if (fields->direct_cmp_lhs_gpr >= 0 || fields->pattern_inputs) {
                 if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
             } else {
                 direct_result = la_t2;
@@ -412,7 +416,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             FT_LA_BEQ_EMIT(&out, direct_result, la_zero, 2);
             FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst), src, 15, 0);
         } else {
-            if (fields->direct_cmp_lhs_gpr >= 0) {
+            if (fields->direct_cmp_lhs_gpr >= 0 || fields->pattern_inputs) {
                 if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
             } else {
                 direct_result = la_t2;
@@ -436,6 +440,13 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         if (!ft_setcc_opcode_info(fields->opcode1, &cond, &id)) {
             return 0;
         }
+#ifdef CONFIG_SOFTMMU
+        if (fields->direct_float_xx) {
+            /* UCOMISD/SETA: ordered greater is the inverse of CULE. */
+            FT_LA_MOVCF2GR_EMIT(&out, direct_result, 0);
+            FT_LA_XORI_EMIT(&out, direct_result, direct_result, 1);
+        } else
+#endif
         if (fields->direct_float_result) {
             FT_LA_OR_EMIT(&out, direct_result,
 #ifdef CONFIG_SOFTMMU
@@ -444,7 +455,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                           la_t2,
 #endif
                           la_zero);
-        } else if (fields->direct_cmp_lhs_gpr >= 0) {
+        } else if (fields->direct_cmp_lhs_gpr >= 0 || fields->pattern_inputs) {
             if (!ft_emit_direct_condition(&out, fields, direct_result)) return 0;
         } else {
             direct_result = la_t0;
@@ -3000,18 +3011,30 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         tb->canlink[0] = 1;
         tb->canlink[1] = 1;
 #endif
+#ifdef CONFIG_SOFTMMU
+        if (fields->pattern_inputs && fields->pattern_inputs != FT_PATTERN_FCC) {
+            cond_lhs = la_a3;
+            if (!ft_emit_lats_pattern_condition(&out, fields, cond_lhs)) return 0;
+        } else
+#endif
         if (fields->direct_float_xx) {
 #ifdef CONFIG_SOFTMMU
             FastDirectBranchKind kind = fields->direct_branch_kind;
 
-            cond_lhs = la_a4;
-            taken_if_equal = kind == FT_DIRECT_BRANCH_NE ||
+            cond_lhs = (kind == FT_DIRECT_BRANCH_ALWAYS || kind == FT_DIRECT_BRANCH_NEVER) ?
+                       la_zero : la_a4;
+            if (fields->pattern_inputs == FT_PATTERN_FCC && cond_lhs != la_zero) {
+                ft_emit_pattern_addr(&out);
+                FT_LA_LD_D_EMIT(&out, la_a3, la_a0, 0);
+                FT_LA_MOVGR2CF_EMIT(&out, ft_float_branch_fcc(kind), la_a3);
+            }
+            taken_if_equal = kind == FT_DIRECT_BRANCH_ALWAYS || kind == FT_DIRECT_BRANCH_NE ||
                              kind == FT_DIRECT_BRANCH_GEU ||
                              kind == FT_DIRECT_BRANCH_GTU;
 #ifdef CONFIG_LATX_TU
             /* TU link slots use integer branches. Read FCC at the Jcc so
              * integer scratch registers are free throughout the gap. */
-            if (tb && tb->s_data && ft_tu_direct_jcc_enabled()) {
+            if (cond_lhs != la_zero && tb && tb->s_data && ft_tu_direct_jcc_enabled()) {
                 FT_LA_MOVCF2GR_EMIT(&out, cond_lhs, ft_float_branch_fcc(kind));
             }
 #endif
@@ -3074,6 +3097,12 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                     cond_rhs = tmp1;
                 }
             }
+#ifdef CONFIG_SOFTMMU
+            if (ft_lats_native_order(tb, fields)) {
+                return ft_emit_jcc_exit_or_self_loop(tb, code, &out, pc, fields,
+                                                     cond_lhs, cond_rhs, false);
+            }
+#endif
             switch (fields->direct_branch_kind) {
             case FT_DIRECT_BRANCH_EQ:
                 taken_if_equal = true;
@@ -5060,6 +5089,13 @@ simd_bin_done:
                 } else {
                     FT_LA_FCMP_COND_S_EMIT(&out, 0, ft_xmm(lhs), rhs, cond);
                 }
+            }
+            if (fields->pattern_inputs == FT_PATTERN_SAVE_FCC &&
+                fields->direct_branch_kind != FT_DIRECT_BRANCH_ALWAYS &&
+                fields->direct_branch_kind != FT_DIRECT_BRANCH_NEVER) {
+                ft_emit_pattern_addr(&out);
+                FT_LA_MOVCF2GR_EMIT(&out, la_a3, ft_float_branch_fcc(fields->direct_branch_kind));
+                FT_LA_ST_D_EMIT(&out, la_a3, la_a0, 0);
             }
 #else
             return 0;
