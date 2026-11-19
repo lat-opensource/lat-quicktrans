@@ -4642,21 +4642,8 @@ simd_bin_done:
                      ((uint32_t)(imm - 16) << 10));
             break;
         }
-        if (fields->modrm_mod == 3) {
-            src = ft_modrm_rm_index(fields);
-            if (src >= XMM_NUM) {
-                return 0;
-            }
-            src = ft_xmm(src);
-        } else {
-            int addr;
-
-            if (!ft_emit_mem_addr(&out, fields, &addr)) {
-                return 0;
-            }
-            FT_LA_VLD_EMIT(&out, ft_vscratch, addr,
-                                   ft_mem_access_offset(fields, addr));
-            src = ft_vscratch;
+        if (!ft_emit_xmmm_src(&out, fields, pc, &src)) {
+            return 0;
         }
         if (imm == 0) {
             ft_emit_raw(&out, FT_LA_OPCODE_VORI_B | ft_xmm(dst) | (src << 5));
