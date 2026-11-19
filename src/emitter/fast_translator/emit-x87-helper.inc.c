@@ -128,6 +128,31 @@ static void ft_convert_fpregs_64_to_x80(CPUX86State *env)
 }
 
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+/* FLD m80 is a transfer. Narrow just the pushed value into the hard-FPU
+ * register format; an arithmetic softfloat conversion would quiet an sNaN. */
+static void ft_x87_latu_fldt_hard(CPUX86State *env, target_ulong ptr)
+{
+    uintptr_t ra = GETPC();
+    uint64_t significand = cpu_ldq_data_ra(env, ptr, ra);
+    uint16_t sign_exp = cpu_lduw_data_ra(env, ptr + 8, ra);
+    uint64_t bits;
+
+    if ((sign_exp & 0x7fff) == 0x7fff && (significand >> 62) == 2 &&
+        (significand << 2) != 0) {
+        uint64_t payload = (significand & UINT64_C(0x3fffffffffffffff)) >> 11;
+        /* A payload entirely below binary64 precision must not become infinity. */
+        bits = ((uint64_t)(sign_exp & 0x8000) << 48) |
+               UINT64_C(0x7ff0000000000000) | (payload ? payload : 1);
+    } else {
+        float_status status = env->fp_status;
+        bits = floatx80_to_float64(make_floatx80(sign_exp, significand), &status);
+    }
+
+    helper_fpush(env);
+    env->fpregs[env->fpstt].d.low = bits;
+    env->fpregs[env->fpstt].d.high = 0;
+}
+
 /* FXSAVE is an observation, not a floating-point state conversion. Keep an
  * exact snapshot so even unused NaN payloads survive the helper unchanged.
  * MMX aliases are integer bits and must never pass through float64_to_x80.

@@ -3012,8 +3012,14 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
     case FT_X87_FLD_M80:
     {
         bool save_address = true;
+        bool convert_stack = !option_soft_fpu;
+        void *load = (void *)helper_fldt_ST0;
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
         save_address = !option_soft_fpu;
+        if (!option_soft_fpu) {
+            load = (void *)ft_x87_latu_fldt_hard;
+        }
+        convert_stack = false;
 #endif
         int addr;
         int offset;
@@ -3060,7 +3066,7 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         }
 
         ft_emit_helper_prologue(&out);
-        if (!option_soft_fpu) {
+        if (convert_stack) {
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, (void *)ft_convert_fpregs_64_to_x80,
                               1u << 0);
@@ -3071,8 +3077,8 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
             ft_emit_host_stack_end(&out);
         }
         ft_emit_cpu_env_ptr(&out, la_a0);
-        ft_emit_host_call(&out, (void *)helper_fldt_ST0, 1u << 0);
-        if (!option_soft_fpu) {
+        ft_emit_host_call(&out, load, 1u << 0);
+        if (convert_stack) {
             ft_emit_cpu_env_ptr(&out, la_a0);
             ft_emit_host_call(&out, (void *)ft_convert_fpregs_x80_to_64,
                               1u << 0);
@@ -4416,53 +4422,43 @@ static int ft_emit_x87_template(const FastTemplateFields *fields, TranslationBlo
         FT_LA_ADDI_D_EMIT(&out, la_a1, addr, offset);
 
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
-        if (!option_soft_fpu && ft_x87_latu_legacy_no_tag()) {
-            /* The previous 64-to-80 helper quieted SNaN in CPU state before
-             * a guest write could fault. Preserve that ST0 signal image. */
-            FastBranchLabel quiet = {0};
-            FastBranchFixup finite_fixup, infinity_fixup;
+        if (!option_soft_fpu) {
+            FastBranchLabel finite = {0}, store = {0};
+            FastBranchFixup finite_fixup, store_fixup;
+            /* NaNs and infinity widen exactly by repositioning the exponent
+             * and significand. In particular, leave the quiet bit and ST0
+             * alone, including when a guest store faults and is retried. */
             FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_mmx(0));
-            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t0, 62, 51);
-            FT_LA_XORI_EMIT(&out, la_t1, la_t1, 0xffe);
+            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t0, 62, 52);
+            FT_LA_XORI_EMIT(&out, la_t1, la_t1, 0x7ff);
             ft_emit_branch_placeholder(&out, &finite_fixup, FT_BRANCH_BNE,
-                                       la_t1, la_zero, &quiet);
-            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t0, 50, 0);
-            ft_emit_branch_placeholder(&out, &infinity_fixup, FT_BRANCH_BEQ,
-                                       la_t1, la_zero, &quiet);
-            FT_LA_ORI_EMIT(&out, la_t1, la_zero, 1);
-            FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_t1, 51, 51);
-            FT_LA_MOVGR2FR_D_EMIT(&out, ft_mmx(0), la_t0);
-            ft_bind_branch_label(&quiet, out);
+                                       la_t1, la_zero, &finite);
+            FT_LA_SRLI_D_EMIT(&out, la_t1, la_t0, 48);
+            ft_emit_li64(&out, la_t2, 0x7fff);
+            FT_LA_OR_EMIT(&out, la_t1, la_t1, la_t2);
+            FT_LA_SLLI_D_EMIT(&out, la_t0, la_t0, 11);
+            FT_LA_ORI_EMIT(&out, la_t2, la_zero, 1);
+            FT_LA_BSTRINS_D_EMIT(&out, la_t0, la_t2, 63, 63);
+            ft_emit_branch_placeholder(&out, &store_fixup, FT_BRANCH_B,
+                                       0, 0, &store);
+
+            ft_bind_branch_label(&finite, out);
             ft_resolve_branch_fixup(&finite_fixup);
-            ft_resolve_branch_fixup(&infinity_fixup);
-            /* Match store_64_bit_freg_to_ir1_80_bit_mem: convert only ST0.
-             * Keep TOP and ST0 intact until both guest stores succeed, so
-             * a write fault can return to and retry this x86 instruction. */
-            FastBranchLabel masked = {0}, restored = {0};
-            FastBranchFixup mask_fixup, restore_fixup;
-            FT_LA_MOVFCSR2GR_EMIT(&out, la_t0, 0);
-            FT_LA_BSTRPICK_D_EMIT(&out, la_t1, la_t0, 4, 4);
-            ft_emit_branch_placeholder(&out, &mask_fixup, FT_BRANCH_BEQ,
-                                       la_t1, la_zero, &masked);
-            FT_LA_XORI_EMIT(&out, la_t0, la_t0, 0x10);
-            FT_LA_MOVGR2FCSR_EMIT(&out, 0, la_t0);
-            ft_bind_branch_label(&masked, out);
-            ft_resolve_branch_fixup(&mask_fixup);
             FT_LA_FCVT_LD_D_EMIT(&out, ft_vscratch, ft_mmx(0));
             FT_LA_FCVT_UD_D_EMIT(&out, ft_vscratch + 1, ft_mmx(0));
-            FT_LA_MOVFCSR2GR_EMIT(&out, la_t0, 0);
-            ft_emit_branch_placeholder(&out, &restore_fixup, FT_BRANCH_BEQ,
-                                       la_t1, la_zero, &restored);
-            FT_LA_XORI_EMIT(&out, la_t0, la_t0, 0x10);
-            FT_LA_MOVGR2FCSR_EMIT(&out, 0, la_t0);
-            ft_bind_branch_label(&restored, out);
-            ft_resolve_branch_fixup(&restore_fixup);
+            FT_LA_MOVFR2GR_D_EMIT(&out, la_t0, ft_vscratch);
             FT_LA_MOVFR2GR_S_EMIT(&out, la_t1, ft_vscratch + 1);
-            FT_LA_ST_H_EMIT(&out, la_t1, la_a1, 8);
-            FT_LA_MOVFR2GR_D_EMIT(&out, la_t1, ft_vscratch);
-            /* Preserve the current helper's quiet-NaN conversion.  The
-             * hard-mode load can leave an SNaN encoding in ST0. */
-            FT_LA_ST_D_EMIT(&out, la_t1, la_a1, 0);
+
+            ft_bind_branch_label(&store, out);
+            ft_resolve_branch_fixup(&store_fixup);
+            if (ft_x87_latu_legacy_no_tag()) {
+                FT_LA_ST_H_EMIT(&out, la_t1, la_a1, 8);
+                FT_LA_ST_D_EMIT(&out, la_t0, la_a1, 0);
+            } else {
+                /* Preserve the tagged helper's partial-store order. */
+                FT_LA_ST_D_EMIT(&out, la_t0, la_a1, 0);
+                FT_LA_ST_H_EMIT(&out, la_t1, la_a1, 8);
+            }
             ft_emit_x87_pop(&out);
             break;
         }
