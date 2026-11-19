@@ -435,6 +435,7 @@ static const uint8_t fd_ft_one_byte_dispatch[256] = {
     [0x34 ... 0x37] = FD_FT_FAMILY_GPR,
     [0x38 ... 0x3b] = FD_FT_FAMILY_HOT_GPR,
     [0x3c ... 0x3f] = FD_FT_FAMILY_GPR,
+    [0x40 ... 0x4f] = FD_FT_FAMILY_GPR,
     [0x50 ... 0x5f] = FD_FT_FAMILY_HOT_GPR,
     [0x60 ... 0x63] = FD_FT_FAMILY_GPR,
     [0x6c ... 0x6f] = FD_FT_FAMILY_CONTROL,

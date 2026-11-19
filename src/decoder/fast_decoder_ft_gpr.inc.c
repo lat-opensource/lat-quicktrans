@@ -524,6 +524,23 @@ static inline FastDecoderFTMatch fd_ft_try_gpr(FDState *s, uint8_t opcode0,
         return fd_ft_finish_match(decoded, s, FT_STRING, false);
     }
 
+    /* Outside long code these opcodes encode INC/DEC, with the register
+     * in the low three bits. Reuse the register form of group 5. */
+    if (!two_byte && !s->mode && opcode0 >= 0x40 && opcode0 <= 0x4f) {
+        bool dec = (opcode0 & 8) != 0;
+        FastTemplateKind kind = s->dflag == 16 ?
+            (dec ? FT_DEC_RM16 : FT_INC_RM16) :
+            (dec ? FT_DEC_RM32 : FT_INC_RM32);
+
+        if (s->prefix[0] == dt_X86_PREFIX_LOCK) {
+            return FD_FT_REJECT;
+        }
+        fd_ft_init_fields(&decoded->fields, kind, s, address, opcode0, 0,
+                          dec ? dt_X86_INS_DEC : dt_X86_INS_INC);
+        ft_fields_set_modrm(&decoded->fields, 0xc0 | (opcode0 & 15));
+        return fd_ft_finish_match(decoded, s, kind, false);
+    }
+
     if (!two_byte && (opcode0 == 0xfe || opcode0 == 0xff)) {
         FastTemplateKind kind;
         int ext;

@@ -1767,8 +1767,48 @@ static int ft_emit_helper_template(const FastTemplateFields *fields, Translation
         int addr;
         int offset;
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+        if (fields->alu_width == 16 || fields->alu_width == 32) {
+            int bytes = fields->alu_width / 8;
+            bool static_context;
+
+            if (!tb || !(tb->flags & HF_PE_MASK) || (tb->flags & HF_VM_MASK) ||
+                !ft_emit_rip_or_mem_addr(&out, fields, pc, &addr)) {
+                return 0;
+            }
+            offset = ft_mem_access_offset(fields, addr);
+            if (!ft_fits_simm12(offset)) {
+                return 0;
+            }
+            /* Read the guest pointer before switching to the helper ASID. */
+            FT_LA_ADDI_D_EMIT(&out, la_a4, addr, offset);
+            if (bytes == 2) {
+                FT_LA_LD_HU_EMIT(&out, la_a2, la_a4, 0);
+            } else {
+                FT_LA_LD_WU_EMIT(&out, la_a2, la_a4, 0);
+            }
+            FT_LA_LD_HU_EMIT(&out, la_a3, la_a4, bytes);
+            FT_LA_BSTRINS_D_EMIT(&out, la_a2, la_a3, 47, 32);
+            ft_emit_store_env(&out, la_a2, offsetof(CPUX86State, tmparea[0]),
+                              FT_LA_OPCODE_ST_D);
+            static_context = ft_emit_default_helper_prologue(&out, false);
+            ft_emit_load_env(&out, la_a2, offsetof(CPUX86State, tmparea[0]),
+                             FT_LA_OPCODE_LD_D);
+            FT_LA_SRLI_D_EMIT(&out, la_a1, la_a2, 32);
+            FT_LA_BSTRPICK_D_EMIT(&out, la_a2, la_a2, 31, 0);
+            ft_emit_li64(&out, la_a3, pc + fields->size);
+            ft_emit_cpu_env_ptr(&out, la_a0);
+            ft_emit_default_helper_call(&out, (void *)helper_ljmp_protected,
+                                        1u << 0, static_context);
+            ft_emit_default_helper_epilogue(&out, static_context, false);
+            /* A far jump can change CS and the target's decode mode. */
+            ft_emit_load_env(&out, la_a4, lsenv_offset_of_eip(lsenv),
+                             FT_LA_OPCODE_LD_D);
+            ft_emit_tu_indirect_dispatch_exit(tb, &out, la_a4, la_a5);
+            return out - code;
+        }
+#endif
 #ifndef QUICKTRANS_LATU
-        /* Narrow memory far pointers are newly enabled for LATU only. */
         if (fields->alu_width != 64) {
             return 0;
         }

@@ -57,6 +57,31 @@ static void test_default_32bit_address_size(void)
     CHECK(!decoded.fields.addr32, "ELF64 default address size must be 64");
 }
 
+static void test_short_inc_dec(void)
+{
+    int matched;
+
+    for (int op = 0x40; op <= 0x4f; ++op) {
+        uint8_t code[] = { 0x66, op, 0x90 };
+        FastDecodedFT d = decode32(code + 1, 2, 0x1000, &matched);
+        CHECK(matched && d.fields.size == 1 &&
+              d.fields.kind == (op < 0x48 ? FT_INC_RM32 : FT_DEC_RM32) &&
+              d.fields.modrm_rm_index == (op & 7),
+              "short INC/DEC must consume one byte and name its register");
+        d = decode32(code, sizeof(code), 0x1000, &matched);
+        CHECK(matched && d.fields.size == 2 &&
+              d.fields.kind == (op < 0x48 ? FT_INC_RM16 : FT_DEC_RM16),
+              "operand-size prefix selects a 16-bit short INC/DEC");
+    }
+    const uint8_t locked[] = { 0xf0, 0x41 };
+    decode32(locked, sizeof(locked), 0x1000, &matched);
+    CHECK(!matched, "LOCK is invalid on register INC");
+    const uint8_t rex[] = { 0x41, 0x83, 0xf9, 1 };
+    FastDecodedFT d = decode(rex, sizeof(rex), 0x1000, &matched);
+    CHECK(matched && d.fields.size == 4 && d.fields.alu_op == FT_ALU_CMP &&
+          d.fields.modrm_rm_index == 9, "long code must still consume REX.B");
+}
+
 static void test_hot_gpr(void)
 {
     static const uint8_t mov64[] = { 0x48, 0x89, 0xd8 };
@@ -3208,6 +3233,7 @@ int main(void)
     test_ft_reused_status();
     test_default_32bit_address_size();
     test_sse_partial_displacements();
+    test_short_inc_dec();
     test_hot_gpr();
     test_mov_imm8_rex_registers();
     test_mov_moffs();
