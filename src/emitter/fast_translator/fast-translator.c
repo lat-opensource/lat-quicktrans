@@ -2680,19 +2680,16 @@ static void ft_analyze_div_patterns(FastTemplateFields *fields, int count)
         } else if (head->kind == FT_CDQ && tail->kind == FT_IDIV_RM32) {
             kind = FT_INSTPTN_DIV_CDQ_IDIV32;
             bit = FT_INSTPTN_CDQ_IDIV;
-        } else if (head->alu_op == FT_ALU_XOR &&
-                   head->alu_form == FT_ALU_FORM_RM_R &&
-                   head->modrm_mod == 3 &&
-                   head->modrm_rm_index == rdx_index &&
-                   head->modrm_reg_index == rdx_index) {
-            if (head->alu_width == 32 && tail->kind == FT_DIV_RM32) {
-                kind = FT_INSTPTN_DIV_XOR_DIV32;
-            } else if (head->alu_width == 64 && tail->kind == FT_DIV_RM64) {
-                kind = FT_INSTPTN_DIV_XOR_DIV64;
-            }
-            bit = FT_INSTPTN_XOR_DIV;
         }
+        /* LATS rejects XOR/DIV: its EDX check examines the XOR destination. */
         if (kind && ft_instptn_enabled(bit)) {
+            int base;
+            if (tail->modrm_mod == 3 ? tail->modrm_rm_index == rdx_index :
+                ((ft_base_from_modrm_sib_with_index(tail, &base) && base == rdx_index) ||
+                 (tail->modrm_rm == 4 && ft_sib_has_index(tail) &&
+                  ft_sib_index_index(tail) == rdx_index))) {
+                continue;
+            }
             head->instptn_skip = true;
             tail->instptn_div_kind = kind;
         }

@@ -1298,16 +1298,25 @@ static bool ft_emit_idiv_rm32(uint32_t **out, const FastTemplateFields *fields,
         ft_resolve_branch_fixup(&fixup);
     }
 
-#ifdef QUICKTRANS_LATU
-    /* Shifting discards RDX high bits; insert exactly the low EAX bits. */
-    FT_LA_SLLI_D_EMIT(out, la_t1, ft_gpr(rdx_index), 32);
-    FT_LA_BSTRINS_D_EMIT(out, la_t1, ft_gpr(rax_index), 31, 0);
-#else
-    FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rdx_index), 31, 0);
-    FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 32);
-    FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rax_index), 31, 0);
-    FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
+#ifdef CONFIG_SOFTMMU
+    if (fields->instptn_div_kind == FT_INSTPTN_DIV_CDQ_IDIV32) {
+        /* CDQ has already sign-extended EAX. Its high half was restored
+         * above for an exception at the divisor access. */
+        FT_LA_SLLI_W_EMIT(out, la_t1, ft_gpr(rax_index), 0);
+    } else
 #endif
+    {
+#ifdef QUICKTRANS_LATU
+        /* Shifting discards RDX high bits; insert exactly the low EAX bits. */
+        FT_LA_SLLI_D_EMIT(out, la_t1, ft_gpr(rdx_index), 32);
+        FT_LA_BSTRINS_D_EMIT(out, la_t1, ft_gpr(rax_index), 31, 0);
+#else
+        FT_LA_BSTRPICK_D_EMIT(out, la_t1, ft_gpr(rdx_index), 31, 0);
+        FT_LA_SLLI_D_EMIT(out, la_t1, la_t1, 32);
+        FT_LA_BSTRPICK_D_EMIT(out, la_t2, ft_gpr(rax_index), 31, 0);
+        FT_LA_OR_EMIT(out, la_t1, la_t1, la_t2);
+#endif
+    }
 
     FT_LA_MOD_D_EMIT(out, la_t2, la_t1, la_t0);
     FT_LA_DIV_D_EMIT(out, la_t3, la_t1, la_t0);
@@ -1441,6 +1450,27 @@ static bool ft_emit_idiv_rm64(uint32_t **out, const FastTemplateFields *fields,
         ft_bind_branch_label(&nonzero, *out);
         ft_resolve_branch_fixup(&fixup);
     }
+#ifdef CONFIG_SOFTMMU
+    if (fields->instptn_div_kind == FT_INSTPTN_DIV_CQO_IDIV64) {
+        /* CQO makes the dividend a signed 64-bit value. The only
+         * unrepresentable quotient is INT64_MIN divided by -1. */
+        FastBranchLabel fits = { 0 };
+        FastBranchFixup ordinary_divisor, ordinary_dividend;
+        FT_LA_ADDI_D_EMIT(out, la_t1, la_t0, 1);
+        ft_emit_branch_placeholder(out, &ordinary_divisor, FT_BRANCH_BNE,
+                                   la_t1, la_zero, &fits);
+        ft_emit_li64(out, la_t1, UINT64_C(1) << 63);
+        ft_emit_branch_placeholder(out, &ordinary_dividend, FT_BRANCH_BNE,
+                                   ft_gpr(rax_index), la_t1, &fits);
+        ft_emit_raise_exception(out, pc, EXCP00_DIVZ);
+        ft_bind_branch_label(&fits, *out);
+        ft_resolve_branch_fixup(&ordinary_divisor);
+        ft_resolve_branch_fixup(&ordinary_dividend);
+        FT_LA_MOD_D_EMIT(out, ft_gpr(rdx_index), ft_gpr(rax_index), la_t0);
+        FT_LA_DIV_D_EMIT(out, ft_gpr(rax_index), ft_gpr(rax_index), la_t0);
+        return true;
+    }
+#endif
     FT_LA_OR_EMIT(out, la_t1, la_zero, la_zero);
 
     FT_LA_BGE_EMIT(out, ft_gpr(rdx_index), la_zero, 7);
