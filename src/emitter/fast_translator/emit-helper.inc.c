@@ -432,6 +432,34 @@ static void ft_emit_lats_soft_fcsr_from_mxcsr(uint32_t **out, int mxcsr)
 }
 #endif
 
+static void ft_emit_fcsr_sticky_from_mxcsr(uint32_t **out, int fcsr, int mxcsr)
+{
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    /* In hard-float LATU, FNSTSW consumes the host sticky flags. Preserve
+     * pending x87 exceptions and leave SSE status in env->mxcsr. */
+    if (!option_soft_fpu) {
+        return;
+    }
+#endif
+    FT_LA_BSTRINS_W_EMIT(out, fcsr, la_zero, FCSR_OFF_FLAGS_V,
+                         FCSR_OFF_FLAGS_I);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 0, 0);
+    FT_LA_BSTRINS_W_EMIT(out, fcsr, la_t3, FCSR_OFF_FLAGS_V,
+                         FCSR_OFF_FLAGS_V);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 2, 2);
+    FT_LA_BSTRINS_W_EMIT(out, fcsr, la_t3, FCSR_OFF_FLAGS_Z,
+                         FCSR_OFF_FLAGS_Z);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 3, 3);
+    FT_LA_BSTRINS_W_EMIT(out, fcsr, la_t3, FCSR_OFF_FLAGS_O,
+                         FCSR_OFF_FLAGS_O);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 4, 4);
+    FT_LA_BSTRINS_W_EMIT(out, fcsr, la_t3, FCSR_OFF_FLAGS_U,
+                         FCSR_OFF_FLAGS_U);
+    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 5, 5);
+    FT_LA_BSTRINS_W_EMIT(out, fcsr, la_t3, FCSR_OFF_FLAGS_I,
+                         FCSR_OFF_FLAGS_I);
+}
+
 static void ft_emit_fcsr_from_mxcsr(uint32_t **out, int mxcsr)
 {
 #if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
@@ -467,23 +495,7 @@ static void ft_emit_fcsr_from_mxcsr(uint32_t **out, int mxcsr)
     FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, FCSR_OFF_EN_I,
                          FCSR_OFF_EN_I);
 
-    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_zero, FCSR_OFF_FLAGS_V,
-                         FCSR_OFF_FLAGS_I);
-    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 0, 0);
-    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, FCSR_OFF_FLAGS_V,
-                         FCSR_OFF_FLAGS_V);
-    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 2, 2);
-    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, FCSR_OFF_FLAGS_Z,
-                         FCSR_OFF_FLAGS_Z);
-    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 3, 3);
-    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, FCSR_OFF_FLAGS_O,
-                         FCSR_OFF_FLAGS_O);
-    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 4, 4);
-    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, FCSR_OFF_FLAGS_U,
-                         FCSR_OFF_FLAGS_U);
-    FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 5, 5);
-    FT_LA_BSTRINS_W_EMIT(out, la_t2, la_t3, FCSR_OFF_FLAGS_I,
-                         FCSR_OFF_FLAGS_I);
+    ft_emit_fcsr_sticky_from_mxcsr(out, la_t2, mxcsr);
 
     FT_LA_BSTRPICK_W_EMIT(out, la_t3, mxcsr, 14, 13);
     FT_LA_ANDI_EMIT(out, la_t4, la_t3, 1);
