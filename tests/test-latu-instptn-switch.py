@@ -13,7 +13,7 @@ int main(void) {
   for (int i=0;i<34;++i) {
 #ifdef QUICKTRANS_LATU
    int legacy=i<=20?i:i==22?21:i==30?24:i==23?25:-1;
-   bool expect=legacy>=0 ? ((uint32_t)option_instptn & (1u<<legacy))!=0 : (uint32_t)option_instptn==0x3ffffff;
+   bool expect=legacy>=0 && ((uint32_t)option_instptn & (1u<<legacy))!=0;
 #else
    bool expect=(option_instptn & (1ULL<<i))!=0;
 #endif

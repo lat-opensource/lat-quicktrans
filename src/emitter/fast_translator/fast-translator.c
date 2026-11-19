@@ -2302,9 +2302,7 @@ static bool ft_instptn_enabled(uint64_t bit)
 {
 #ifdef QUICKTRANS_LATU
     /* LATU and LATS share bits 0..20, but not the later assignments.
-     * LATU-only MOVAPS/NEG slots must not select unrelated QT patterns.
-     * QT extensions with no LATU bit remain enabled by the default full
-     * mask only; a partial mask selects only its named legacy patterns. */
+     * Only select patterns with a corresponding LATU bit. */
     uint32_t mask = (uint32_t)option_instptn;
     if (bit <= FT_INSTPTN_UCOMISD_SETA) {
         return (mask & bit) != 0;
@@ -2317,7 +2315,7 @@ static bool ft_instptn_enabled(uint64_t bit)
     case FT_INSTPTN_AND_JCC:
         return (mask & (1u << 25)) != 0;
     default:
-        return mask == 0x3ffffffu;
+        return false;
     }
 #else
     return (option_instptn & bit) != 0;
@@ -3190,6 +3188,16 @@ static void ft_analyze_direct_jcc_pair(FastTemplateFields *alu,
         default: option_bit = 0; break;
         }
     }
+#ifdef QUICKTRANS_LATU
+    /* The result alone supports only the zero tests in LATU's SUB pattern.
+     * LATU's AND and immediate SHR patterns accept JNE only. */
+    if ((option_bit == FT_INSTPTN_SUB_JCC &&
+         jcc->id != dt_X86_INS_JE && jcc->id != dt_X86_INS_JNE) ||
+        ((option_bit == FT_INSTPTN_AND_JCC || option_bit == FT_INSTPTN_SHR_JCC) &&
+         jcc->id != dt_X86_INS_JNE)) {
+        return;
+    }
+#endif
     if (lhs < 0 || option_bit == 0 || !ft_instptn_enabled(option_bit)) {
         return;
     }
