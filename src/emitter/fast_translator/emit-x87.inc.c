@@ -1097,7 +1097,15 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
         /* helper_fxsave performs the guest-memory write through softmmu. */
         ft_emit_store_env(out, la_t1, mxcsr_offset, FT_LA_OPCODE_ST_W);
 #else
-        FT_LA_ST_W_EMIT(out, la_t1, la_a1, 24);
+#ifdef QUICKTRANS_LATU
+        if (option_soft_fpu == 1) {
+            /* helper_fxsave writes env->mxcsr into the final image. */
+            ft_emit_store_env(out, la_t1, mxcsr_offset, FT_LA_OPCODE_ST_W);
+        } else
+#endif
+        {
+            FT_LA_ST_W_EMIT(out, la_t1, la_a1, 24);
+        }
 #endif
         if (!preserve_hard_fxsave && !option_soft_fpu &&
             !ft_emit_x87_sync_status_from_fcsr(out)) {
@@ -1118,6 +1126,12 @@ static int ft_emit_fxsave_restore_helper(uint32_t **out,
 #endif
 
 #if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (restore && option_soft_fpu == 1) {
+        /* FXRSTOR replaces pending SSE flags and rounding just like LDMXCSR. */
+        ft_emit_load_env(out, la_t1, lsenv_offset_of_mxcsr(lsenv),
+                         FT_LA_OPCODE_LD_WU);
+        ft_emit_fcsr_from_mxcsr(out, la_t1);
+    }
     if (preserve_hard_fxsave) {
         ft_emit_host_stack_begin(out);
         FT_LA_ADDI_D_EMIT(out, la_a1, la_sp, 16);

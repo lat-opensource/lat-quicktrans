@@ -4734,12 +4734,14 @@ simd_bin_done:
             return 0;
         }
         ft_emit_load_env(&out, la_t1, offset, FT_LA_OPCODE_LD_WU);
-#ifndef QUICKTRANS_LATU
-        /* LATU legacy STMXCSR reads the saved value only. Its soft x87
-         * fast arithmetic also uses FCSR, so merging flags leaks x87 state. */
-        ft_emit_mxcsr_flags_from_fcsr(&out, la_t1);
-        ft_emit_store_env(&out, la_t1, offset, FT_LA_OPCODE_ST_W);
+#ifdef QUICKTRANS_LATU
+        /* Only pure software x87 leaves host sticky flags owned by SSE. */
+        if (option_soft_fpu == 1)
 #endif
+        {
+            ft_emit_mxcsr_flags_from_fcsr(&out, la_t1);
+            ft_emit_store_env(&out, la_t1, offset, FT_LA_OPCODE_ST_W);
+        }
         if (!ft_emit_store_rm32(&out, fields, pc, la_t1, false)) {
             return 0;
         }
