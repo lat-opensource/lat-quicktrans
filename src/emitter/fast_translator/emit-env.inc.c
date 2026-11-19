@@ -413,17 +413,31 @@ static int ft_emit_raise_exception(uint32_t **out, target_ulong pc,
 {
     uint32_t *start = *out;
 
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+#ifdef CONFIG_LATX_OPT_NOFP
+    ft_emit_save_fprs_for_exception(out);
+#endif
+    /* The exception helper can longjmp through libc. Enter the host C
+     * context just as for a non-returning software interrupt. */
+    bool static_context = ft_emit_default_helper_prologue(out, false);
+#else
     ft_emit_save_gprs_to_env(out);
     ft_emit_save_fprs_for_exception(out);
     ft_emit_save_xmms_to_env(out);
     ft_emit_save_condition_flags(out);
+#endif
 
     ft_emit_li64(out, la_t0, pc);
     ft_emit_store_env(out, la_t0, lsenv_offset_of_eip(lsenv), FT_LA_OPCODE_ST_D);
 
     ft_emit_cpu_env_ptr(out, la_a0);
     FT_LA_ADDI_D_EMIT(out, la_a1, la_zero, exception);
+#if defined(CONFIG_SOFTMMU) && !defined(QUICKTRANS_LATU)
+    ft_emit_default_helper_call(out, (void *)helper_raise_exception, 1u << 0,
+                                static_context);
+#else
     ft_emit_host_call(out, (void *)helper_raise_exception, 1u << 0);
+#endif
     FT_LA_BREAK_EMIT(out, 0);
     return *out - start;
 }

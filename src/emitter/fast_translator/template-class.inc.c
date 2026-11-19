@@ -180,6 +180,8 @@ static void ft_patch_branch_to(uint32_t *branch, FastBranchKind kind,
 
 static int ft_emit_x87_top_load(uint32_t **out);
 static int ft_emit_x87_top_save(uint32_t **out);
+static bool ft_emit_default_helper_prologue(uint32_t **out,
+                                            bool helper_uses_fprs);
 static void ft_emit_helper_prologue(uint32_t **out);
 static void ft_emit_helper_epilogue(uint32_t **out);
 #ifndef QUICKTRANS_LATU

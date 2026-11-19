@@ -110,8 +110,6 @@ static int ft_emit_fsave_restore_helper(uint32_t **out,
 static int ft_emit_fenv_helper(uint32_t **out,
                                const FastTemplateFields *fields,
                                target_ulong pc, bool restore);
-static bool ft_emit_default_helper_prologue(uint32_t **out,
-                                            bool helper_uses_fprs);
 #ifdef QUICKTRANS_LATU
 static void ft_emit_default_helper_call(uint32_t **out, void *func,
                                         unsigned pointer_args,
@@ -229,14 +227,23 @@ static int ft_emit_helper_indirect_exit(uint32_t **out, TranslationBlock *tb,
 static void ft_emit_interrupt_helper(uint32_t **out, target_ulong pc,
                                      int intno, int next_eip_addend)
 {
+#ifdef CONFIG_SOFTMMU
+    bool static_context = ft_emit_default_helper_prologue(out, false);
+#else
     ft_emit_helper_prologue(out);
+#endif
     ft_emit_li64(out, la_t0, pc);
     ft_emit_store_env(out, la_t0, lsenv_offset_of_eip(lsenv),
                       FT_LA_OPCODE_ST_D);
     ft_emit_cpu_env_ptr(out, la_a0);
     FT_LA_ADDI_D_EMIT(out, la_a1, la_zero, intno);
     FT_LA_ADDI_D_EMIT(out, la_a2, la_zero, next_eip_addend);
+#ifdef CONFIG_SOFTMMU
+    ft_emit_default_helper_call(out, (void *)helper_raise_interrupt, 1u << 0,
+                                static_context);
+#else
     ft_emit_host_call(out, (void *)helper_raise_interrupt, 1u << 0);
+#endif
     FT_LA_BREAK_EMIT(out, 0);
 }
 
