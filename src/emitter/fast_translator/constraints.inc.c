@@ -875,8 +875,8 @@ static bool fast_template_emit_constraints_ok(const FastTemplateFields *fields)
                                                    fields->sib) ||
                 ft_supported_lea_addr(fields->rex, fields->modrm,
                                       fields->sib)) &&
-               ((fields->id == dt_X86_INS_PINSRB && !ft_rex_w(fields)) ||
-                (fields->id == dt_X86_INS_PINSRW && !ft_rex_w(fields)) ||
+               (fields->id == dt_X86_INS_PINSRB ||
+                fields->id == dt_X86_INS_PINSRW ||
                 (fields->id == dt_X86_INS_PINSRD && !ft_rex_w(fields)) ||
                 (fields->id == dt_X86_INS_PINSRQ && ft_rex_w(fields)));
     case FT_PINSRW_MMX_RM16_IMM8:
@@ -896,7 +896,7 @@ static bool fast_template_emit_constraints_ok(const FastTemplateFields *fields)
                                                    fields->sib) ||
                 ft_supported_lea_addr(fields->rex, fields->modrm,
                                       fields->sib)) &&
-               ((fields->id == dt_X86_INS_PEXTRB && !ft_rex_w(fields)) ||
+               (fields->id == dt_X86_INS_PEXTRB ||
                 (fields->id == dt_X86_INS_PEXTRD && !ft_rex_w(fields)) ||
                 (fields->id == dt_X86_INS_PEXTRQ && ft_rex_w(fields)));
     case FT_MOVQ_MMX_RM64:
@@ -972,8 +972,7 @@ static bool fast_template_emit_constraints_ok(const FastTemplateFields *fields)
                 ft_supported_lea_addr(fields->rex, fields->modrm,
                                       fields->sib));
     case FT_PEXTRW_SSE41_RM16_XMM_IMM8:
-        return !ft_rex_w(fields) &&
-               fields->prefix2 == dt_X86_PREFIX_OPSIZE &&
+        return fields->prefix2 == dt_X86_PREFIX_OPSIZE &&
                fields->id == dt_X86_INS_PEXTRW &&
                (fields->modrm_mod == 3 ||
                 ft_supported_base_disp_or_rip_addr(fields->rex,

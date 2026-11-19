@@ -1017,7 +1017,7 @@ int fd_dispatch_sse(FDState *s, int op, struct la_dt_insn *info)
                     ins_id = dt_X86_INS_PINSRQ;
                 if (xx == 0x14)
                     return fd_sse_extract_like(s, info, dt_X86_INS_PEXTRB, 1, 4);
-                if (xx == 0x15 && !s->rex_w)
+                if (xx == 0x15)
                     return fd_sse_extract_like(s, info, dt_X86_INS_PEXTRW, 2, 4);
                 if (xx == 0x16)
                     return fd_sse_extract_like(s, info,

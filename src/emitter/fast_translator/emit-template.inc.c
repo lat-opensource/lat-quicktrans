@@ -3530,11 +3530,10 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 return 0;
             }
             src = la_t0;
-            if (fields->id == dt_X86_INS_PINSRB && !ft_rex_w(fields)) {
+            if (fields->id == dt_X86_INS_PINSRB) {
                 FT_LA_LD_BU_EMIT(&out, src, addr,
                                   ft_mem_access_offset(fields, addr));
-            } else if (fields->id == dt_X86_INS_PINSRW &&
-                       !ft_rex_w(fields)) {
+            } else if (fields->id == dt_X86_INS_PINSRW) {
                 FT_LA_LD_HU_EMIT(&out, src, addr,
                                   ft_mem_access_offset(fields, addr));
             } else if (fields->id == dt_X86_INS_PINSRD &&
@@ -3549,9 +3548,9 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
                 return 0;
             }
         }
-        if (fields->id == dt_X86_INS_PINSRB && !ft_rex_w(fields)) {
+        if (fields->id == dt_X86_INS_PINSRB) {
             FT_LA_VINSGR2VR_B_EMIT(&out, ft_xmm(dst), src, imm & 0xf);
-        } else if (fields->id == dt_X86_INS_PINSRW && !ft_rex_w(fields)) {
+        } else if (fields->id == dt_X86_INS_PINSRW) {
             FT_LA_VINSGR2VR_H_EMIT(&out, ft_xmm(dst), src, imm & 0x7);
         } else if (fields->id == dt_X86_INS_PINSRD && !ft_rex_w(fields)) {
             FT_LA_VINSGR2VR_W_EMIT(&out, ft_xmm(dst), src, imm & 0x3);
@@ -3585,7 +3584,7 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         } else {
             value = la_t4;
         }
-        if (fields->id == dt_X86_INS_PEXTRB && !ft_rex_w(fields)) {
+        if (fields->id == dt_X86_INS_PEXTRB) {
             FT_LA_VPICKVE2GR_BU_EMIT(&out, value, ft_xmm(src),
                                      imm & 0xf);
         } else if (fields->id == dt_X86_INS_PEXTRD && !ft_rex_w(fields)) {

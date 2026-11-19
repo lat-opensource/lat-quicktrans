@@ -801,9 +801,6 @@ static bool fd_ft_sse3a_opcode_info(uint8_t opcode, bool rex_w,
         *id = dt_X86_INS_PEXTRB;
         return true;
     case 0x15:
-        if (rex_w) {
-            return false;
-        }
         *kind = FT_PEXTRW_SSE41_RM16_XMM_IMM8;
         *id = dt_X86_INS_PEXTRW;
         return true;

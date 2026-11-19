@@ -24,7 +24,7 @@ static int ft_emit_pextrw_r32_xmm_imm8_template(const FastTemplateFields *fields
     (void)tb;
     (void)pc;
 
-    if (ft_rex_w(fields) || fields->modrm_mod != 3) {
+    if (fields->modrm_mod != 3) {
         return 0;
     }
     dst = ft_modrm_reg_index(fields);
@@ -46,9 +46,6 @@ static int ft_emit_pextrw_sse41_rm16_xmm_imm8_template(
     int src;
 
     (void)tb;
-    if (ft_rex_w(fields)) {
-        return 0;
-    }
     src = ft_modrm_reg_index(fields);
     if (src >= XMM_NUM) {
         return 0;
