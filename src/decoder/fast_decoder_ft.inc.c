@@ -385,6 +385,12 @@ static inline FastDecoderFTMatch fd_ft_try_hot_control(
                 return FD_FT_REJECT;
             }
             rel = (int8_t)s->code[s->pos++];
+        } else if (!s->mode && s->prefix[2] == dt_X86_PREFIX_OPSIZE) {
+            if (s->pos + 2 > s->code_size) {
+                return FD_FT_REJECT;
+            }
+            rel = (int16_t)fd_ft_read_u16(&s->code[s->pos]);
+            s->pos += 2;
         } else {
             if (s->pos + 4 > s->code_size) {
                 return FD_FT_REJECT;

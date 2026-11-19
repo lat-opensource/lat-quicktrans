@@ -3738,6 +3738,10 @@ static void ft_primary_update_last_info(TranslationBlock *tb,
         break;
     }
 #ifdef QUICKTRANS_LATU
+    if (!(tb->flags & HF_CS64_MASK) &&
+        (fields->kind == FT_CALL_REL32 || fields->kind == FT_JMP_REL32)) {
+        target_pc = ft_compat_direct_target(fields, next_pc);
+    }
     tb->s_data->next_pc = next_pc;
     tb->s_data->target_pc = target_pc;
 #else

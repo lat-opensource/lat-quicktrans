@@ -66,6 +66,24 @@ static void test_lats_pattern_gap(void)
     }
 }
 
+static void test_compat_near_displacement(void)
+{
+    uint8_t insn[] = {0x66, 0xe8, 0xfc, 0xff, 0xff, 0xff};
+    int matched;
+
+    for (int opcode = 0xe8; opcode <= 0xe9; opcode++) {
+        insn[1] = opcode;
+        FastDecodedFT f = decode32(insn, 4, 0x1000, &matched);
+        CHECK(matched && f.fields.size == 4 && f.fields.imm == -4,
+              "compat CALL/JMP with operand override needs a signed rel16");
+        decode32(insn, 3, 0x1000, &matched);
+        CHECK(!matched, "truncated rel16");
+        f = decode(insn, sizeof(insn), 0x1000, &matched);
+        CHECK(matched && f.fields.size == 6 && f.fields.imm == -4,
+              "64-bit CALL/JMP still uses rel32");
+    }
+}
+
 /* The absence of 0x67 does not imply 64-bit addressing in an ELF32 TB. */
 static void test_default_32bit_address_size(void)
 {
@@ -3262,6 +3280,7 @@ int main(void)
 {
     test_ft_reused_status();
     test_default_32bit_address_size();
+    test_compat_near_displacement();
     test_lats_pattern_gap();
     test_sse_partial_displacements();
     test_short_inc_dec();
