@@ -40,11 +40,31 @@ _start:
     cmp $0x12345878,%eax
     jne .Lbyte
 #endif
+    mov $0xa5a581de,%eax
+    mov $0x437d,%edx
+    shrdw $0x7f,%dx,%ax
+    cmp $0xa5a503bc,%eax
+    jne .Lshift
+    mov $0xa5a581de,%eax
+    shldw $0xf2,%dx,%ax
+    cmp $0xa5a50df6,%eax
+    jne .Lshift
+    mov $0xa5a581de,%eax
+    mov $16,%ecx
+    shrdw %cl,%dx,%ax
+    jnc .Lflags
+    cmp $0xa5a5437d,%eax
+    jne .Lshift
     xor %eax,%eax
     jmp .Lexit
 .Lbyte:
     mov $11,%eax
     jmp .Lexit
+.Lshift:
+    mov $12,%eax
+    jmp .Lexit
+.Lflags:
+    mov $13,%eax
 .Lexit:
 #ifdef __x86_64__
     pop %rbx

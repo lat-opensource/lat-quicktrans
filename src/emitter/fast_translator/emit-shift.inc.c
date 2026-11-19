@@ -1275,6 +1275,36 @@ static void ft_emit_toggle_of_from_bit0(uint32_t **out, int flags,
     FT_LA_XOR_EMIT(out, flags, flags, temp);
 }
 
+/* The 16-bit double shifts mask the count to five bits. Rotate the two
+ * words together, including when the count passes the width of one word. */
+static void ft_emit_double_shift16(uint32_t **out, bool left, bool immediate,
+                                   unsigned count, bool skip_flags)
+{
+    FT_LA_BSTRINS_D_EMIT(out, la_t0, la_t1, 31, 16);
+    if (immediate) {
+        FT_LA_ROTRI_W_EMIT(out, la_t2, la_t0, left ? 32 - count : count);
+    } else {
+        int rotation = la_t4;
+        if (left) {
+            FT_LA_SUB_W_EMIT(out, la_t3, la_zero, la_t4);
+            rotation = la_t3;
+        }
+        FT_LA_ROTR_W_EMIT(out, la_t2, la_t0, rotation);
+    }
+    if (!skip_flags) {
+        /* The last bit shifted out and the previous sign are still in
+         * the rotated pair. PF, ZF and SF depend on the low word alone. */
+        FT_LA_BSTRPICK_D_EMIT(out, la_t0, la_t2, left ? 16 : 31,
+                              left ? 16 : 31);
+        FT_LA_SRLI_W_EMIT(out, la_t1, la_t2, left ? 16 : 14);
+        FT_LA_SRLI_W_EMIT(out, la_t3, la_t2, 15);
+        FT_LA_XOR_EMIT(out, la_t1, la_t1, la_t3);
+        FT_LA_BSTRINS_D_EMIT(out, la_t0, la_t1, 11, 11);
+        ft_emit_raw(out, ft_gpr2(FT_LA_OPCODE_X86AND_H, la_t2, la_t2));
+        FT_LA_X86MTFLAG_EMIT(out, la_t0, 0x21);
+    }
+}
+
 static int ft_emit_shld_shrd_template(const FastTemplateFields *fields, TranslationBlock *tb, target_ulong pc, uint32_t *code)
 {
     uint32_t *out = code;
@@ -1322,13 +1352,18 @@ static int ft_emit_shld_shrd_template(const FastTemplateFields *fields, Translat
     }
     ft_emit_mask_to_width(&out, la_t1, ft_gpr(src), width);
 
-    if (is_imm) {
+    if (width == 16) {
+        if (!is_imm) {
+            FT_LA_ANDI_EMIT(&out, la_t4, ft_gpr(rcx_index), mask);
+            count_zero_branch = out;
+            FT_LA_BEQ_EMIT(&out, la_t4, la_zero, 0);
+        }
+        ft_emit_double_shift16(&out, is_shld, is_imm, fields->imm & mask,
+                               fields->skip_flags);
+    } else if (is_imm) {
         int count = fields->imm & mask;
         int other_count;
 
-        if (count >= width) {
-            return 0;
-        }
         other_count = width - count;
         if (is_shld) {
             FT_LA_SLLI_D_EMIT(&out, la_t2, la_t0, count);
