@@ -362,22 +362,9 @@ static int ft_emit_jcc_exit_or_self_loop(TranslationBlock *tb, uint32_t *code,
                                          bool taken_if_equal)
 {
 #ifdef QUICKTRANS_LATU
-    if (!ft_tu_mode_enabled() &&
-        fields->imm64 == tb->pc && pc + fields->size == tb->pc + tb->size) {
-        uint32_t *tb_code = (uint32_t *)tb->tc.ptr;
-
-        if (taken_if_equal) {
-            FT_LA_BNE_EMIT(out, lhs, rhs, 2);
-        } else {
-            FT_LA_BEQ_EMIT(out, lhs, rhs, 2);
-        }
-        FT_LA_B_EMIT(out, tb_code - *out);
-        if (!ft_emit_direct_link_exit(tb, out, 0, pc + fields->size, la_t1)) {
-            return 0;
-        }
-        return *out - code;
-    }
-
+    /* Self edges must use registered exits too: asynchronous signals break
+     * these links to reach the guest signal dispatcher. A raw backward branch
+     * cannot be unlinked and can defer delivery for an unbounded loop. */
     {
         uint32_t *start = *out;
         FastJccDirectExitLayout layout =
