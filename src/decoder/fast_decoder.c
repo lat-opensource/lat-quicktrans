@@ -880,7 +880,7 @@ static int dispatch_instruction(FDState *s, int op, struct la_dt_insn *info)
 
     /* ----- XLATB (0xd7) ----- */
     case 0xd7:
-        if (!s->mode || s->prefix[0] || s->prefix[1] ||
+        if (s->aflag == 16 || s->prefix[0] || s->prefix[1] ||
             (s->prefix[2] && s->prefix[2] != dt_X86_PREFIX_OPSIZE)) {
             return 0;
         }

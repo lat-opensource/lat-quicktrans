@@ -1652,6 +1652,18 @@ static void test_xlatb_ignored_opsize_prefix(void)
                                    &info, 1),
           "primary operand-size XLATB must decode");
     CHECK(info.id == dt_X86_INS_XLATB, "wrong primary operand-size XLATB id");
+
+    static const uint8_t plain[] = {0xd7};
+    static const uint8_t addr16[] = {0x67, 0xd7};
+    decoded = decode32(plain, sizeof(plain), 0x30000, &matched);
+    CHECK(matched && decoded.fields.kind == FT_XLATB && decoded.fields.addr32,
+          "compat XLATB uses EBX without an address override");
+    CHECK(fast_decoder_get_primary(plain, sizeof(plain), 0x30000, &info, 0) &&
+          info.x86.addr_size == 4, "compat XLATB address size must be 4");
+    decode32(addr16, sizeof(addr16), 0x30000, &matched);
+    CHECK(!matched, "the XLATB emitter cannot use a 16-bit address");
+    CHECK(!fast_decoder_get_primary(addr16, sizeof(addr16), 0x30000, &info, 0),
+          "primary XLATB must reject unsupported 16-bit addressing too");
 }
 
 static void test_mmx_pmovmskb_rexr(void)

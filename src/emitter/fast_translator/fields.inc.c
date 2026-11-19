@@ -1160,6 +1160,9 @@ bool fast_template_fill_fields_from_info(const FastTemplateDesc *tmpl,
     }
 
     switch (tmpl->kind) {
+    case FT_XLATB:
+        fields->addr32 = info->x86.addr_size == 4;
+        break;
     case FT_MOV_R64_RM64:
     case FT_LEA_R64_M:
     case FT_LEA_R32_M:

@@ -163,7 +163,7 @@ static inline FastDecoderFTMatch fd_ft_try_gpr(FDState *s, uint8_t opcode0,
     }
 
     if (!two_byte && opcode0 == 0xd7) {
-        if (!s->mode || s->prefix[0] || s->prefix[1] ||
+        if (s->aflag == 16 || s->prefix[0] || s->prefix[1] ||
             (s->prefix[2] && s->prefix[2] != dt_X86_PREFIX_OPSIZE)) {
             return FD_FT_NO_MATCH;
         }

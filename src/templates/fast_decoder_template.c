@@ -5080,6 +5080,7 @@ const FastTemplateDesc *fast_template_find_decoded(
                &fast_templates[FT_CWD] : &fast_templates[FT_CDQ];
     }
     if (opcode0 == 0xd7 && info->id == dt_X86_INS_XLATB &&
+        (info->x86.addr_size == 4 || info->x86.addr_size == 8) &&
         info->x86.prefix[0] == 0 && info->x86.prefix[1] == 0 &&
         (info->x86.prefix[2] == 0 ||
          info->x86.prefix[2] == dt_X86_PREFIX_OPSIZE)) {
