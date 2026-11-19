@@ -6,6 +6,21 @@
 
 /* Main FastTemplateFields emitter dispatch. */
 
+static void ft_emit_reciprocal_estimate(uint32_t **out, uint32_t opcode,
+                                        int dst, int src)
+{
+#ifdef QUICKTRANS_LATU
+    /* x86 RCP/RSQRT raise no SIMD exceptions. Mask traps for the host
+     * operation, then restore its caller's sticky flags, causes and enables. */
+    FT_LA_MOVFCSR2GR_EMIT(out, la_t0, 0);
+    FT_LA_MOVGR2FCSR_EMIT(out, 1, la_zero);
+#endif
+    ft_emit_raw(out, ft_gpr2_rd_rj(opcode, dst, src));
+#ifdef QUICKTRANS_LATU
+    FT_LA_MOVGR2FCSR_EMIT(out, 0, la_t0);
+#endif
+}
+
 /* Emit a boolean condition from the preserved operands of an instptn head. */
 static bool ft_emit_direct_condition(uint32_t **out,
                                      const FastTemplateFields *fields,
@@ -4316,14 +4331,15 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
             }
             goto simd_bin_done;
         }
-        if (id == dt_X86_INS_SQRTPD || id == dt_X86_INS_SQRTPS ||
-            id == dt_X86_INS_RCPPS || id == dt_X86_INS_RSQRTPS) {
-            bool check = fpe && (id == dt_X86_INS_SQRTPD ||
-                                 id == dt_X86_INS_SQRTPS);
-            int result = check ? ft_vscratch + 7 : ft_xmm(dst);
+        if (id == dt_X86_INS_RCPPS || id == dt_X86_INS_RSQRTPS) {
+            ft_emit_reciprocal_estimate(&out, la_opcode, ft_xmm(dst), src);
+            goto simd_bin_done;
+        }
+        if (id == dt_X86_INS_SQRTPD || id == dt_X86_INS_SQRTPS) {
+            int result = fpe ? ft_vscratch + 7 : ft_xmm(dst);
 
             ft_emit_raw(&out, ft_gpr2_rd_rj(la_opcode, result, src));
-            if (check) {
+            if (fpe) {
                 ft_emit_lats_simd_fpe_check(&out, tb, pc);
                 FT_LA_VOR_V_EMIT(&out, ft_xmm(dst), result, result);
             }
@@ -4910,10 +4926,8 @@ simd_bin_done:
             FT_LA_FSQRT_S_EMIT(&out, scalar_result, src);
             break;
         case dt_X86_INS_RCPSS:
-            FT_LA_FRECIP_S_EMIT(&out, ft_vscratch, src);
-            break;
         case dt_X86_INS_RSQRTSS:
-            FT_LA_FRSQRT_S_EMIT(&out, ft_vscratch, src);
+            ft_emit_reciprocal_estimate(&out, la_opcode, scalar_result, src);
             break;
         case dt_X86_INS_ADDSD:
             FT_LA_FADD_D_EMIT(&out, scalar_result, ft_xmm(dst), src);
