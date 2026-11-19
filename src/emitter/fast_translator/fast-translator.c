@@ -2558,8 +2558,7 @@ static bool ft_float_jcc_kind(int id, FastDirectBranchKind *kind)
     case dt_X86_INS_JAE: *kind = FT_DIRECT_BRANCH_GEU; return true;
     case dt_X86_INS_JBE: *kind = FT_DIRECT_BRANCH_LEU; return true;
     case dt_X86_INS_JA:  *kind = FT_DIRECT_BRANCH_GTU; return true;
-    case dt_X86_INS_JP:  *kind = FT_DIRECT_BRANCH_BIT_SET; return true;
-    case dt_X86_INS_JNP: *kind = FT_DIRECT_BRANCH_BIT_CLEAR; return true;
+    /* The LATS end-of-block scanner does not admit JP or JNP. */
     default: return false;
     }
 }
@@ -2588,16 +2587,16 @@ static void ft_analyze_float_jcc(FastTemplateFields *fields, int count)
     tail->direct_float_result = true;
 }
 
-static bool ft_float_gap_preserves_xmm(const FastTemplateFields *f)
+static bool ft_float_gap_preserves_fcc(const FastTemplateFields *f)
 {
     switch (f->kind) {
     case FT_NOP_MULTI:
+    case FT_MOV_R32_IMM32:
+    case FT_LEA_R64_M:
     case FT_MOV_RM64_R64:
     case FT_MOV_RM32_R32:
     case FT_MOV_R64_RM64:
     case FT_MOV_R32_RM32:
-    case FT_MOV_R32_IMM32:
-    case FT_LEA_R64_M:
         return true;
     default:
         return false;
@@ -2614,55 +2613,55 @@ static void ft_analyze_float_xx_jcc(FastTemplateFields *fields,
     (void)count;
     return;
 #else
-    for (int tail = 1; tail < count; ++tail) {
-        FastTemplateFields *jcc = &fields[tail];
-        FastDirectBranchKind kind;
-        if (jcc->kind != FT_JCC_REL || !ft_float_jcc_kind(jcc->id, &kind))
+    if (count < 3) return;
+    int tail = count - 1;
+    FastTemplateFields *jcc = &fields[tail];
+    FastDirectBranchKind kind;
+    if (jcc->kind != FT_JCC_REL || !ft_float_jcc_kind(jcc->id, &kind))
+        return;
+    int first = tail > 4 ? tail - 4 : 0;
+    for (int head = tail - 2; head >= first; --head) {
+        FastTemplateFields *cmp = &fields[head];
+        bool is_double, qnan;
+        int id;
+        uint64_t bit;
+        if (cmp->kind != FT_SIMD_SCALAR_CMP_XMM_XMMM ||
+            !ft_simd_scalar_cmp_opcode_info(cmp->prefix0, cmp->prefix2,
+                                             cmp->opcode1, &is_double,
+                                             &qnan, &id))
             continue;
-        int first = tail > 4 ? tail - 4 : 0;
-        for (int head = tail - 1; head >= first; --head) {
-            FastTemplateFields *cmp = &fields[head];
-            bool is_double, qnan;
-            int id;
-            uint64_t bit;
-            if (cmp->kind != FT_SIMD_SCALAR_CMP_XMM_XMMM ||
-                !ft_simd_scalar_cmp_opcode_info(cmp->prefix0, cmp->prefix2,
-                                                 cmp->opcode1, &is_double,
-                                                 &qnan, &id))
-                continue;
-            switch (id) {
-            case dt_X86_INS_COMISD: bit = FT_INSTPTN_COMISD_XX_JCC; break;
-            case dt_X86_INS_COMISS: bit = FT_INSTPTN_COMISS_XX_JCC; break;
-            case dt_X86_INS_UCOMISD: bit = FT_INSTPTN_UCOMISD_XX_JCC; break;
-            case dt_X86_INS_UCOMISS: bit = FT_INSTPTN_UCOMISS_XX_JCC; break;
-            default: continue;
-            }
-            if (!ft_instptn_enabled(bit))
-                continue;
-            (void)is_double;
-            (void)qnan;
-            bool safe = true;
-            for (int gap = head + 1; gap < tail; ++gap) {
-                FastTemplateEflagMasks masks = ft_template_eflag_masks(&fields[gap], meta[gap]);
-                if (masks.use || masks.def || (meta[gap] && meta[gap]->terminal_exit) ||
-                    !ft_float_gap_preserves_xmm(&fields[gap])) {
-                    safe = false;
-                    break;
-                }
-            }
-            if (!safe)
-                continue;
-            /*
-             * The comparison still runs here, including its exception check.
-             * System-mode a4 is a legacy pattern temporary, not a guest GPR.
-             * The restricted gap above contains no emitter that clobbers it.
-             */
-            cmp->direct_float_xx = true;
-            cmp->direct_branch_kind = kind;
-            jcc->direct_float_xx = true;
-            jcc->direct_branch_kind = kind;
-            break;
+        switch (id) {
+        case dt_X86_INS_COMISD: bit = FT_INSTPTN_COMISD_XX_JCC; break;
+        case dt_X86_INS_COMISS: bit = FT_INSTPTN_COMISS_XX_JCC; break;
+        case dt_X86_INS_UCOMISD: bit = FT_INSTPTN_UCOMISD_XX_JCC; break;
+        case dt_X86_INS_UCOMISS: bit = FT_INSTPTN_UCOMISS_XX_JCC; break;
+        default: continue;
         }
+        if (!ft_instptn_enabled(bit))
+            continue;
+        (void)is_double;
+        (void)qnan;
+        bool safe = true;
+        for (int gap = head + 1; gap < tail; ++gap) {
+            FastTemplateEflagMasks masks = ft_template_eflag_masks(&fields[gap], meta[gap]);
+            if (masks.use || masks.def || (meta[gap] && meta[gap]->terminal_exit) ||
+                !ft_float_gap_preserves_fcc(&fields[gap])) {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe)
+            continue;
+        /*
+         * The comparison still runs here, including its exception check.
+         * The integer instructions in the gap preserve the floating-point
+         * condition registers. A restarted Jcc can also use guest EFLAGS.
+         */
+        cmp->direct_float_xx = true;
+        cmp->direct_branch_kind = kind;
+        jcc->direct_float_xx = true;
+        jcc->direct_branch_kind = kind;
+        break;
     }
 #endif
 }

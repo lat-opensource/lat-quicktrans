@@ -3002,13 +3002,28 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
 #endif
         if (fields->direct_float_xx) {
 #ifdef CONFIG_SOFTMMU
+            FastDirectBranchKind kind = fields->direct_branch_kind;
+
             cond_lhs = la_a4;
-            cond_rhs = la_zero;
+            taken_if_equal = kind == FT_DIRECT_BRANCH_NE ||
+                             kind == FT_DIRECT_BRANCH_GEU ||
+                             kind == FT_DIRECT_BRANCH_GTU;
+#ifdef CONFIG_LATX_TU
+            /* TU link slots use integer branches. Read FCC at the Jcc so
+             * integer scratch registers are free throughout the gap. */
+            if (tb && tb->s_data && ft_tu_direct_jcc_enabled()) {
+                FT_LA_MOVCF2GR_EMIT(&out, cond_lhs, ft_float_branch_fcc(kind));
+            }
+#endif
 #else
             return 0;
 #endif
         } else if (fields->direct_float_result) {
+#ifdef CONFIG_SOFTMMU
+            cond_lhs = la_a4;
+#else
             cond_lhs = la_t2;
+#endif
             cond_rhs = la_zero;
         } else if (fields->direct_cmp_lhs_gpr >= 0) {
             cond_lhs = ft_gpr(fields->direct_cmp_lhs_gpr);
@@ -5034,19 +5049,17 @@ simd_bin_done:
         FT_LA_X86MTFLAG_EMIT(&out, flags, 0x3f);
         if (fields->direct_float_xx) {
 #ifdef CONFIG_SOFTMMU
-            switch (fields->direct_branch_kind) {
-            case FT_DIRECT_BRANCH_EQ: FT_LA_OR_EMIT(&out, la_a4, eq, la_zero); break;
-            case FT_DIRECT_BRANCH_NE: FT_LA_XORI_EMIT(&out, la_a4, eq, 1); break;
-            case FT_DIRECT_BRANCH_LTU: FT_LA_OR_EMIT(&out, la_a4, lt, la_zero); break;
-            case FT_DIRECT_BRANCH_GEU: FT_LA_XORI_EMIT(&out, la_a4, lt, 1); break;
-            case FT_DIRECT_BRANCH_LEU: FT_LA_OR_EMIT(&out, la_a4, lt, eq); break;
-            case FT_DIRECT_BRANCH_GTU:
-                FT_LA_OR_EMIT(&out, la_a4, lt, eq);
-                FT_LA_XORI_EMIT(&out, la_a4, la_a4, 1);
-                break;
-            case FT_DIRECT_BRANCH_BIT_SET: FT_LA_OR_EMIT(&out, la_a4, unordered, la_zero); break;
-            case FT_DIRECT_BRANCH_BIT_CLEAR: FT_LA_XORI_EMIT(&out, la_a4, unordered, 1); break;
-            default: return 0;
+            /* EQ/NE and B/AE can reuse the comparisons above. BE/A need
+             * unordered-or-less-or-equal after the guest flags are saved. */
+            if (fields->direct_branch_kind == FT_DIRECT_BRANCH_LEU ||
+                fields->direct_branch_kind == FT_DIRECT_BRANCH_GTU) {
+                int cond = FCMP_COND_CULE + (qnan ? 1 : 0);
+
+                if (is_double) {
+                    FT_LA_FCMP_COND_D_EMIT(&out, 0, ft_xmm(lhs), rhs, cond);
+                } else {
+                    FT_LA_FCMP_COND_S_EMIT(&out, 0, ft_xmm(lhs), rhs, cond);
+                }
             }
 #else
             return 0;

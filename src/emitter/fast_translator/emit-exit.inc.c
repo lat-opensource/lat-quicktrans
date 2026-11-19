@@ -314,6 +314,14 @@ static FastJccDirectExitLayout ft_prepare_jcc_direct_exit(TranslationBlock *tb,
 }
 #endif
 
+#ifdef CONFIG_SOFTMMU
+static int ft_float_branch_fcc(FastDirectBranchKind kind)
+{
+    /* FCC2 holds unordered-or-less. FCC0 holds the other predicates. */
+    return kind == FT_DIRECT_BRANCH_LTU || kind == FT_DIRECT_BRANCH_GEU ? 2 : 0;
+}
+#endif
+
 static int ft_emit_jcc_exit_or_self_loop(TranslationBlock *tb, uint32_t *code,
                                          uint32_t **out, target_ulong pc,
                                          const FastTemplateFields *fields,
@@ -368,13 +376,17 @@ static int ft_emit_jcc_exit_or_self_loop(TranslationBlock *tb, uint32_t *code,
         return 0;
     }
 
-    taken_branch = *out;
-    if (taken_if_equal) {
-        FT_LA_BEQ_EMIT(out, lhs, rhs, 0);
-    } else {
-        FT_LA_BNE_EMIT(out, lhs, rhs, 0);
-    }
+    taken_branch = (*out)++;
     ft_emit_lats_direct_link_exit(tb, out, 0, next, lhs);
+#ifdef CONFIG_SOFTMMU
+    if (fields->direct_float_xx) {
+        int fcc = ft_float_branch_fcc(fields->direct_branch_kind);
+        int offset = *out - taken_branch;
+
+        *taken_branch = taken_if_equal ? FT_LA_BCEQZ(fcc, offset) :
+                                         FT_LA_BCNEZ(fcc, offset);
+    } else
+#endif
     if (taken_if_equal) {
         *taken_branch = FT_LA_BEQ(lhs, rhs, *out - taken_branch);
     } else {
