@@ -2853,20 +2853,15 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
         break;
     case FT_MOV_RM8_IMM8:
     {
-        int dst_or_base;
-
         if (fields->modrm_reg != 0 ||
             fields->imm < 0 || fields->imm > 0xff) {
             return 0;
         }
         if (fields->modrm_mod == 3) {
-            dst_or_base = ft_modrm_rm_index(fields);
-            if ((fields->rex < 0 && fields->modrm_rm >= 4) ||
-                dst_or_base >= GPR_NUM) {
+            FT_LA_ORI_EMIT(&out, la_t0, la_zero, fields->imm);
+            if (!ft_emit_store_rm8(&out, fields, pc, la_t0)) {
                 return 0;
             }
-            FT_LA_ORI_EMIT(&out, la_t0, la_zero, fields->imm);
-            FT_LA_BSTRINS_D_EMIT(&out, ft_gpr(dst_or_base), la_t0, 7, 0);
         } else if (!fields->addr32 && fields->modrm_mod == 0 &&
                    fields->modrm_rm == 5) {
             target_ulong target = pc + fields->size + fields->disp;

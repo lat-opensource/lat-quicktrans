@@ -1222,10 +1222,6 @@ static bool fast_template_emit_constraints_ok(const FastTemplateFields *fields)
         if (fields->imm < 0 || fields->imm > 0xff) {
             return false;
         }
-        if (fields->rex < 0 && fields->modrm_mod == 3 &&
-            fields->modrm_rm >= 4) {
-            return false;
-        }
         if (fields->segment >= 0) {
             return true;
         }
