@@ -53,7 +53,7 @@ def main() -> int:
     latu_partial = partial.split("#ifdef QUICKTRANS_LATU", 1)[1].split(
         "#else", 1)[0]
     for slot in ("TU_TB_INDEX_NEXT", "TU_TB_INDEX_TARGET"):
-        expected = f"tb->tu_jmp[{slot}] = TB_JMP_RESET_OFFSET_INVALID;"
+        expected = f"FT_TU_DATA(tb)->tu_jmp[{slot}] = TB_JMP_RESET_OFFSET_INVALID;"
         if expected not in latu_partial:
             errors.append(f"LATU partial JCC must clear {slot}")
     if "set_use_tu_jmp(tb)" in latu_partial:
