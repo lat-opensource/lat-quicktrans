@@ -136,7 +136,6 @@ static bool ft_emit_load_rm16(uint32_t **out, const FastTemplateFields *fields,
     }
 }
 
-#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
 /* Load a zero-extended word directly into the consumer's temporary.  Keep
  * byte-wise loads for odd RIP-relative addresses, including fault behavior. */
 static bool ft_emit_load_rm16_zext(uint32_t **out,
@@ -170,7 +169,6 @@ static bool ft_emit_load_rm16_zext(uint32_t **out,
     }
     return true;
 }
-#endif
 
 static bool ft_emit_load_rm32(uint32_t **out, const FastTemplateFields *fields,
                               target_ulong pc, int *src_reg)
@@ -219,7 +217,6 @@ static bool ft_emit_load_rm32(uint32_t **out, const FastTemplateFields *fields,
     }
 }
 
-#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
 /* Preserve the existing byte-wise RIP-relative unaligned access sequence. */
 static bool ft_emit_load_rm32_zext(uint32_t **out,
                                   const FastTemplateFields *fields,
@@ -252,7 +249,6 @@ static bool ft_emit_load_rm32_zext(uint32_t **out,
     }
     return true;
 }
-#endif
 
 static bool ft_emit_load_rm8(uint32_t **out, const FastTemplateFields *fields,
                              target_ulong pc, int *src_reg)

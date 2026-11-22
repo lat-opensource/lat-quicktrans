@@ -658,7 +658,6 @@ static int ft_emit_push_pop_template(const FastTemplateFields *fields, Translati
     return (out - code);
 }
 
-#ifdef QUICKTRANS_LATU
 static uint32_t ft_compat_direct_target(const FastTemplateFields *fields,
                                         target_ulong next_pc)
 {
@@ -670,7 +669,7 @@ static uint32_t ft_compat_direct_target(const FastTemplateFields *fields,
     return target;
 }
 
-/* Wine's compatibility CS uses guest return addresses on its 32-bit stack. */
+/* Near transfers on a flat 32-bit stack use guest return addresses. */
 static int ft_try_emit_compat_near_transfer(const FastTemplateFields *fields,
                                         TranslationBlock *tb,
                                         target_ulong pc, uint32_t *code)
@@ -679,6 +678,23 @@ static int ft_try_emit_compat_near_transfer(const FastTemplateFields *fields,
     int esp = ft_gpr(rsp_index);
     unsigned slot = fields->prefix2 == dt_X86_PREFIX_OPSIZE ? 2 : 4;
     uint32_t next = pc + fields->size;
+
+#ifndef QUICKTRANS_LATU
+    switch (fields->kind) {
+    case FT_CALL_REL32:
+    case FT_CALL_RM64:
+    case FT_RET:
+    case FT_RET_IMM16:
+        /* The stack and indirect operand accesses below use flat addresses. */
+        if (!(tb->flags & HF_CS32_MASK) || !(tb->flags & HF_SS32_MASK) ||
+            (tb->flags & HF_ADDSEG_MASK) || tb->cs_base) {
+            return 0;
+        }
+        break;
+    default:
+        return -1;
+    }
+#endif
 
     switch (fields->kind) {
     case FT_RET:
@@ -698,6 +714,11 @@ static int ft_try_emit_compat_near_transfer(const FastTemplateFields *fields,
             FT_LA_ADD_D_EMIT(&out, esp, esp, la_t0);
         }
         FT_LA_BSTRPICK_D_EMIT(&out, esp, esp, 31, 0);
+#ifndef QUICKTRANS_LATU
+        if (!(tb->flags & HF_INHIBIT_IRQ_MASK)) {
+            ft_emit_lats_soft_ras_pop(tb, &out, la_r21);
+        }
+#endif
         return ft_emit_helper_indirect_exit(&out, tb, code, la_r21, true);
     }
     case FT_CALL_RM64:
@@ -715,6 +736,10 @@ static int ft_try_emit_compat_near_transfer(const FastTemplateFields *fields,
     }
 
     if (fields->kind == FT_CALL_REL32 || fields->kind == FT_CALL_RM64) {
+#ifndef QUICKTRANS_LATU
+        ft_emit_jrra_call_metadata(tb, &out, (uintptr_t)tb->tc.ptr, next,
+                                   fields->kind == FT_CALL_REL32);
+#endif
         FT_LA_ADDI_D_EMIT(&out, la_t0, esp, -(int)slot);
         FT_LA_BSTRPICK_D_EMIT(&out, la_t0, la_t0, 31, 0);
         ft_emit_li32(&out, la_t1, next);
@@ -724,12 +749,17 @@ static int ft_try_emit_compat_near_transfer(const FastTemplateFields *fields,
             FT_LA_ST_W_EMIT(&out, la_t1, la_t0, 0);
         }
         FT_LA_OR_EMIT(&out, esp, la_t0, la_zero);
+#ifndef QUICKTRANS_LATU
+        lsenv->tr_data->pc_next = next;
+        ft_emit_lats_soft_ras_push(tb, &out, next);
+#endif
     }
     if (fields->kind == FT_CALL_RM64 || fields->kind == FT_JMP_RM64) {
         return ft_emit_helper_indirect_exit(&out, tb, code, la_r21, false);
     }
-    ft_emit_direct_link_exit(tb, &out, 0, ft_compat_direct_target(fields, next),
-                             la_t1);
+    if (!ft_emit_direct_link_exit(tb, &out, 0,
+                                  ft_compat_direct_target(fields, next), la_t1)) {
+        return 0;
+    }
     return out - code;
 }
-#endif

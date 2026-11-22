@@ -153,13 +153,13 @@ static int emit_template_fields_uncached(const FastTemplateFields *fields,
 {
     uint32_t *out = code;
 
-#ifdef QUICKTRANS_LATU
     if (tb && !(tb->flags & HF_CS64_MASK)) {
         int emitted = ft_try_emit_compat_near_transfer(fields, tb, pc, code);
         if (emitted >= 0) {
             return emitted;
         }
     }
+#ifdef QUICKTRANS_LATU
     if (ft_emit_zero_code_allowed(fields)) {
         return 0;
     }

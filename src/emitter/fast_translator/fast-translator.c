@@ -3701,6 +3701,10 @@ static void ft_primary_update_last_info(TranslationBlock *tb,
         target_pc = fields->imm64;
         break;
     case FT_CALL_REL32:
+        last_ir1_type = (int8_t)IR1_TYPE_CALL;
+        target_pc = (tb->flags & HF_CS64_MASK) ? next_pc + fields->imm :
+                    ft_compat_direct_target(fields, next_pc);
+        break;
     case FT_HELPER_LCALL:
         last_ir1_type = (int8_t)IR1_TYPE_CALL;
         target_pc = next_pc + fields->imm;
@@ -3739,7 +3743,7 @@ static void ft_primary_update_last_info(TranslationBlock *tb,
     }
 #ifdef QUICKTRANS_LATU
     if (!(tb->flags & HF_CS64_MASK) &&
-        (fields->kind == FT_CALL_REL32 || fields->kind == FT_JMP_REL32)) {
+        fields->kind == FT_JMP_REL32) {
         target_pc = ft_compat_direct_target(fields, next_pc);
     }
     tb->s_data->next_pc = next_pc;
