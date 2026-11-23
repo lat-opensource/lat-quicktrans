@@ -1321,9 +1321,8 @@ static inline FastDecoderFTMatch fd_ft_try_sse(FDState *s, uint8_t opcode0,
             if (!fd_ft_read_modrm(s, &decoded->fields)) {
                 return FD_FT_REJECT;
             }
-            if (opcode1 == 0x6e && s->rex_w &&
-                decoded->fields.modrm_mod != 3) {
-                kind = FT_MOVQ_XMM_RM64;
+            if (s->rex_w && decoded->fields.modrm_mod != 3) {
+                kind = opcode1 == 0x6e ? FT_MOVQ_XMM_RM64 : FT_MOVQ_RM64_XMM;
                 decoded->fields.kind = kind;
             }
             return fd_ft_finish_match(decoded, s, kind, false);
