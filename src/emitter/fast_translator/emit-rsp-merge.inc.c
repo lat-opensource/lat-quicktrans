@@ -475,6 +475,12 @@ static bool ft_rsp_merge_transparent(const FastTemplateFields *f, int pending,
         byte = true;
         /* fall through */
     case FT_XCHG_RM32_R32: case FT_XCHG_RM64_R64:
+        /* The halfword compatibility sequence may restart the instruction.
+         * Publish RSP first, including when this address does not use RSP. */
+        if (f->modrm_mod != 3 && f->prefix2 == dt_X86_PREFIX_OPSIZE &&
+            !have_am()) {
+            return false;
+        }
         /* Memory XCHG is a single atomic swap followed by register update;
          * no retry branch or helper, and no register change on access fault. */
         return ft_rsp_merge_reg_ok(f, true, byte) &&

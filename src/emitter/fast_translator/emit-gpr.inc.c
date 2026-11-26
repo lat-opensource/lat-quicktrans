@@ -1430,13 +1430,9 @@ static int ft_emit_not_template(const FastTemplateFields *fields, TranslationBlo
         ft_preserve_cmpxchg_addr(&out, &addr);
         if (width == 32 || width == 64) {
             FT_LA_ADDI_D_EMIT(&out, la_t2, la_zero, -1);
-            ft_emit_raw(&out,
-                        ft_gpr3(ft_atomic_opcode(fields,
-                                                 width == 64 ?
-                                                 FT_LA_OPCODE_AMXOR_DB_D :
-                                                 FT_LA_OPCODE_AMXOR_DB_W),
-                                addr == la_t0 ? la_t1 : la_t0,
-                                addr, la_t2));
+            ft_emit_atomic_op(&out, fields,
+                              width == 64 ? FT_LA_OPCODE_AMXOR_DB_D : FT_LA_OPCODE_AMXOR_DB_W,
+                              addr == la_t0 ? la_t1 : la_t0, la_t2, addr);
             return out - code;
         }
 
@@ -1449,12 +1445,9 @@ static int ft_emit_not_template(const FastTemplateFields *fields, TranslationBlo
         ft_bind_branch_label(&retry, out);
         FT_LA_NOR_EMIT(&out, la_t2, old, la_zero);
         FT_LA_OR_EMIT(&out, la_t1, old, la_zero);
-        ft_emit_raw(&out,
-                    ft_gpr3(ft_atomic_opcode(fields,
-                                             width == 8 ?
-                                             FT_LA_OPCODE_AMCAS_DB_B :
-                                             FT_LA_OPCODE_AMCAS_DB_H),
-                            la_t1, addr, la_t2));
+        ft_emit_atomic_op(&out, fields,
+                              width == 8 ? FT_LA_OPCODE_AMCAS_DB_B : FT_LA_OPCODE_AMCAS_DB_H,
+                              la_t1, la_t2, addr);
         ft_emit_zero_extend_atomic_old(&out, la_t1, width);
         ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ,
                                    la_t1, old, &done);
@@ -1662,8 +1655,7 @@ static int ft_emit_neg_template(const FastTemplateFields *fields, TranslationBlo
                                           FT_LA_OPCODE_SUB_W,
                             la_t2, la_zero, old));
         FT_LA_OR_EMIT(&out, la_t1, old, la_zero);
-        ft_emit_raw(&out, ft_gpr3(ft_atomic_opcode(fields, cas_op),
-                                la_t1, addr, la_t2));
+        ft_emit_atomic_op(&out, fields, cas_op, la_t1, la_t2, addr);
         ft_emit_zero_extend_atomic_old(&out, la_t1, width);
         ft_emit_branch_placeholder(&out, &done_fixup, FT_BRANCH_BEQ,
                                    la_t1, old, &done);
@@ -1807,8 +1799,7 @@ static int ft_emit_inc_dec_template(const FastTemplateFields *fields, Translatio
             }
             ft_preserve_cmpxchg_addr(&out, &addr);
             FT_LA_ADDI_D_EMIT(&out, la_t2, la_zero, is_inc ? 1 : -1);
-            ft_emit_raw(&out, ft_gpr3(ft_atomic_opcode(fields, atomic_op),
-                                    la_t1, addr, la_t2));
+            ft_emit_atomic_op(&out, fields, atomic_op, la_t1, la_t2, addr);
             if (!fields->skip_flags) {
                 ft_emit_raw(&out,
                             ft_gpr2(is_inc ?

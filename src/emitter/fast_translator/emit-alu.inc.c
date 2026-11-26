@@ -430,12 +430,9 @@ static bool ft_emit_locked_alu(uint32_t **out,
         ft_bind_branch_label(&retry, *out);
         ft_emit_raw(out, ft_gpr3(data_op, desired, old, rhs));
         FT_LA_OR_EMIT(out, expected, old, la_zero);
-        ft_emit_raw(out,
-                    ft_gpr3(ft_atomic_opcode(fields,
-                                             fields->alu_width == 8 ?
-                                             FT_LA_OPCODE_AMCAS_DB_B :
-                                             FT_LA_OPCODE_AMCAS_DB_H),
-                            expected, addr, desired));
+        ft_emit_atomic_op(out, fields,
+                              fields->alu_width == 8 ? FT_LA_OPCODE_AMCAS_DB_B : FT_LA_OPCODE_AMCAS_DB_H,
+                              expected, desired, addr);
         ft_emit_zero_extend_atomic_old(out, expected, fields->alu_width);
         ft_emit_branch_placeholder(out, &done_fixup, FT_BRANCH_BEQ,
                                    expected, old, &done);
@@ -462,8 +459,7 @@ static bool ft_emit_locked_alu(uint32_t **out,
                             value, la_zero, rhs));
     }
     old = addr == la_t0 ? la_t3 : la_t0;
-    ft_emit_raw(out, ft_gpr3(ft_atomic_opcode(fields, atomic_op),
-                            old, addr, value));
+    ft_emit_atomic_op(out, fields, atomic_op, old, value, addr);
     if (fields->alu_op == FT_ALU_SBB && !fields->skip_flags) {
         uint32_t add_op = fields->alu_width == 64 ?
                           FT_LA_OPCODE_ADD_D : FT_LA_OPCODE_ADD_W;

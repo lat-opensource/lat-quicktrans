@@ -316,11 +316,8 @@ static bool ft_emit_xadd_rm(uint32_t **out, const FastTemplateFields *fields,
         int old = addr == la_t0 ? la_t4 : la_t0;
 
         /* AM* traps on 3A6000 when rd aliases the address register. */
-        ft_emit_raw(out,
-                    ft_gpr3(ft_atomic_opcode(fields,
-                                             is64 ? FT_LA_OPCODE_AMADD_DB_D :
-                                                    FT_LA_OPCODE_AMADD_DB_W),
-                            old, addr, ft_gpr(src)));
+        uint32_t op = is64 ? FT_LA_OPCODE_AMADD_DB_D : FT_LA_OPCODE_AMADD_DB_W;
+        ft_emit_atomic_op(out, fields, op, old, ft_gpr(src), addr);
         if (!fields->skip_flags) {
             ft_emit_raw(out, ft_gpr2(is64 ? FT_LA_OPCODE_X86ADD_D : FT_LA_OPCODE_X86ADD_W,
                                 old, ft_gpr(src)));
@@ -656,6 +653,47 @@ static bool ft_emit_cmpxchg16b(uint32_t **out,
     }
     ft_preserve_cmpxchg_addr(out, &addr);
 
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    if (!have_scq()) {
+        FastBranchLabel aligned = { 0 };
+        FastBranchFixup alignment_fix;
+
+        FT_LA_ANDI_EMIT(out, la_a0, addr, 15);
+        ft_emit_branch_placeholder(out, &alignment_fix, FT_BRANCH_BEQ,
+                                   la_a0, la_zero, &aligned);
+        ft_emit_raise_exception(out, pc, EXCP0D_GPF);
+        ft_bind_branch_label(&aligned, *out);
+        ft_resolve_branch_fixup(&alignment_fix);
+
+        ft_emit_require_serial(out, fields);
+        FT_LA_LD_D_EMIT(out, la_t1, addr, 0);
+        FT_LA_LD_D_EMIT(out, la_t2, addr, 8);
+        ft_emit_branch_placeholder(out, &mismatch_lo_fixup, FT_BRANCH_BNE,
+                                   la_t1, ft_gpr(rax_index), &mismatch);
+        ft_emit_branch_placeholder(out, &mismatch_hi_fixup, FT_BRANCH_BNE,
+                                   la_t2, ft_gpr(rdx_index), &mismatch);
+        FT_LA_ST_D_EMIT(out, ft_gpr(rbx_index), addr, 0);
+        FT_LA_ST_D_EMIT(out, ft_gpr(rcx_index), addr, 8);
+        if (!fields->skip_flags) {
+            FT_LA_ORI_EMIT(out, la_a0, la_zero, 0xfff);
+            FT_LA_X86MTFLAG_EMIT(out, la_a0, ZF_USEDEF_BIT);
+        }
+        ft_emit_branch_placeholder(out, &done_fixup, FT_BRANCH_B, 0, 0, &done);
+        ft_bind_branch_label(&mismatch, *out);
+        ft_resolve_branch_fixup(&mismatch_lo_fixup);
+        ft_resolve_branch_fixup(&mismatch_hi_fixup);
+        FT_LA_ST_D_EMIT(out, la_t1, addr, 0);
+        FT_LA_ST_D_EMIT(out, la_t2, addr, 8);
+        FT_LA_OR_EMIT(out, ft_gpr(rax_index), la_t1, la_zero);
+        FT_LA_OR_EMIT(out, ft_gpr(rdx_index), la_t2, la_zero);
+        if (!fields->skip_flags) {
+            FT_LA_X86MTFLAG_EMIT(out, la_zero, ZF_USEDEF_BIT);
+        }
+        ft_bind_branch_label(&done, *out);
+        ft_resolve_branch_fixup(&done_fixup);
+        return true;
+    }
+#endif
     /* CMPXCHG16B compares RDX:RAX with m128 and exchanges RCX:RBX. */
     ft_bind_branch_label(&retry, *out);
     FT_LA_LL_D_EMIT(out, la_t1, addr, 0);

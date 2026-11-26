@@ -78,13 +78,6 @@ static uint32_t ft_atomic_opcode(const FastTemplateFields *fields,
     return opcode;
 }
 
-/* Match the generated AM emitter operand order: destination, value, address. */
-static void ft_emit_atomic_op(uint32_t **out, const FastTemplateFields *fields,
-                              uint32_t opcode, int rd, int rk, int rj)
-{
-    ft_emit_raw(out, ft_gpr3(ft_atomic_opcode(fields, opcode), rd, rj, rk));
-}
-
 static bool ft_offset_fits_imm12(int offset)
 {
     return offset >= -2048 && offset <= 2047;

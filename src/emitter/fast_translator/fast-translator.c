@@ -1200,6 +1200,7 @@ static int ft_pattern_cc(const FastTemplateFields *f)
 
 #include "emit-lats-instptn.inc.c"
 #endif
+#include "emit-atomic-host.inc.c"
 #include "emit-alu.inc.c"
 
 #include "emit-bit.inc.c"
@@ -3777,6 +3778,12 @@ bool latx_fast_decode_tb_for_tu_explore(CPUArchState *env,
     if (max_insns == 1) {
         max_insns = TCG_MAX_INSNS;
     }
+#ifdef QUICKTRANS_LATU
+    /* Respect an explicit one-instruction atomic step. */
+    if ((tb_cflags(tb) & CF_COUNT_MASK) == 1) {
+        max_insns = 1;
+    }
+#endif
     if (max_insns > TCG_MAX_INSNS) {
         max_insns = TCG_MAX_INSNS;
     }
@@ -3992,6 +3999,9 @@ bool latx_fast_translate_tu_tb_cached(CPUArchState *env,
         return false;
     }
     tb->icount = count;
+#if defined(QUICKTRANS_LATU) && !defined(CONFIG_SOFTMMU)
+    emitted += ft_emit_atomic_exit_poll(tb, code);
+#endif
 
     for (int i = 0; i < count; ++i) {
         FastTranslatorTuInsnMeta *insn = &tu_meta->insns[i];
