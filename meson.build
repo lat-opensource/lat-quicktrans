@@ -65,6 +65,7 @@ install_subdir(
 install_data(
   'LICENSE',
   'LICENSES/BSD-3-Clause.txt',
+  'LICENSES/GPL-2.0-only.txt',
   'THIRD_PARTY_NOTICES.md',
   install_dir: join_paths(get_option('datadir'), 'licenses', 'quicktrans'),
 )

@@ -28,9 +28,19 @@ reference instruction descriptions. Keep generated code and references in sync.
 
 ## License
 
-Quicktrans is distributed under the MIT License. Capstone-derived definitions
-retain their BSD-3-Clause terms. See `LICENSE`, `LICENSES/BSD-3-Clause.txt`, and
-`THIRD_PARTY_NOTICES.md`; all copyright and attribution notices are retained.
+Quicktrans uses the MIT License except where individual files specify other
+terms. Capstone-derived definitions retain their BSD-3-Clause terms.
+
+Two files under `src/emitter/fast_translator/` use GPL-2.0-only.
+`emit-vpaes.inc.c` adapts the vector AES implementation from LATU's
+`tr-vpaes.c`. `emit-vpaes-entry.inc.c` integrates it into the LATU translator.
+Both ship in the source tree. They are compiled only for the LATU user-mode
+translator when `CONFIG_LATX_AVX_OPT` is undefined. The default standalone
+`libquicktrans` build excludes them.
+
+See [third-party notices](THIRD_PARTY_NOTICES.md) for attribution and the
+[MIT](LICENSE), [BSD-3-Clause](LICENSES/BSD-3-Clause.txt), and
+[GPLv2](LICENSES/GPL-2.0-only.txt) files for the full terms.
 
 ## Host integration
 
