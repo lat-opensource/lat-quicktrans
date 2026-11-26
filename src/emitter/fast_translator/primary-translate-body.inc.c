@@ -89,7 +89,9 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
 #endif
 
 #ifdef QUICKTRANS_LATU
-    if (max_insns == 1) {
+    if ((tb_cflags(tb) & CF_COUNT_MASK) == 1) {
+        max_insns = 1;
+    } else if (max_insns == 1) {
         max_insns = TCG_MAX_INSNS;
     }
 #endif
@@ -333,6 +335,8 @@ static bool FT_SPECIALIZED_NAME(CPUArchState *env,
     }
 #ifndef QUICKTRANS_LATU
     ft_code_space_activate(space);
+#elif !defined(CONFIG_SOFTMMU)
+    emitted += ft_emit_atomic_exit_poll(tb, code);
 #endif
     for (int i = 0; i < icount; ++i) {
         FastTemplateFields *fields = &fields_buf[i];
